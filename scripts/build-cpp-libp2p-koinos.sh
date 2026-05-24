@@ -31,14 +31,17 @@ require_file() {
 }
 
 find_hunter_prefix() {
-  local marker="$1"
+  local marker
   local config
-  config="$(find "$HUNTER_ROOT/_Base" -type f -path "*/$marker" -print -quit 2>/dev/null || true)"
-  [[ -n "$config" ]] || {
-    echo "could not find Hunter install marker: $marker under $HUNTER_ROOT" >&2
-    exit 1
-  }
-  printf '%s\n' "${config%%/$marker}"
+  for marker in "$@"; do
+    config="$(find "$HUNTER_ROOT/_Base" -type f -path "*/$marker" -print -quit 2>/dev/null || true)"
+    if [[ -n "$config" ]]; then
+      printf '%s\n' "${config%%/$marker}"
+      return
+    fi
+  done
+  echo "could not find Hunter install marker under $HUNTER_ROOT: $*" >&2
+  exit 1
 }
 
 require_file "$NODE_DIR/CMakeLists.hunter.txt"
@@ -59,7 +62,9 @@ cmake -S "$KOINOS_NODE_HUNTER_SOURCE" -B "$KOINOS_NODE_HUNTER_BUILD" \
   -DKOINOS_ENABLE_LIBP2P=OFF
 cmake --build "$KOINOS_NODE_HUNTER_BUILD" --target koinos_private_testnet_keygen --parallel "$JOBS"
 
-KOINOS_HUNTER_INSTALL="$(find_hunter_prefix "lib/cmake/koinos_proto/koinos_protoConfig.cmake")"
+KOINOS_HUNTER_INSTALL="$(find_hunter_prefix \
+  "lib/cmake/koinos_proto/koinos_protoConfig.cmake" \
+  "lib/cmake/koinos_proto/koinos_proto-config.cmake")"
 echo "==> Koinos Hunter install: $KOINOS_HUNTER_INSTALL"
 
 echo "==> Preparing cpp-libp2p $CPP_LIBP2P_TAG source"
@@ -85,7 +90,9 @@ cmake -S "$CPP_LIBP2P_SOURCE_DIR" -B "$CPP_LIBP2P_HUNTER_BUILD" \
   -DEXAMPLES=OFF
 cmake --build "$CPP_LIBP2P_HUNTER_BUILD" --parallel "$JOBS"
 
-CPP_AUX_HUNTER_INSTALL="$(find_hunter_prefix "lib/cmake/soralog/soralogConfig.cmake")"
+CPP_AUX_HUNTER_INSTALL="$(find_hunter_prefix \
+  "lib/cmake/soralog/soralogConfig.cmake" \
+  "lib/cmake/soralog/soralog-config.cmake")"
 echo "==> cpp-libp2p auxiliary Hunter install: $CPP_AUX_HUNTER_INSTALL"
 
 echo "==> Isolating cpp-libp2p third-party headers"
