@@ -129,6 +129,15 @@ cmake -S "$NODE_DIR" -B "$KOINOS_NODE_BUILD_DIR" \
 echo "==> Building koinos_node and private testnet keygen"
 cmake --build "$KOINOS_NODE_BUILD_DIR" --target koinos_node koinos_private_testnet_keygen --parallel "$JOBS"
 
+KOINOS_NODE_BIN="$KOINOS_NODE_BUILD_DIR/koinos_node"
+KOINOS_KEYGEN_BIN="$KOINOS_NODE_BUILD_DIR/koinos_private_testnet_keygen"
+if [[ ! -x "$KOINOS_NODE_BIN" && -x "$KOINOS_NODE_BUILD_DIR/src/koinos_node" ]]; then
+  KOINOS_NODE_BIN="$KOINOS_NODE_BUILD_DIR/src/koinos_node"
+fi
+if [[ ! -x "$KOINOS_KEYGEN_BIN" && -x "$KOINOS_NODE_BUILD_DIR/src/koinos_private_testnet_keygen" ]]; then
+  KOINOS_KEYGEN_BIN="$KOINOS_NODE_BUILD_DIR/src/koinos_private_testnet_keygen"
+fi
+
 echo "==> Done"
-echo "koinos_node: $KOINOS_NODE_BUILD_DIR/koinos_node"
-echo "keygen: $KOINOS_NODE_BUILD_DIR/koinos_private_testnet_keygen"
+echo "koinos_node: $KOINOS_NODE_BIN"
+echo "keygen: $KOINOS_KEYGEN_BIN"
