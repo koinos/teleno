@@ -22,6 +22,8 @@ CPP_LIBP2P_PATCH="${CPP_LIBP2P_PATCH:-$NODE_DIR/cmake/cpp-libp2p-koinos.patch}"
 
 export HUNTER_ROOT
 export CMAKE_POLICY_VERSION_MINIMUM="${CMAKE_POLICY_VERSION_MINIMUM:-3.5}"
+KOINOS_BOOTSTRAP_CXXFLAGS="${KOINOS_BOOTSTRAP_CXXFLAGS:--Wno-error=deprecated-declarations -DBOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED}"
+export CXXFLAGS="${KOINOS_BOOTSTRAP_CXXFLAGS}${CXXFLAGS:+ $CXXFLAGS}"
 
 require_file() {
   [[ -f "$1" ]] || {
@@ -44,6 +46,14 @@ find_hunter_prefix() {
   exit 1
 }
 
+cmake_cache_value() {
+  local build_dir="$1"
+  local key="$2"
+  local cache_file="$build_dir/CMakeCache.txt"
+  [[ -f "$cache_file" ]] || return 1
+  awk -F= -v key="$key" '$1 ~ "^" key ":" { print $2; exit }' "$cache_file"
+}
+
 require_file "$NODE_DIR/CMakeLists.hunter.txt"
 require_file "$CPP_LIBP2P_PATCH"
 
@@ -58,13 +68,19 @@ cp "$KOINOS_NODE_HUNTER_SOURCE/CMakeLists.hunter.txt" "$KOINOS_NODE_HUNTER_SOURC
 echo "==> Building koinos-node Hunter dependency set"
 cmake -S "$KOINOS_NODE_HUNTER_SOURCE" -B "$KOINOS_NODE_HUNTER_BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
   -DKOINOS_BUILD_TESTS=OFF \
   -DKOINOS_ENABLE_LIBP2P=OFF
 cmake --build "$KOINOS_NODE_HUNTER_BUILD" --target koinos_private_testnet_keygen --parallel "$JOBS"
 
-KOINOS_HUNTER_INSTALL="$(find_hunter_prefix \
-  "lib/cmake/koinos_proto/koinos_protoConfig.cmake" \
-  "lib/cmake/koinos_proto/koinos_proto-config.cmake")"
+KOINOS_PROTO_DIR="$(cmake_cache_value "$KOINOS_NODE_HUNTER_BUILD" "koinos_proto_DIR" || true)"
+if [[ -n "$KOINOS_PROTO_DIR" ]]; then
+  KOINOS_HUNTER_INSTALL="${KOINOS_PROTO_DIR%/lib/cmake/koinos_proto}"
+else
+  KOINOS_HUNTER_INSTALL="$(find_hunter_prefix \
+    "lib/cmake/koinos_proto/koinos_protoConfig.cmake" \
+    "lib/cmake/koinos_proto/koinos_proto-config.cmake")"
+fi
 echo "==> Koinos Hunter install: $KOINOS_HUNTER_INSTALL"
 
 echo "==> Preparing cpp-libp2p $CPP_LIBP2P_TAG source"
@@ -85,14 +101,20 @@ fi
 echo "==> Building cpp-libp2p auxiliary Hunter dependency set"
 cmake -S "$CPP_LIBP2P_SOURCE_DIR" -B "$CPP_LIBP2P_HUNTER_BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
   -DPACKAGE_MANAGER=hunter \
   -DTESTING=OFF \
   -DEXAMPLES=OFF
 cmake --build "$CPP_LIBP2P_HUNTER_BUILD" --parallel "$JOBS"
 
-CPP_AUX_HUNTER_INSTALL="$(find_hunter_prefix \
-  "lib/cmake/soralog/soralogConfig.cmake" \
-  "lib/cmake/soralog/soralog-config.cmake")"
+CPP_AUX_SORALOG_DIR="$(cmake_cache_value "$CPP_LIBP2P_HUNTER_BUILD" "soralog_DIR" || true)"
+if [[ -n "$CPP_AUX_SORALOG_DIR" ]]; then
+  CPP_AUX_HUNTER_INSTALL="${CPP_AUX_SORALOG_DIR%/lib/cmake/soralog}"
+else
+  CPP_AUX_HUNTER_INSTALL="$(find_hunter_prefix \
+    "lib/cmake/soralog/soralogConfig.cmake" \
+    "lib/cmake/soralog/soralog-config.cmake")"
+fi
 echo "==> cpp-libp2p auxiliary Hunter install: $CPP_AUX_HUNTER_INSTALL"
 
 echo "==> Isolating cpp-libp2p third-party headers"
@@ -104,6 +126,7 @@ rm -rf "$CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR/google" "$CPP_LIBP2P_THIRDPARTY_INCLU
 echo "==> Building Koinos-compatible cpp-libp2p install"
 cmake -S "$CPP_LIBP2P_SOURCE_DIR" -B "$CPP_LIBP2P_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
   -DPACKAGE_MANAGER=vcpkg \
   -DTESTING=OFF \
   -DEXAMPLES=OFF \
@@ -123,7 +146,8 @@ cmake -S "$NODE_DIR" -B "$KOINOS_NODE_BUILD_DIR" \
   -DCMAKE_PROJECT_INCLUDE="$NODE_DIR/cmake/cpp-libp2p-koinos-prelude.cmake" \
   -DOPENSSL_ROOT_DIR="$KOINOS_HUNTER_INSTALL" \
   -DCPP_LIBP2P_THIRDPARTY_INCLUDE_DIR="$CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR" \
-  -DCMAKE_CXX_FLAGS="-I$KOINOS_HUNTER_INSTALL/include -I$CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR" \
+  -DCMAKE_CXX_FLAGS="$CXXFLAGS -I$KOINOS_HUNTER_INSTALL/include -I$CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR" \
+  -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="$KOINOS_NODE_BUILD_DIR" \
   -DCMAKE_PREFIX_PATH="$NODE_DIR/cmake/shims;$CPP_LIBP2P_INSTALL_DIR;$KOINOS_HUNTER_INSTALL;$CPP_AUX_HUNTER_INSTALL"
 
 echo "==> Building koinos_node and private testnet keygen"
