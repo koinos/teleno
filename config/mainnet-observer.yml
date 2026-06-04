@@ -1,0 +1,32 @@
+global:
+  log-level: info
+
+chain:
+  verify-blocks: true
+
+p2p:
+  listen: /ip4/0.0.0.0/tcp/18888
+  seed-reconnect-interval-seconds: 10
+  peer:
+    - /dns4/seed.koinosblocks.com/tcp/8888/p2p/QmUNURuZxSu5wLnmBNJdwGtwjLmV5JxGhu4uNSAS8ZNcze
+    - /dns4/seed.koinosfoundation.org/tcp/8888/p2p/QmZjGG6eFnLLSskbgikz956DTpPgodo5P7Dxa32qHYZBBP
+    - /dns4/seed-east.burnkoin.com/tcp/8888/p2p/QmYAC9nxqgVt2p8NvmxNFsoMpQS7c4zEBmsZndEBTRHNu4
+    - /ip4/37.27.7.221/tcp/11394/p2p/QmY8NBHwoVrxBvrjS3wQoeTmWG4UUKMxmYHss7QYRXktrs
+    - /ip4/46.62.245.240/tcp/8888/p2p/QmWmxqE6WhcMWZEKwqUAbu87Qgm6JroZLdM4Xmxouu1Mmi
+    - /ip4/46.62.204.73/tcp/8888/p2p/QmZjGG6eFnLLSskbgikz956DTpPgodo5P7Dxa32qHYZBBP
+    - /ip4/95.216.68.185/tcp/8888/p2p/QmeTy5SE79ksZruNZ1DJJqR6UCe1oZvWcYaUnn6MuYE8Ea
+
+jsonrpc:
+  listen: 127.0.0.1:18122
+
+features:
+  chain: true
+  mempool: true
+  block_store: true
+  p2p: true
+  jsonrpc: true
+  grpc: false
+  block_producer: false
+  contract_meta_store: true
+  transaction_store: true
+  account_history: true

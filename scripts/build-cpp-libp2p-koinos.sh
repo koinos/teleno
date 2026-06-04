@@ -46,6 +46,20 @@ find_hunter_prefix() {
   exit 1
 }
 
+find_hunter_install_prefix() {
+  local marker
+  local config
+  for marker in "$@"; do
+    config="$(find "$HUNTER_ROOT/_Base" -type f -path "*/Install/$marker" -print -quit 2>/dev/null || true)"
+    if [[ -n "$config" ]]; then
+      printf '%s\n' "${config%%/Install/$marker}/Install"
+      return
+    fi
+  done
+  echo "could not find Hunter install marker under $HUNTER_ROOT: $*" >&2
+  exit 1
+}
+
 cmake_cache_value() {
   local build_dir="$1"
   local key="$2"
@@ -83,6 +97,11 @@ else
 fi
 echo "==> Koinos Hunter install: $KOINOS_HUNTER_INSTALL"
 
+KOINOS_HUNTER_PREFIX="$(find_hunter_install_prefix \
+  "lib/cmake/koinos_proto/koinos_protoConfig.cmake" \
+  "lib/cmake/koinos_proto/koinos_proto-config.cmake")"
+echo "==> Koinos Hunter prefix: $KOINOS_HUNTER_PREFIX"
+
 echo "==> Preparing cpp-libp2p $CPP_LIBP2P_TAG source"
 if [[ ! -d "$CPP_LIBP2P_SOURCE_DIR/.git" ]]; then
   git clone --branch "$CPP_LIBP2P_TAG" --depth 1 "$CPP_LIBP2P_REPO" "$CPP_LIBP2P_SOURCE_DIR"
@@ -117,6 +136,11 @@ else
 fi
 echo "==> cpp-libp2p auxiliary Hunter install: $CPP_AUX_HUNTER_INSTALL"
 
+CPP_AUX_HUNTER_PREFIX="$(find_hunter_install_prefix \
+  "lib/cmake/libsecp256k1/libsecp256k1-config.cmake" \
+  "lib/cmake/libsecp256k1/libsecp256k1Config.cmake")"
+echo "==> cpp-libp2p auxiliary Hunter prefix: $CPP_AUX_HUNTER_PREFIX"
+
 echo "==> Isolating cpp-libp2p third-party headers"
 rm -rf "$CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR"
 mkdir -p "$CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR"
@@ -132,9 +156,14 @@ cmake -S "$CPP_LIBP2P_SOURCE_DIR" -B "$CPP_LIBP2P_BUILD_DIR" \
   -DEXAMPLES=OFF \
   -DBoost_USE_STATIC_LIBS=ON \
   -DCMAKE_PROJECT_INCLUDE="$NODE_DIR/cmake/cpp-libp2p-koinos-prelude.cmake" \
+  -DOPENSSL_ROOT_DIR="$KOINOS_HUNTER_PREFIX" \
+  -DOPENSSL_INCLUDE_DIR="$KOINOS_HUNTER_PREFIX/include" \
+  -DOPENSSL_CRYPTO_LIBRARY="$KOINOS_HUNTER_PREFIX/lib/libcrypto.a" \
+  -DOPENSSL_SSL_LIBRARY="$KOINOS_HUNTER_PREFIX/lib/libssl.a" \
   -DQTILS_INCLUDE_ROOT="$CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR" \
   -DCMAKE_INSTALL_PREFIX="$CPP_LIBP2P_INSTALL_DIR" \
-  -DCMAKE_PREFIX_PATH="$NODE_DIR/cmake/shims;$KOINOS_HUNTER_INSTALL;$CPP_AUX_HUNTER_INSTALL"
+  -DCMAKE_CXX_FLAGS="$CXXFLAGS -I$KOINOS_HUNTER_PREFIX/include" \
+  -DCMAKE_PREFIX_PATH="$NODE_DIR/cmake/shims;$KOINOS_HUNTER_PREFIX;$KOINOS_HUNTER_INSTALL;$CPP_AUX_HUNTER_PREFIX;$CPP_AUX_HUNTER_INSTALL"
 cmake --build "$CPP_LIBP2P_BUILD_DIR" --parallel "$JOBS"
 cmake --install "$CPP_LIBP2P_BUILD_DIR"
 
@@ -144,11 +173,12 @@ cmake -S "$NODE_DIR" -B "$KOINOS_NODE_BUILD_DIR" \
   -DKOINOS_BUILD_TESTS=OFF \
   -DKOINOS_ENABLE_LIBP2P=ON \
   -DCMAKE_PROJECT_INCLUDE="$NODE_DIR/cmake/cpp-libp2p-koinos-prelude.cmake" \
-  -DOPENSSL_ROOT_DIR="$KOINOS_HUNTER_INSTALL" \
+  -DOPENSSL_ROOT_DIR="$KOINOS_HUNTER_PREFIX" \
+  -Dyaml-cpp_DIR="$KOINOS_HUNTER_PREFIX/lib/cmake/yaml-cpp" \
   -DCPP_LIBP2P_THIRDPARTY_INCLUDE_DIR="$CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR" \
-  -DCMAKE_CXX_FLAGS="$CXXFLAGS -I$KOINOS_HUNTER_INSTALL/include -I$CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR" \
+  -DCMAKE_CXX_FLAGS="$CXXFLAGS -I$KOINOS_HUNTER_PREFIX/include -I$KOINOS_HUNTER_INSTALL/include -I$CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR" \
   -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="$KOINOS_NODE_BUILD_DIR" \
-  -DCMAKE_PREFIX_PATH="$NODE_DIR/cmake/shims;$CPP_LIBP2P_INSTALL_DIR;$KOINOS_HUNTER_INSTALL;$CPP_AUX_HUNTER_INSTALL"
+  -DCMAKE_PREFIX_PATH="$NODE_DIR/cmake/shims;$CPP_LIBP2P_INSTALL_DIR;$KOINOS_HUNTER_PREFIX;$KOINOS_HUNTER_INSTALL;$CPP_AUX_HUNTER_PREFIX;$CPP_AUX_HUNTER_INSTALL"
 
 echo "==> Building koinos_node and private testnet keygen"
 cmake --build "$KOINOS_NODE_BUILD_DIR" --target koinos_node koinos_private_testnet_keygen --parallel "$JOBS"
