@@ -45,6 +45,7 @@ struct ProductionResult
 };
 
 crypto::private_key load_private_key_file( const std::filesystem::path& path );
+crypto::private_key load_or_create_private_key_file( const std::filesystem::path& path );
 
 class BlockProducer final
 {

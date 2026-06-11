@@ -180,18 +180,18 @@ cmake -S "$NODE_DIR" -B "$KOINOS_NODE_BUILD_DIR" \
   -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="$KOINOS_NODE_BUILD_DIR" \
   -DCMAKE_PREFIX_PATH="$NODE_DIR/cmake/shims;$CPP_LIBP2P_INSTALL_DIR;$KOINOS_HUNTER_PREFIX;$KOINOS_HUNTER_INSTALL;$CPP_AUX_HUNTER_PREFIX;$CPP_AUX_HUNTER_INSTALL"
 
-echo "==> Building koinos_node and private testnet keygen"
-cmake --build "$KOINOS_NODE_BUILD_DIR" --target koinos_node koinos_private_testnet_keygen --parallel "$JOBS"
+echo "==> Building teleno_node and private testnet keygen"
+cmake --build "$KOINOS_NODE_BUILD_DIR" --target teleno_node koinos_private_testnet_keygen --parallel "$JOBS"
 
-KOINOS_NODE_BIN="$KOINOS_NODE_BUILD_DIR/koinos_node"
+TELENO_NODE_BIN="$KOINOS_NODE_BUILD_DIR/teleno_node"
 KOINOS_KEYGEN_BIN="$KOINOS_NODE_BUILD_DIR/koinos_private_testnet_keygen"
-if [[ ! -x "$KOINOS_NODE_BIN" && -x "$KOINOS_NODE_BUILD_DIR/src/koinos_node" ]]; then
-  KOINOS_NODE_BIN="$KOINOS_NODE_BUILD_DIR/src/koinos_node"
+if [[ ! -x "$TELENO_NODE_BIN" && -x "$KOINOS_NODE_BUILD_DIR/src/teleno_node" ]]; then
+  TELENO_NODE_BIN="$KOINOS_NODE_BUILD_DIR/src/teleno_node"
 fi
 if [[ ! -x "$KOINOS_KEYGEN_BIN" && -x "$KOINOS_NODE_BUILD_DIR/src/koinos_private_testnet_keygen" ]]; then
   KOINOS_KEYGEN_BIN="$KOINOS_NODE_BUILD_DIR/src/koinos_private_testnet_keygen"
 fi
 
 echo "==> Done"
-echo "koinos_node: $KOINOS_NODE_BIN"
+echo "teleno_node: $TELENO_NODE_BIN"
 echo "keygen: $KOINOS_KEYGEN_BIN"

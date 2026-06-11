@@ -9,7 +9,7 @@
 
 int main( int argc, char** argv )
 {
-  const std::string seed = argc > 1 ? argv[ 1 ] : "knodel-private-testnet-producer";
+  const std::string seed = argc > 1 ? argv[ 1 ] : "teleno-private-testnet-producer";
   auto key = koinos::crypto::private_key::regenerate(
     koinos::crypto::hash( koinos::crypto::multicodec::sha2_256, seed ) );
   auto address = key.get_public_key().to_address_bytes();

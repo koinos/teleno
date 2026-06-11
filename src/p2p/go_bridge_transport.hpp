@@ -8,7 +8,7 @@
  * with it via a local JSON-RPC bridge on a Unix socket or TCP loopback.
  *
  * Architecture:
- *   koinos_node (C++) ←→ local IPC ←→ koinos-p2p (Go binary)
+ *   teleno_node (C++) ←→ local IPC ←→ koinos-p2p (Go binary)
  *                                      ↕
  *                                   mainnet peers
  *

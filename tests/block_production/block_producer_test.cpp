@@ -14,6 +14,8 @@
 
 #include <cassert>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -169,8 +171,10 @@ public:
     if( req.entry_point() == get_metadata_entry_point )
     {
       contracts::pob::get_metadata_result result;
+      std::string difficulty( 16, '\0' );
+      difficulty.back() = '\1';
       result.mutable_value()->set_seed( "seed" );
-      result.mutable_value()->set_difficulty( util::converter::as< std::string >( uint128_t( 1 ) ) );
+      result.mutable_value()->set_difficulty( difficulty );
       resp.set_result( result.SerializeAsString() );
       return resp;
     }
@@ -264,6 +268,41 @@ public:
 crypto::private_key test_private_key()
 {
   return crypto::private_key::regenerate( crypto::hash( crypto::multicodec::sha2_256, std::string( "producer-test" ) ) );
+}
+
+void test_missing_private_key_is_generated()
+{
+  auto test_dir = std::filesystem::temp_directory_path()
+                / ( "teleno-block-producer-key-" + std::to_string( now_ms() ) );
+  auto key_path = test_dir / "block_producer" / "private.key";
+  std::filesystem::remove_all( test_dir );
+
+  assert( !std::filesystem::exists( key_path ) );
+
+  auto generated = load_or_create_private_key_file( key_path );
+  assert( std::filesystem::exists( key_path ) );
+
+  std::ifstream input( key_path );
+  std::string wif;
+  std::getline( input, wif );
+  assert( !wif.empty() );
+  assert( wif == generated.to_wif() );
+
+  auto loaded = load_private_key_file( key_path );
+  assert( loaded.to_wif() == generated.to_wif() );
+
+  auto loaded_again = load_or_create_private_key_file( key_path );
+  assert( loaded_again.to_wif() == generated.to_wif() );
+
+#if !defined( _WIN32 )
+  auto permissions = std::filesystem::status( key_path ).permissions();
+  assert( ( permissions & std::filesystem::perms::owner_read ) != std::filesystem::perms::none );
+  assert( ( permissions & std::filesystem::perms::owner_write ) != std::filesystem::perms::none );
+  assert( ( permissions & std::filesystem::perms::group_read ) == std::filesystem::perms::none );
+  assert( ( permissions & std::filesystem::perms::others_read ) == std::filesystem::perms::none );
+#endif
+
+  std::filesystem::remove_all( test_dir );
 }
 
 void test_federated_block_assembly_and_acceptance()
@@ -370,6 +409,7 @@ void test_pob_candidate_refreshes_when_head_advances()
 
 int main()
 {
+  test_missing_private_key_is_generated();
   test_federated_block_assembly_and_acceptance();
   test_failed_transactions_are_pruned_and_retried();
   test_pob_candidate_refreshes_when_head_advances();

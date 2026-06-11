@@ -15,7 +15,7 @@
 #
 # The block_store records are copied byte-for-byte, so existing block records
 # keep their embedded skip-list pointers. The chain state_db remains in
-# BASEDIR/chain/blockchain and is reused in place by koinos_node.
+# BASEDIR/chain/blockchain and is reused in place by teleno_node.
 #
 set -euo pipefail
 export LC_ALL=C
@@ -28,7 +28,7 @@ BASEDIR=""
 LEGACY_DB=""
 MONOLITH_DB=""
 IMPORTER_BIN="${MONOLITH_BLOCK_STORE_IMPORTER:-$NODE_DIR/build/import_block_store_stream}"
-NODE_BIN="${MONOLITH_NODE_BIN:-$NODE_DIR/build/koinos_node}"
+NODE_BIN="${MONOLITH_NODE_BIN:-$NODE_DIR/build/teleno_node}"
 EXPORTER_DIR="${LEGACY_BLOCK_STORE_EXPORTER_DIR:-$ROOT_DIR/tools/legacy-block-store-exporter}"
 HUNTER_INSTALL_DIR="${HUNTER_INSTALL_DIR:-}"
 PROGRESS_EVERY="${PROGRESS_EVERY:-100000}"
@@ -56,13 +56,13 @@ Options:
   --legacy-db PATH        Legacy Badger DB path. Default: BASEDIR/block_store/db.
   --monolith-db PATH      Target monolith RocksDB path. Default: BASEDIR/db.
   --importer PATH         C++ stream importer path. Default: node/teleno-node/build/import_block_store_stream.
-  --node-bin PATH         koinos_node binary for --verify-node. Default: node/teleno-node/build/koinos_node.
+  --node-bin PATH         teleno_node binary for --verify-node. Default: node/teleno-node/build/teleno_node.
   --hunter-install PATH   Hunter install containing RocksDB headers/libs. Inferred from build/CMakeCache.txt when possible.
   --progress-every N      Export/import progress interval. Default: 100000.
   --verify MODE           SHA-256 verification mode: none, sample, or full. Default: none.
   --verify-every N        In sample mode, hash every Nth block record. Default: 100000.
   --verify-limit N        In sample mode, max sampled block records. 0 means unlimited. Default: 100.
-  --verify-node           After migration, start koinos_node with P2P disabled and verify chain.get_head_info.
+  --verify-node           After migration, start teleno_node with P2P disabled and verify chain.get_head_info.
   --verify-node-only      Skip migration and only run the migrated-basedir node smoke.
   --jsonrpc-port PORT     JSON-RPC port for node verification. Default: 18083.
   --node-timeout SECONDS  Timeout for node verification. Default: 120.
@@ -283,7 +283,7 @@ NODE
 }
 
 verify_node_smoke() {
-  [[ -x "$NODE_BIN" ]] || fail "koinos_node binary not found or not executable: $NODE_BIN"
+  [[ -x "$NODE_BIN" ]] || fail "teleno_node binary not found or not executable: $NODE_BIN"
   [[ -d "$MONOLITH_DB" ]] || fail "monolith RocksDB directory not found: $MONOLITH_DB"
   require_cmd node
 
@@ -300,7 +300,7 @@ verify_node_smoke() {
     --jsonrpc-listen="127.0.0.1:${JSONRPC_PORT}" \
     >"$log_file" 2>&1 &
   local node_pid=$!
-  log "started koinos_node pid=$node_pid for migrated-basedir verification"
+  log "started teleno_node pid=$node_pid for migrated-basedir verification"
 
   local started_at
   started_at="$(date +%s)"
@@ -308,7 +308,7 @@ verify_node_smoke() {
   while [[ $(( $(date +%s) - started_at )) -lt "$NODE_VERIFY_TIMEOUT" ]]; do
     if ! kill -0 "$node_pid" 2>/dev/null; then
       cat "$log_file" >&2 || true
-      fail "koinos_node exited before migrated-basedir JSON-RPC verification"
+      fail "teleno_node exited before migrated-basedir JSON-RPC verification"
     fi
     if head_json="$(jsonrpc_head_info 2>"$run_dir/node-verify-rpc.err")"; then
       printf '%s\n' "$head_json" >"$result_file"

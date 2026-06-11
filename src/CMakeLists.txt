@@ -271,9 +271,9 @@ if(KOINOS_ENABLE_LIBP2P)
     p2p::p2p_multiaddress
     p2p::p2p_identify)
   target_compile_definitions(koinos_p2p_lib PUBLIC KOINOS_HAS_LIBP2P)
-  message(STATUS "koinos_node: cpp-libp2p enabled")
+  message(STATUS "teleno_node: cpp-libp2p enabled")
 else()
-  message(STATUS "koinos_node: cpp-libp2p disabled (use -DKOINOS_ENABLE_LIBP2P=ON to enable)")
+  message(STATUS "teleno_node: cpp-libp2p disabled (use -DKOINOS_ENABLE_LIBP2P=ON to enable)")
 endif()
 
 if(KOINOS_BUILD_TESTS)
@@ -417,10 +417,10 @@ target_link_libraries(
 # NOTE: For this to build, the koinos-chain library target must be available.
 # In development, add koinos-chain as a subdirectory or link the pre-built lib.
 
-add_executable(koinos_node main.cpp)
+add_executable(teleno_node main.cpp)
 
 target_link_libraries(
-  koinos_node
+  teleno_node
     PRIVATE
       koinos_node_core
       koinos_node_interfaces
@@ -446,8 +446,11 @@ target_link_libraries(
       yaml-cpp::yaml-cpp)
 
 # Chain library is now built internally — always available
-target_link_libraries(koinos_node PRIVATE chain)
-target_compile_definitions(koinos_node PRIVATE KOINOS_HAS_CHAIN)
+target_link_libraries(teleno_node PRIVATE chain)
+target_compile_definitions(teleno_node PRIVATE KOINOS_HAS_CHAIN)
+
+# Compatibility target for old automation that still invokes --target koinos_node.
+add_custom_target(koinos_node DEPENDS teleno_node)
 
 add_executable(koinos_private_testnet_keygen
   ../tools/private_testnet_keygen.cpp)
@@ -470,7 +473,7 @@ target_link_libraries(
       nlohmann_json::nlohmann_json)
 
 if(COMMAND koinos_install)
-  koinos_install(TARGETS koinos_node)
+  koinos_install(TARGETS teleno_node)
 else()
-  install(TARGETS koinos_node RUNTIME DESTINATION bin)
+  install(TARGETS teleno_node RUNTIME DESTINATION bin)
 endif()

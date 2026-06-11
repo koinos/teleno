@@ -1,5 +1,5 @@
 /**
- * koinos_node — Monolithic Koinos blockchain node.
+ * teleno_node — Monolithic Koinos blockchain node.
  *
  * Replaces 12 separate microservices + AMQP broker with a single binary.
  * Inter-service communication uses direct C++ function calls + EventBus
@@ -705,51 +705,46 @@ int main( int argc, char** argv )
         {
           auto block_producer_key_file = basedir / "block_producer" / key_file;
           auto basedir_key_file = basedir / key_file;
-          key_file = std::filesystem::exists( block_producer_key_file ) ? block_producer_key_file : basedir_key_file;
+          key_file = std::filesystem::exists( block_producer_key_file ) ? block_producer_key_file
+                   : std::filesystem::exists( basedir_key_file ) ? basedir_key_file
+                   : block_producer_key_file;
         }
       }
 
-      if( !std::filesystem::exists( key_file ) )
-      {
-        LOG( warning ) << "[block_producer] Private key not found at " << key_file
-                       << " - production disabled. Set block_producer.private-key-file in config.yml";
-      }
-      else
-      {
-        node::block_production::ProducerConfig producer_cfg;
-        producer_cfg.algorithm                = cfg.block_producer_algorithm;
-        producer_cfg.producer_address         = cfg.block_producer_address;
-        producer_cfg.resources_lower_bound    = cfg.block_producer_resources_lower_bound;
-        producer_cfg.resources_upper_bound    = cfg.block_producer_resources_upper_bound;
-        producer_cfg.max_inclusion_attempts   = cfg.block_producer_max_inclusion_attempts;
+      node::block_production::ProducerConfig producer_cfg;
+      producer_cfg.algorithm                = cfg.block_producer_algorithm;
+      producer_cfg.producer_address         = cfg.block_producer_address;
+      producer_cfg.resources_lower_bound    = cfg.block_producer_resources_lower_bound;
+      producer_cfg.resources_upper_bound    = cfg.block_producer_resources_upper_bound;
+      producer_cfg.max_inclusion_attempts   = cfg.block_producer_max_inclusion_attempts;
 
-        for( const auto& proposal: cfg.block_producer_approved_proposals )
-          producer_cfg.approved_proposals.push_back( util::from_hex< std::string >( proposal ) );
+      for( const auto& proposal: cfg.block_producer_approved_proposals )
+        producer_cfg.approved_proposals.push_back( util::from_hex< std::string >( proposal ) );
 
-        auto signing_key = node::block_production::load_private_key_file( key_file );
-        block_producer = std::make_unique< node::block_production::BlockProducer >(
-          chain_adapter, mempool_adapter, std::move( signing_key ), producer_cfg );
-        block_producer->write_public_key_file( basedir / "block_producer" / "public.key" );
+      auto signing_key = node::block_production::load_or_create_private_key_file( key_file );
+      block_producer = std::make_unique< node::block_production::BlockProducer >(
+        chain_adapter, mempool_adapter, std::move( signing_key ), producer_cfg );
+      block_producer->write_public_key_file( basedir / "block_producer" / "public.key" );
 
-        LOG( info ) << "[block_producer] Private key: " << key_file;
-        LOG( info ) << "[block_producer] Public address: " << block_producer->public_address();
-        if( !cfg.block_producer_address.empty() )
-          LOG( info ) << "[block_producer] Producer address: " << cfg.block_producer_address;
-        LOG( info ) << "[block_producer] Algorithm: " << cfg.block_producer_algorithm;
-        LOG( info ) << "[block_producer] Resource utilization lower/upper bounds: "
-                    << cfg.block_producer_resources_lower_bound << "%/"
-                    << cfg.block_producer_resources_upper_bound << "%";
-        LOG( info ) << "[block_producer] Max inclusion attempts: "
-                    << cfg.block_producer_max_inclusion_attempts;
-        LOG( info ) << "[block_producer] Gossip production gate: "
-                    << ( cfg.block_producer_gossip_production ? "enabled" : "disabled" );
+      LOG( info ) << "[block_producer] Private key: " << key_file;
+      LOG( info ) << "[block_producer] Public address: " << block_producer->public_address();
+      if( !cfg.block_producer_address.empty() )
+        LOG( info ) << "[block_producer] Producer address: " << cfg.block_producer_address;
+      LOG( info ) << "[block_producer] Algorithm: " << cfg.block_producer_algorithm;
+      LOG( info ) << "[block_producer] Resource utilization lower/upper bounds: "
+                  << cfg.block_producer_resources_lower_bound << "%/"
+                  << cfg.block_producer_resources_upper_bound << "%";
+      LOG( info ) << "[block_producer] Max inclusion attempts: "
+                  << cfg.block_producer_max_inclusion_attempts;
+      LOG( info ) << "[block_producer] Gossip production gate: "
+                  << ( cfg.block_producer_gossip_production ? "enabled" : "disabled" );
 
-        registry.add(
-          "block_producer",
-          [&]() {
-            producer_running = true;
-            producer_gossip_enabled = !cfg.block_producer_gossip_production;
-            producer_thread  = std::thread( [&]() {
+      registry.add(
+        "block_producer",
+        [&]() {
+          producer_running = true;
+          producer_gossip_enabled = !cfg.block_producer_gossip_production;
+          producer_thread  = std::thread( [&]() {
               LOG( info ) << "[block_producer] Production loop started";
               uint64_t blocks_produced = 0;
               while( producer_running )
@@ -801,9 +796,8 @@ int main( int argc, char** argv )
             producer_running = false;
             if( producer_thread.joinable() )
               producer_thread.join();
-          }
-        );
-      }
+        }
+      );
     }
 
     // ── EventBus wiring ──

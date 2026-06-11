@@ -14,11 +14,13 @@
 #include <koinos/util/base64.hpp>
 #include <koinos/util/conversion.hpp>
 #include <koinos/util/hex.hpp>
+#include <koinos/util/random.hpp>
 
 #include <boost/multiprecision/cpp_int.hpp>
 
 #include <algorithm>
 #include <cstddef>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -87,6 +89,53 @@ crypto::private_key load_private_key_file( const std::filesystem::path& path )
     throw std::runtime_error( "private key file is empty: " + path.string() );
 
   return crypto::private_key::from_wif( private_key_wif );
+}
+
+namespace {
+
+void restrict_private_key_permissions( const std::filesystem::path& path )
+{
+  std::error_code ec;
+  std::filesystem::permissions(
+    path,
+    std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+    std::filesystem::perm_options::replace,
+    ec );
+  if( ec )
+    LOG( warning ) << "[block_producer] Unable to restrict private key permissions at "
+                   << path << ": " << ec.message();
+}
+
+} // anonymous namespace
+
+crypto::private_key load_or_create_private_key_file( const std::filesystem::path& path )
+{
+  if( std::filesystem::exists( path ) )
+    return load_private_key_file( path );
+
+  LOG( info ) << "[block_producer] Private key not found at " << path
+              << ", generating a new producer hot key";
+
+  const auto parent_path = path.parent_path();
+  if( !parent_path.empty() )
+    std::filesystem::create_directories( parent_path );
+
+  auto seed        = koinos::util::random_alphanumeric( 64 );
+  auto secret      = koinos::crypto::hash( koinos::crypto::multicodec::sha2_256, seed );
+  auto private_key = koinos::crypto::private_key::regenerate( secret );
+
+  std::ofstream output( path, std::ios::out | std::ios::trunc );
+  if( !output.is_open() )
+    throw std::runtime_error( "unable to write private key file: " + path.string() );
+
+  restrict_private_key_permissions( path );
+  output << private_key.to_wif() << '\n';
+  output.close();
+  if( !output )
+    throw std::runtime_error( "unable to finish writing private key file: " + path.string() );
+
+  restrict_private_key_permissions( path );
+  return private_key;
 }
 
 BlockProducer::BlockProducer( IChain& chain,

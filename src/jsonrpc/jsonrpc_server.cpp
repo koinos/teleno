@@ -587,7 +587,7 @@ void JSONRPCServer::handle_session( tcp::socket socket )
         continue;
       }
 
-      // GET /health — simple health check for load balancers and Knodel
+      // GET /health — simple health check for load balancers and Teleno
       if( req.method() == http::verb::get )
       {
         auto target = req.target();
