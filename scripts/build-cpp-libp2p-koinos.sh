@@ -3,13 +3,13 @@ set -euo pipefail
 export LC_ALL=C
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NODE_DIR="${NODE_DIR:-$ROOT_DIR/vendor/koinos/koinos-node}"
-DEPS_ROOT="${KOINOS_DEPS_ROOT:-$ROOT_DIR/.deps/koinos-node}"
+NODE_DIR="${NODE_DIR:-$ROOT_DIR/node/teleno-node}"
+DEPS_ROOT="${KOINOS_DEPS_ROOT:-$ROOT_DIR/.deps/teleno-node}"
 HUNTER_ROOT="${HUNTER_ROOT:-$DEPS_ROOT/hunter}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
 
-KOINOS_NODE_HUNTER_SOURCE="${KOINOS_NODE_HUNTER_SOURCE:-$DEPS_ROOT/koinos-node-hunter-src}"
-KOINOS_NODE_HUNTER_BUILD="${KOINOS_NODE_HUNTER_BUILD:-$DEPS_ROOT/koinos-node-hunter-build}"
+KOINOS_NODE_HUNTER_SOURCE="${KOINOS_NODE_HUNTER_SOURCE:-$DEPS_ROOT/teleno-node-hunter-src}"
+KOINOS_NODE_HUNTER_BUILD="${KOINOS_NODE_HUNTER_BUILD:-$DEPS_ROOT/teleno-node-hunter-build}"
 CPP_LIBP2P_SOURCE_DIR="${CPP_LIBP2P_SOURCE_DIR:-$DEPS_ROOT/cpp-libp2p-src}"
 CPP_LIBP2P_HUNTER_BUILD="${CPP_LIBP2P_HUNTER_BUILD:-$DEPS_ROOT/cpp-libp2p-hunter-build}"
 CPP_LIBP2P_BUILD_DIR="${CPP_LIBP2P_BUILD_DIR:-$DEPS_ROOT/cpp-libp2p-koinos-build}"
@@ -73,13 +73,13 @@ require_file "$CPP_LIBP2P_PATCH"
 
 mkdir -p "$DEPS_ROOT"
 
-echo "==> Preparing Hunter-enabled koinos-node source copy"
+echo "==> Preparing Hunter-enabled Teleno node source copy"
 rm -rf "$KOINOS_NODE_HUNTER_SOURCE"
 mkdir -p "$KOINOS_NODE_HUNTER_SOURCE"
 cp -a "$NODE_DIR/." "$KOINOS_NODE_HUNTER_SOURCE/"
 cp "$KOINOS_NODE_HUNTER_SOURCE/CMakeLists.hunter.txt" "$KOINOS_NODE_HUNTER_SOURCE/CMakeLists.txt"
 
-echo "==> Building koinos-node Hunter dependency set"
+echo "==> Building Teleno node Hunter dependency set"
 cmake -S "$KOINOS_NODE_HUNTER_SOURCE" -B "$KOINOS_NODE_HUNTER_BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
@@ -167,7 +167,7 @@ cmake -S "$CPP_LIBP2P_SOURCE_DIR" -B "$CPP_LIBP2P_BUILD_DIR" \
 cmake --build "$CPP_LIBP2P_BUILD_DIR" --parallel "$JOBS"
 cmake --install "$CPP_LIBP2P_BUILD_DIR"
 
-echo "==> Configuring koinos_node with cpp-libp2p"
+echo "==> Configuring teleno-node with cpp-libp2p"
 cmake -S "$NODE_DIR" -B "$KOINOS_NODE_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DKOINOS_BUILD_TESTS=OFF \

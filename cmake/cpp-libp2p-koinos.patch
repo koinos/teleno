@@ -1,0 +1,509 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3500ff4..005aa13 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ cmake_minimum_required(VERSION 3.12)
+
+-if (PACKAGE_MANAGER)
+-  if(PACKAGE_MANAGER NOT MATCHES "^(hunter|vcpkg)$")
++if (DEFINED PACKAGE_MANAGER AND NOT "${PACKAGE_MANAGER}" STREQUAL "")
++  if(NOT "${PACKAGE_MANAGER}" MATCHES "^(hunter|vcpkg)$")
+     message(FATAL_ERROR "PACKAGE_MANAGER must be set to 'hunter', 'vcpkg' or isn't set")
+   endif ()
+ else ()
+diff --git a/cmake/Hunter/config.cmake b/cmake/Hunter/config.cmake
+index 6549e8f..438d6b7 100644
+--- a/cmake/Hunter/config.cmake
++++ b/cmake/Hunter/config.cmake
+@@ -28,3 +28,13 @@ hunter_config(
+       FORMAT_ERROR_WITH_FULLTYPE=ON
+     KEEP_PACKAGE_SOURCES
+ )
++
++# Pin Protobuf to koinos fork (3.17.3) for ABI compatibility with koinos-node
++hunter_config(Protobuf
++    URL  "https://github.com/koinos/protobuf/archive/e1b1477875a8b022903b548eb144f2c7bf4d9561.tar.gz"
++    SHA1 "5796707a98eec15ffb3ad86ff50e8eec5fa65e68"
++    CMAKE_ARGS
++      CMAKE_OSX_ARCHITECTURES=arm64
++      CMAKE_CXX_FLAGS=-fvisibility=hidden
++      CMAKE_C_FLAGS=-fvisibility=hidden
++)
+diff --git a/cmake/dependencies.cmake b/cmake/dependencies.cmake
+index 9eab5ce..9f61013 100644
+--- a/cmake/dependencies.cmake
++++ b/cmake/dependencies.cmake
+@@ -16,21 +16,21 @@ if (TESTING)
+ endif()
+ 
+ if (PACKAGE_MANAGER STREQUAL "hunter")
+-  hunter_add_package(Boost COMPONENTS random filesystem program_options)
+-  find_package(Boost CONFIG REQUIRED filesystem random program_options)
++  hunter_add_package(Boost COMPONENTS filesystem program_options)
++  find_package(Boost CONFIG REQUIRED filesystem program_options)
+ else ()
+-  find_package(Boost CONFIG REQUIRED filesystem random beast program_options)
++  find_package(Boost CONFIG REQUIRED filesystem beast program_options)
+ endif ()
+ 
+-# https://www.openssl.org/
+-hunter_add_package(BoringSSL)
+-find_package(OpenSSL CONFIG REQUIRED)
++# Use standard OpenSSL instead of BoringSSL for koinos-node ABI compatibility.
++# lsquic (QUIC transport) requires BoringSSL and is disabled — Koinos uses TCP.
++hunter_add_package(OpenSSL)
++find_package(OpenSSL REQUIRED)
+
+ hunter_add_package(libsecp256k1)
+ find_package(libsecp256k1 CONFIG REQUIRED)
+
+-hunter_add_package(lsquic)
+-find_package(lsquic CONFIG REQUIRED)
++# lsquic removed — requires BoringSSL, and Koinos P2P uses TCP not QUIC
+
+ # https://developers.google.com/protocol-buffers/
+ hunter_add_package(Protobuf)
+@@ -38,6 +38,25 @@ find_package(Protobuf CONFIG REQUIRED)
+
+ hunter_add_package(qtils)
+ find_package(qtils CONFIG REQUIRED)
++if(DEFINED QTILS_INCLUDE_ROOT AND EXISTS "${QTILS_INCLUDE_ROOT}/qtils")
++  include_directories(SYSTEM "${QTILS_INCLUDE_ROOT}")
++  install(
++    DIRECTORY "${QTILS_INCLUDE_ROOT}/qtils"
++    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
++  )
++else()
++  get_target_property(QTILS_INCLUDE_DIRS qtils::qtils INTERFACE_INCLUDE_DIRECTORIES)
++  include_directories(SYSTEM ${QTILS_INCLUDE_DIRS})
++
++  foreach(QTILS_INCLUDE_DIR IN LISTS QTILS_INCLUDE_DIRS)
++    if(EXISTS "${QTILS_INCLUDE_DIR}/qtils")
++      install(
++        DIRECTORY "${QTILS_INCLUDE_DIR}/qtils"
++        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
++      )
++    endif()
++  endforeach()
++  endif()
+
+ find_package(Threads)
+
+diff --git a/cmake/libp2pConfig.cmake.in b/cmake/libp2pConfig.cmake.in
+index 7cb13f7..c44ab1d 100644
+--- a/cmake/libp2pConfig.cmake.in
++++ b/cmake/libp2pConfig.cmake.in
+@@ -3,8 +3,7 @@
+ include(CMakeFindDependencyMacro)
+
+-find_dependency(Boost CONFIG REQUIRED random filesystem program_options)
++find_dependency(Boost CONFIG REQUIRED filesystem program_options)
+-find_dependency(lsquic CONFIG REQUIRED)
+-find_dependency(OpenSSL CONFIG REQUIRED)
++find_dependency(OpenSSL REQUIRED)
+ find_dependency(Protobuf CONFIG REQUIRED)
+ find_dependency(Threads)
+ find_dependency(c-ares CONFIG REQUIRED)
+@@ -17,4 +16,4 @@ find_dependency(Boost.DI CONFIG REQUIRED)
+
+ include("${CMAKE_CURRENT_LIST_DIR}/libp2pTargets.cmake")
+
+-check_required_components(libp2p)
+\ No newline at end of file
++check_required_components(libp2p)
+diff --git a/include/libp2p/crypto/random_generator/boost_generator.hpp b/include/libp2p/crypto/random_generator/boost_generator.hpp
+index 045bb28..bec5074 100644
+--- a/include/libp2p/crypto/random_generator/boost_generator.hpp
++++ b/include/libp2p/crypto/random_generator/boost_generator.hpp
+@@ -6,8 +6,6 @@
+ 
+ #pragma once
+ 
+-#include <boost/nondet_random.hpp>
+-#include <boost/random/uniform_int_distribution.hpp>
+ #include <libp2p/crypto/random_generator.hpp>
+ 
+ namespace libp2p::crypto::random {
+@@ -34,11 +32,5 @@ namespace libp2p::crypto::random {
+      * @return buffer containing random bytes
+      */
+     std::vector<uint8_t> randomBytes(size_t len) override;
+-
+-   private:
+-    /// boost cryptographic-secure random generator
+-    boost::random_device generator_;
+-    /// uniform distribution tool
+-    boost::random::uniform_int_distribution<uint8_t> distribution_;
+   };
+ }  // namespace libp2p::crypto::random
+diff --git a/src/crypto/random_generator/CMakeLists.txt b/src/crypto/random_generator/CMakeLists.txt
+index 924ad9a..46b0dd3 100644
+--- a/src/crypto/random_generator/CMakeLists.txt
++++ b/src/crypto/random_generator/CMakeLists.txt
+@@ -9,5 +9,5 @@ libp2p_add_library(p2p_random_generator
+     )
+ 
+ target_link_libraries(p2p_random_generator
+-    Boost::random
++    OpenSSL::Crypto
+     )
+diff --git a/src/crypto/random_generator/boost_generator.cpp b/src/crypto/random_generator/boost_generator.cpp
+index 90c4888..2122dbd 100644
+--- a/src/crypto/random_generator/boost_generator.cpp
++++ b/src/crypto/random_generator/boost_generator.cpp
+@@ -4,20 +4,32 @@
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
++#include <openssl/rand.h>
+ #include <libp2p/crypto/random_generator/boost_generator.hpp>
+ 
++#include <limits>
++#include <stdexcept>
++
+ namespace libp2p::crypto::random {
+ 
+   uint8_t BoostRandomGenerator::randomByte() {
+-    return distribution_(generator_);  // NOLINT
++    return randomBytes(1).front();
+   }
+ 
+   std::vector<uint8_t> BoostRandomGenerator::randomBytes(size_t len) {
+-    std::vector<uint8_t> buffer(len, 0);
+-    for (size_t i = 0; i < len; ++i) {
+-      unsigned char byte = BoostRandomGenerator::randomByte();
+-      buffer[i] = byte;  // NOLINT
++    if (len > static_cast<size_t>(std::numeric_limits<int>::max())) {
++      throw std::runtime_error("OpenSSL RAND_bytes request is too large");
++    }
++
++    std::vector<uint8_t> buffer(len);
++    if (buffer.empty()) {
++      return buffer;
++    }
++
++    if (RAND_bytes(buffer.data(), static_cast<int>(buffer.size())) != 1) {
++      throw std::runtime_error("OpenSSL RAND_bytes failed");
+     }
++
+     return buffer;
+   }
+ }  // namespace libp2p::crypto::random
+diff --git a/include/libp2p/crypto/chachapoly/chachapoly_impl.hpp b/include/libp2p/crypto/chachapoly/chachapoly_impl.hpp
+index 465909e..9286cea 100644
+--- a/include/libp2p/crypto/chachapoly/chachapoly_impl.hpp
++++ b/include/libp2p/crypto/chachapoly/chachapoly_impl.hpp
+@@ -25,11 +25,9 @@ namespace libp2p::crypto::chachapoly {
+                                    BytesIn aad) override;
+
+    private:
+-    outcome::result<void> init(EVP_AEAD_CTX *ctx, bool encrypt);
++    static constexpr size_t kTagSize = 16;
+
+     const Key key_;
+-    const EVP_AEAD *aead_;
+-    const size_t overhead_;
+     libp2p::log::Logger log_ = libp2p::log::createLogger("ChaChaPoly");
+   };
+
+diff --git a/src/crypto/chachapoly/chachapoly_impl.cpp b/src/crypto/chachapoly/chachapoly_impl.cpp
+index ddb53d0..2a7adff 100644
+--- a/src/crypto/chachapoly/chachapoly_impl.cpp
++++ b/src/crypto/chachapoly/chachapoly_impl.cpp
+@@ -2,92 +2,164 @@
+  * Copyright Quadrivium LLC
+  * All Rights Reserved
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Rewritten to use standard OpenSSL 3.x EVP API instead of BoringSSL EVP_AEAD.
++ * ChaCha20-Poly1305 AEAD via EVP_chacha20_poly1305().
+  */
+
+-#include <openssl/aead.h>
++#include <openssl/evp.h>
+ #include <libp2p/crypto/chachapoly/chachapoly_impl.hpp>
+ #include <libp2p/crypto/error.hpp>
+
+ namespace libp2p::crypto::chachapoly {
+-  constexpr size_t kTagSize = 16;
+
+-#define IF1(expr, err, result) \
+-  if (1 != (expr)) {           \
+-    log_->error((err));        \
+-    return (result);           \
+-  }
+-
+-  ChaCha20Poly1305Impl::ChaCha20Poly1305Impl(Key key)
+-      : key_{key},
+-        aead_{EVP_aead_chacha20_poly1305()},
+-        overhead_{EVP_AEAD_max_overhead(aead_)} {}
+-
+-  outcome::result<void> ChaCha20Poly1305Impl::init(EVP_AEAD_CTX *ctx,
+-                                                   bool encrypt) {
+-    IF1(EVP_AEAD_CTX_init_with_direction(
+-            ctx,
+-            aead_,
+-            key_.data(),
+-            key_.size(),
+-            kTagSize,
+-            encrypt ? evp_aead_seal : evp_aead_open),
+-        "EVP_AEAD_CTX_init",
+-        OpenSslError::FAILED_INITIALIZE_CONTEXT);
+-    return outcome::success();
+-  }
++  ChaCha20Poly1305Impl::ChaCha20Poly1305Impl(Key key) : key_{key} {}
+
+   outcome::result<Bytes> ChaCha20Poly1305Impl::encrypt(const Nonce &nonce,
+                                                        BytesIn plaintext,
+                                                        BytesIn aad) {
+-    bssl::ScopedEVP_AEAD_CTX ctx;
+-    OUTCOME_TRY(init(ctx.get(), true));
+-    Bytes result;
+-    // just reserving the space, possibly without actual memory allocation:
+-    // ciphertext length equals to plaintext length
+-    // one block size for EncryptFinal_ex (usually not required)
+-    // 16 bytes for the tag
+-    result.resize(plaintext.size() + overhead_);
+-    size_t out_size = 0;
+-    IF1(EVP_AEAD_CTX_seal(ctx.get(),
+-                          result.data(),
+-                          &out_size,
+-                          result.size(),
+-                          nonce.data(),
+-                          nonce.size(),
+-                          plaintext.data(),
+-                          plaintext.size(),
+-                          aad.data(),
+-                          aad.size()),
+-        "EVP_AEAD_CTX_seal",
+-        OpenSslError::FAILED_ENCRYPT_UPDATE);
+-    result.resize(out_size);
++    auto ctx = EVP_CIPHER_CTX_new();
++    if (!ctx) {
++      log_->error("EVP_CIPHER_CTX_new failed");
++      return OpenSslError::FAILED_INITIALIZE_CONTEXT;
++    }
++
++    // RAII cleanup
++    struct CtxGuard {
++      EVP_CIPHER_CTX *c;
++      ~CtxGuard() { EVP_CIPHER_CTX_free(c); }
++    } guard{ctx};
++
++    if (1 != EVP_EncryptInit_ex(ctx, EVP_chacha20_poly1305(), nullptr, nullptr, nullptr)) {
++      log_->error("EVP_EncryptInit_ex cipher init");
++      return OpenSslError::FAILED_INITIALIZE_CONTEXT;
++    }
++
++    // Set nonce length (12 bytes)
++    if (1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN,
++                                  static_cast<int>(nonce.size()), nullptr)) {
++      log_->error("EVP_CTRL_AEAD_SET_IVLEN");
++      return OpenSslError::FAILED_INITIALIZE_CONTEXT;
++    }
++
++    // Set key and nonce
++    if (1 != EVP_EncryptInit_ex(ctx, nullptr, nullptr, key_.data(), nonce.data())) {
++      log_->error("EVP_EncryptInit_ex key/nonce");
++      return OpenSslError::FAILED_INITIALIZE_CONTEXT;
++    }
++
++    // Provide AAD
++    int len = 0;
++    if (!aad.empty()) {
++      if (1 != EVP_EncryptUpdate(ctx, nullptr, &len, aad.data(),
++                                  static_cast<int>(aad.size()))) {
++        log_->error("EVP_EncryptUpdate AAD");
++        return OpenSslError::FAILED_ENCRYPT_UPDATE;
++      }
++    }
++
++    // Encrypt plaintext
++    Bytes result(plaintext.size() + kTagSize);
++    if (1 != EVP_EncryptUpdate(ctx, result.data(), &len,
++                                plaintext.data(),
++                                static_cast<int>(plaintext.size()))) {
++      log_->error("EVP_EncryptUpdate");
++      return OpenSslError::FAILED_ENCRYPT_UPDATE;
++    }
++    size_t ciphertext_len = static_cast<size_t>(len);
++
++    // Finalize
++    if (1 != EVP_EncryptFinal_ex(ctx, result.data() + ciphertext_len, &len)) {
++      log_->error("EVP_EncryptFinal_ex");
++      return OpenSslError::FAILED_ENCRYPT_UPDATE;
++    }
++    ciphertext_len += static_cast<size_t>(len);
++
++    // Get tag and append to ciphertext
++    if (1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG, kTagSize,
++                                  result.data() + ciphertext_len)) {
++      log_->error("EVP_CTRL_AEAD_GET_TAG");
++      return OpenSslError::FAILED_ENCRYPT_UPDATE;
++    }
++    result.resize(ciphertext_len + kTagSize);
++
+     return result;
+   }
+
+   outcome::result<Bytes> ChaCha20Poly1305Impl::decrypt(const Nonce &nonce,
+                                                        BytesIn ciphertext,
+                                                        BytesIn aad) {
+-    bssl::ScopedEVP_AEAD_CTX ctx;
+-    OUTCOME_TRY(init(ctx.get(), false));
+-    Bytes result;
+-    // plain text should take less bytes than cipher text,
+-    // at least it would not contain tag-length bytes (16).
+-    // single block size for the case when len(in) == len(out)
+-    result.resize(ciphertext.size());
+-    size_t out_size = 0;
+-    IF1(EVP_AEAD_CTX_open(ctx.get(),
+-                          result.data(),
+-                          &out_size,
+-                          result.size(),
+-                          nonce.data(),
+-                          nonce.size(),
+-                          ciphertext.data(),
+-                          ciphertext.size(),
+-                          aad.data(),
+-                          aad.size()),
+-        "EVP_AEAD_CTX_open",
+-        OpenSslError::FAILED_DECRYPT_UPDATE);
+-    result.resize(out_size);
++    if (ciphertext.size() < kTagSize) {
++      log_->error("ciphertext too short for tag");
++      return OpenSslError::FAILED_DECRYPT_UPDATE;
++    }
++
++    auto ctx = EVP_CIPHER_CTX_new();
++    if (!ctx) {
++      log_->error("EVP_CIPHER_CTX_new failed");
++      return OpenSslError::FAILED_INITIALIZE_CONTEXT;
++    }
++
++    struct CtxGuard {
++      EVP_CIPHER_CTX *c;
++      ~CtxGuard() { EVP_CIPHER_CTX_free(c); }
++    } guard{ctx};
++
++    if (1 != EVP_DecryptInit_ex(ctx, EVP_chacha20_poly1305(), nullptr, nullptr, nullptr)) {
++      log_->error("EVP_DecryptInit_ex cipher init");
++      return OpenSslError::FAILED_INITIALIZE_CONTEXT;
++    }
++
++    if (1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN,
++                                  static_cast<int>(nonce.size()), nullptr)) {
++      log_->error("EVP_CTRL_AEAD_SET_IVLEN");
++      return OpenSslError::FAILED_INITIALIZE_CONTEXT;
++    }
++
++    if (1 != EVP_DecryptInit_ex(ctx, nullptr, nullptr, key_.data(), nonce.data())) {
++      log_->error("EVP_DecryptInit_ex key/nonce");
++      return OpenSslError::FAILED_INITIALIZE_CONTEXT;
++    }
++
++    // Split ciphertext and tag
++    size_t enc_len = ciphertext.size() - kTagSize;
++    auto enc_data = ciphertext.data();
++    auto tag_data = ciphertext.data() + enc_len;
++
++    // Provide AAD
++    int len = 0;
++    if (!aad.empty()) {
++      if (1 != EVP_DecryptUpdate(ctx, nullptr, &len, aad.data(),
++                                  static_cast<int>(aad.size()))) {
++        log_->error("EVP_DecryptUpdate AAD");
++        return OpenSslError::FAILED_DECRYPT_UPDATE;
++      }
++    }
++
++    // Decrypt
++    Bytes result(enc_len);
++    if (1 != EVP_DecryptUpdate(ctx, result.data(), &len, enc_data,
++                                static_cast<int>(enc_len))) {
++      log_->error("EVP_DecryptUpdate");
++      return OpenSslError::FAILED_DECRYPT_UPDATE;
++    }
++    size_t plaintext_len = static_cast<size_t>(len);
++
++    // Set expected tag (const_cast needed for OpenSSL API)
++    if (1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, kTagSize,
++                                  const_cast<uint8_t *>(tag_data))) {
++      log_->error("EVP_CTRL_AEAD_SET_TAG");
++      return OpenSslError::FAILED_DECRYPT_UPDATE;
++    }
++
++    // Finalize — verifies tag
++    if (1 != EVP_DecryptFinal_ex(ctx, result.data() + plaintext_len, &len)) {
++      log_->error("EVP_DecryptFinal_ex (tag verification failed)");
++      return OpenSslError::FAILED_DECRYPT_UPDATE;
++    }
++    plaintext_len += static_cast<size_t>(len);
++    result.resize(plaintext_len);
++
+     return result;
+   }
+
+diff --git a/src/crypto/crypto_provider/crypto_provider_impl.cpp b/src/crypto/crypto_provider/crypto_provider_impl.cpp
+index 955bb56..58f8a09 100644
+--- a/src/crypto/crypto_provider/crypto_provider_impl.cpp
++++ b/src/crypto/crypto_provider/crypto_provider_impl.cpp
+@@ -11,7 +11,7 @@
+ #include <openssl/ecdsa.h>
+ #include <openssl/err.h>
+ #include <openssl/evp.h>
+-#include <openssl/mem.h>
++#include <openssl/crypto.h>
+ #include <openssl/rand.h>
+ #include <openssl/rsa.h>
+ #include <openssl/x509.h>
+diff --git a/src/crypto/rsa_provider/rsa_provider_impl.cpp b/src/crypto/rsa_provider/rsa_provider_impl.cpp
+index cbc4926..34684c2 100644
+--- a/src/crypto/rsa_provider/rsa_provider_impl.cpp
++++ b/src/crypto/rsa_provider/rsa_provider_impl.cpp
+@@ -9,7 +9,7 @@
+ #include <memory>
+
+ #include <openssl/err.h>
+-#include <openssl/mem.h>
++#include <openssl/crypto.h>
+ #include <openssl/rsa.h>
+ #include <openssl/x509.h>
+ #include <libp2p/common/final_action.hpp>
+diff --git a/src/network/CMakeLists.txt b/src/network/CMakeLists.txt
+index b170ea6..6b731ca 100644
+--- a/src/network/CMakeLists.txt
++++ b/src/network/CMakeLists.txt
+@@ -12,7 +12,6 @@ libp2p_add_library(p2p_default_network
+     )
+ target_link_libraries(p2p_default_network
+     p2p_network
+-    p2p_quic
+     p2p_tcp
+     p2p_yamux
+     p2p_mplex
+diff --git a/src/security/tls/tls_details.cpp b/src/security/tls/tls_details.cpp
+index 19e5e80..e31c4e3 100644
+--- a/src/security/tls/tls_details.cpp
++++ b/src/security/tls/tls_details.cpp
+@@ -531,7 +531,9 @@ namespace libp2p::security::tls_details {
+       CASE_X(X509_V_ERR_IP_ADDRESS_MISMATCH)
+       CASE_X(X509_V_ERR_INVALID_CALL)
+       CASE_X(X509_V_ERR_STORE_LOOKUP)
++#ifdef X509_V_ERR_NAME_CONSTRAINTS_WITHOUT_SANS
+       CASE_X(X509_V_ERR_NAME_CONSTRAINTS_WITHOUT_SANS)
++#endif
+
+ #undef CASE_X
+       default:
+diff --git a/src/transport/CMakeLists.txt b/src/transport/CMakeLists.txt
+index 1ba17e7..007e215 100644
+--- a/src/transport/CMakeLists.txt
++++ b/src/transport/CMakeLists.txt
+@@ -6,4 +6,4 @@
+
+ add_subdirectory(impl)
+ add_subdirectory(tcp)
+-add_subdirectory(quic)
++# add_subdirectory(quic)  # Disabled — requires BoringSSL/lsquic
