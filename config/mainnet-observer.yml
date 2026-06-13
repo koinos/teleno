@@ -13,6 +13,7 @@ p2p:
   max-candidate-dials-per-cycle: 3
   peer-acquisition-interval-seconds: 5
   candidate-redial-interval-seconds: 60
+  peer-log-interval-seconds: 60
   peer:
     - /ip4/46.62.204.73/tcp/8888/p2p/QmPcF1YrxamfKGpyvP6uAZcPxnmK2WUBC4K4N5ZaWky8Sh
     - /ip4/37.27.7.221/tcp/8888/p2p/QmY8NBHwoVrxBvrjS3wQoeTmWG4UUKMxmYHss7QYRXktrs

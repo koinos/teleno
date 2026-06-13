@@ -54,6 +54,7 @@ struct P2POptions
   uint32_t max_candidate_dials_per_cycle = 3;
   std::chrono::seconds peer_acquisition_interval{ 5 };
   std::chrono::seconds candidate_redial_interval{ 60 };
+  std::chrono::seconds peer_log_interval{ 60 };
 
   // Gossip toggle
   std::chrono::seconds gossip_head_threshold{ 45 };

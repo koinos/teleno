@@ -14,6 +14,69 @@ struct ConfigCheckpoint
   std::string block_id;
 };
 
+struct BackupScheduleConfig
+{
+  bool enabled = false;
+  std::string interval = "24h";
+  bool run_on_startup_if_missed = true;
+  uint64_t jitter_seconds = 300;
+  uint64_t minimum_head_progress = 1;
+  bool skip_if_syncing_from_genesis = true;
+  uint64_t max_concurrent_backups = 1;
+};
+
+struct BackupLocalConfig
+{
+  bool enabled = false;
+  std::string directory;
+  uint64_t retention_count = 7;
+};
+
+struct BackupSshConfig
+{
+  bool enabled = false;
+  std::string transport = "native";
+  std::string host;
+  uint64_t port = 22;
+  std::string user;
+  std::string auth = "password-file";
+  std::string password_file;
+  std::string private_key_file;
+  std::string passphrase_file;
+  std::string known_hosts_file;
+  bool strict_host_key_checking = true;
+  uint64_t connect_timeout_seconds = 15;
+};
+
+struct BackupRemoteConfig
+{
+  bool enabled = false;
+  std::string directory;
+  uint64_t retention_count = 14;
+  uint64_t retention_days = 30;
+  std::string upload_temp_suffix = ".partial";
+};
+
+struct BackupAdminConfig
+{
+  bool enabled = false;
+  std::string listen = "127.0.0.1:18088";
+  std::string token_file;
+  uint64_t jobs = 1;
+};
+
+struct BackupConfig
+{
+  bool enabled = false;
+  std::string node_id;
+  std::string workspace;
+  BackupScheduleConfig schedule;
+  BackupLocalConfig local;
+  BackupSshConfig ssh;
+  BackupRemoteConfig remote;
+  BackupAdminConfig admin;
+};
+
 /**
  * Unified configuration parsed from config.yml + CLI flags.
  * Replaces per-service config parsing.
@@ -51,6 +114,7 @@ struct NodeConfig
   uint64_t p2p_max_candidate_dials_per_cycle = 3;
   uint64_t p2p_peer_acquisition_interval_seconds = 5;
   uint64_t p2p_candidate_redial_interval_seconds = 60;
+  uint64_t p2p_peer_log_interval_seconds = 60;
   bool p2p_force_gossip   = false;
   bool p2p_disable_gossip = false;
 
@@ -86,7 +150,12 @@ struct NodeConfig
   uint64_t rocksdb_write_buffer_size              = 64 * 1024 * 1024;
   uint64_t rocksdb_db_write_buffer_size           = 256 * 1024 * 1024;
   uint64_t rocksdb_max_write_buffer_number        = 3;
-  std::string rocksdb_blocks_compression          = "zstd";
+  std::string rocksdb_compression                 = "zstd";
+  std::string rocksdb_blocks_compression;
+  bool rocksdb_require_compression                = false;
+
+  // ── Backup ──
+  BackupConfig backup;
 
   // ── Feature flags ──
   std::map< std::string, bool > features = {

@@ -133,6 +133,7 @@ void P2PNode::start()
   _reconnect_thread = std::thread( [this]() {
     const auto seed_dial_spacing = std::chrono::seconds( 1 );
     auto last_seed_cycle = std::chrono::steady_clock::now() - _opts.seed_reconnect_interval;
+    auto last_peer_log = std::chrono::steady_clock::now() - _opts.peer_log_interval;
 
     while( _running )
     {
@@ -173,7 +174,15 @@ void P2PNode::start()
       }
 
       run_peer_acquisition_cycle();
-      log_peer_snapshot();
+      if( _opts.peer_log_interval.count() > 0 )
+      {
+        const auto log_now = std::chrono::steady_clock::now();
+        if( log_now - last_peer_log >= _opts.peer_log_interval )
+        {
+          log_peer_snapshot();
+          last_peer_log = log_now;
+        }
+      }
 
       auto loop_interval = _opts.seed_reconnect_interval;
       if( _opts.peer_discovery_enabled )
@@ -183,7 +192,8 @@ void P2PNode::start()
   } );
 
   LOG( info ) << "[p2p] Started with " << _seed_peers.size()
-              << " seed peers, target peer count " << _opts.target_peer_count;
+              << " seed peers, target peer count " << _opts.target_peer_count
+              << ", peer log interval " << _opts.peer_log_interval.count() << "s";
 }
 
 void P2PNode::stop()

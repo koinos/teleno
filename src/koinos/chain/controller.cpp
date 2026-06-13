@@ -47,6 +47,54 @@ using fork_data = std::pair< std::vector< block_topology >, block_topology >;
 
 namespace detail {
 
+state_db::state_node_comparator_function comparator_for_algorithm( fork_resolution_algorithm algo )
+{
+  switch( algo )
+  {
+    case fork_resolution_algorithm::block_time:
+      return &state_db::block_time_comparator;
+    case fork_resolution_algorithm::pob:
+      return &state_db::pob_comparator;
+    case fork_resolution_algorithm::fifo:
+      [[fallthrough]];
+    default:
+      return &state_db::fifo_comparator;
+  }
+}
+
+state_db::genesis_init_function make_genesis_initializer( const chain::genesis_data& data )
+{
+  return [ data ]( state_db::state_node_ptr root )
+  {
+    // Write genesis objects into the database
+    for( const auto& entry: data.entries() )
+    {
+      KOINOS_ASSERT( !root->get_object( entry.space(), entry.key() ),
+                     unexpected_state_exception,
+                     "encountered unexpected object in initial state" );
+
+      root->put_object( entry.space(), entry.key(), &entry.value() );
+    }
+    LOG( info ) << "Wrote " << data.entries().size() << " genesis objects into new database";
+
+    // Read genesis public key from the database, assert its existence at the correct location
+    KOINOS_ASSERT( root->get_object( state::space::metadata(), state::key::genesis_key ),
+                   unexpected_state_exception,
+                   "could not find genesis public key in database" );
+
+    // Calculate and write the chain ID into the database
+    auto chain_id = crypto::hash( koinos::crypto::multicodec::sha2_256, data );
+    LOG( info ) << "Calculated chain ID: " << chain_id;
+    auto chain_id_str = util::converter::as< std::string >( chain_id );
+    KOINOS_ASSERT( !root->get_object( chain::state::space::metadata(), chain::state::key::chain_id ),
+                   unexpected_state_exception,
+                   "encountered unexpected chain id in initial state" );
+
+    root->put_object( chain::state::space::metadata(), chain::state::key::chain_id, &chain_id_str );
+    LOG( info ) << "Wrote chain ID into new database";
+  };
+}
+
 std::string format_time( int64_t time )
 {
   std::stringstream ss;
@@ -100,6 +148,10 @@ public:
   ~controller_impl();
 
   void open( const std::filesystem::path& p, const genesis_data& data, fork_resolution_algorithm algo, bool reset );
+  void open( std::shared_ptr< state_db::backends::abstract_backend > backend,
+             const genesis_data& data,
+             fork_resolution_algorithm algo,
+             bool reset );
   void close();
   void set_client( std::shared_ptr< node::IRpcClient > c );
 
@@ -158,53 +210,11 @@ void controller_impl::open( const std::filesystem::path& p,
                             fork_resolution_algorithm algo,
                             bool reset )
 {
-  state_db::state_node_comparator_function comp;
-
-  switch( algo )
-  {
-    case fork_resolution_algorithm::block_time:
-      comp = &state_db::block_time_comparator;
-      break;
-    case fork_resolution_algorithm::pob:
-      comp = &state_db::pob_comparator;
-      break;
-    case fork_resolution_algorithm::fifo:
-      [[fallthrough]];
-    default:
-      comp = &state_db::fifo_comparator;
-  }
+  auto comp = comparator_for_algorithm( algo );
 
   _db.open(
     p,
-    [ & ]( state_db::state_node_ptr root )
-    {
-      // Write genesis objects into the database
-      for( const auto& entry: data.entries() )
-      {
-        KOINOS_ASSERT( !root->get_object( entry.space(), entry.key() ),
-                       unexpected_state_exception,
-                       "encountered unexpected object in initial state" );
-
-        root->put_object( entry.space(), entry.key(), &entry.value() );
-      }
-      LOG( info ) << "Wrote " << data.entries().size() << " genesis objects into new database";
-
-      // Read genesis public key from the database, assert its existence at the correct location
-      KOINOS_ASSERT( root->get_object( state::space::metadata(), state::key::genesis_key ),
-                     unexpected_state_exception,
-                     "could not find genesis public key in database" );
-
-      // Calculate and write the chain ID into the database
-      auto chain_id = crypto::hash( koinos::crypto::multicodec::sha2_256, data );
-      LOG( info ) << "Calculated chain ID: " << chain_id;
-      auto chain_id_str = util::converter::as< std::string >( chain_id );
-      KOINOS_ASSERT( !root->get_object( chain::state::space::metadata(), chain::state::key::chain_id ),
-                     unexpected_state_exception,
-                     "encountered unexpected chain id in initial state" );
-
-      root->put_object( chain::state::space::metadata(), chain::state::key::chain_id, &chain_id_str );
-      LOG( info ) << "Wrote chain ID into new database";
-    },
+    make_genesis_initializer( data ),
     comp,
     _db.get_unique_lock() );
 
@@ -216,6 +226,22 @@ void controller_impl::open( const std::filesystem::path& p,
 
   auto head = _db.get_head( _db.get_shared_lock() );
   LOG( info ) << "Opened database at block - Height: " << head->revision() << ", ID: " << head->id();
+}
+
+void controller_impl::open( std::shared_ptr< state_db::backends::abstract_backend > backend,
+                            const chain::genesis_data& data,
+                            fork_resolution_algorithm algo,
+                            bool reset )
+{
+  KOINOS_ASSERT( !reset,
+                 unexpected_state_exception,
+                 "reset is not supported for borrowed chain state storage" );
+
+  auto comp = comparator_for_algorithm( algo );
+  _db.open( std::move( backend ), make_genesis_initializer( data ), comp, _db.get_unique_lock() );
+
+  auto head = _db.get_head( _db.get_shared_lock() );
+  LOG( info ) << "Opened borrowed database at block - Height: " << head->revision() << ", ID: " << head->id();
 }
 
 void controller_impl::close()
@@ -1274,6 +1300,14 @@ void controller::open( const std::filesystem::path& p,
                        bool reset )
 {
   _my->open( p, data, algo, reset );
+}
+
+void controller::open( std::shared_ptr< state_db::backends::abstract_backend > backend,
+                       const chain::genesis_data& data,
+                       fork_resolution_algorithm algo,
+                       bool reset )
+{
+  _my->open( std::move( backend ), data, algo, reset );
 }
 
 void controller::close()

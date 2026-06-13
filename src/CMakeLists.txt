@@ -27,6 +27,21 @@ target_link_libraries(
       Boost::system
       Boost::log)
 
+# ── Backup planning library (native backup/restore foundation) ──
+add_library(koinos_backup_lib
+  backup/backup_plan.cpp
+  backup/backup_plan.hpp)
+
+target_include_directories(
+  koinos_backup_lib
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+
+target_link_libraries(
+  koinos_backup_lib
+    PUBLIC
+      koinos_node_core)
+
 # ── Interface headers (header-only) ──
 add_library(koinos_node_interfaces INTERFACE)
 target_include_directories(
@@ -37,6 +52,154 @@ target_link_libraries(
   koinos_node_interfaces
     INTERFACE
       Koinos::proto)
+
+# ── Local State DB library (adapted from koinos-state-db-cpp) ──
+add_library(koinos_state_db_local
+  koinos/state_db/state_db.cpp
+  koinos/state_db/state_delta.cpp
+  koinos/state_db/merge_iterator.cpp
+  koinos/state_db/backends/backend.cpp
+  koinos/state_db/backends/iterator.cpp
+  koinos/state_db/backends/map/map_backend.cpp
+  koinos/state_db/backends/map/map_iterator.cpp
+  koinos/state_db/backends/rocksdb/rocksdb_backend.cpp
+  koinos/state_db/backends/rocksdb/rocksdb_iterator.cpp
+  koinos/state_db/backends/rocksdb/object_cache.cpp
+  koinos/state_db/state_db.hpp
+  koinos/state_db/state_delta.hpp
+  koinos/state_db/merge_iterator.hpp
+  koinos/state_db/state_db_types.hpp
+  koinos/state_db/backends/backend.hpp
+  koinos/state_db/backends/exceptions.hpp
+  koinos/state_db/backends/iterator.hpp
+  koinos/state_db/backends/types.hpp
+  koinos/state_db/backends/map/map_backend.hpp
+  koinos/state_db/backends/map/map_iterator.hpp
+  koinos/state_db/backends/rocksdb/exceptions.hpp
+  koinos/state_db/backends/rocksdb/object_cache.hpp
+  koinos/state_db/backends/rocksdb/rocksdb_backend.hpp
+  koinos/state_db/backends/rocksdb/rocksdb_iterator.hpp)
+
+target_include_directories(
+  koinos_state_db_local
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+
+target_link_libraries(
+  koinos_state_db_local
+    PUBLIC
+      Koinos::exception
+      Koinos::proto
+      Koinos::crypto
+      RocksDB::rocksdb)
+
+# ── Storage library (shared RocksDB layout and metadata) ──
+add_library(koinos_storage_lib
+  storage/chain_migration.cpp
+  storage/chain_migration.hpp
+  storage/rocksdb_manager.cpp
+  storage/rocksdb_manager.hpp)
+
+target_include_directories(
+  koinos_storage_lib
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+
+target_link_libraries(
+  koinos_storage_lib
+    PUBLIC
+      koinos_node_core
+      Koinos::log
+      RocksDB::rocksdb
+      OpenSSL::Crypto)
+
+# ── Backup checkpoint library (RocksDB checkpoint primitive) ──
+add_library(koinos_backup_checkpoint_lib
+  backup/checkpoint_manager.cpp
+  backup/checkpoint_manager.hpp)
+
+target_include_directories(
+  koinos_backup_checkpoint_lib
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+
+target_link_libraries(
+  koinos_backup_checkpoint_lib
+    PUBLIC
+      koinos_storage_lib
+      RocksDB::rocksdb)
+
+# ── Backup snapshot repository (local object store + restore preflight data) ──
+add_library(koinos_backup_snapshot_lib
+  backup/snapshot_repository.cpp
+  backup/snapshot_repository.hpp)
+
+target_include_directories(
+  koinos_backup_snapshot_lib
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+
+target_link_libraries(
+  koinos_backup_snapshot_lib
+    PUBLIC
+      koinos_backup_checkpoint_lib
+      koinos_node_core
+      OpenSSL::Crypto
+    PRIVATE
+      nlohmann_json::nlohmann_json)
+
+# ── Backup SFTP upload validation backend ──
+add_library(koinos_backup_sftp_lib
+  backup/sftp_uploader.cpp
+  backup/sftp_uploader.hpp)
+
+target_include_directories(
+  koinos_backup_sftp_lib
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+
+target_link_libraries(
+  koinos_backup_sftp_lib
+    PUBLIC
+      koinos_node_core
+      koinos_backup_snapshot_lib
+      OpenSSL::Crypto
+    PRIVATE
+      nlohmann_json::nlohmann_json)
+
+# ── Runtime backup service (in-process hot backup primitive) ──
+add_library(koinos_backup_service_lib
+  backup/backup_service.cpp
+  backup/backup_service.hpp)
+
+target_include_directories(
+  koinos_backup_service_lib
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+
+target_link_libraries(
+  koinos_backup_service_lib
+    PUBLIC
+      koinos_backup_snapshot_lib
+      koinos_storage_lib)
+
+# ── Local-only backup admin HTTP server ──
+add_library(koinos_backup_admin_lib
+  backup/backup_admin_server.cpp
+  backup/backup_admin_server.hpp)
+
+target_include_directories(
+  koinos_backup_admin_lib
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+
+target_link_libraries(
+  koinos_backup_admin_lib
+    PUBLIC
+      koinos_backup_service_lib
+      Boost::system
+    PRIVATE
+      nlohmann_json::nlohmann_json)
 
 # ── Block Store library (Phase 2: C++ port of Go block_store) ──
 add_library(koinos_block_store_lib
@@ -89,7 +252,7 @@ target_include_directories(mempool_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
 
 target_link_libraries(mempool_lib PUBLIC
-  Koinos::state_db Koinos::exception Koinos::crypto Koinos::log Koinos::proto)
+  koinos_state_db_local Koinos::exception Koinos::crypto Koinos::log Koinos::proto)
 
 # ── Chain library (from koinos-chain, with MonolithClient replacing AMQP) ──
 add_library(chain
@@ -111,7 +274,7 @@ target_include_directories(chain PUBLIC
 
 target_link_libraries(chain PUBLIC
   koinos_node_core koinos_node_interfaces
-  Koinos::state_db Koinos::exception Koinos::crypto Koinos::log
+  koinos_state_db_local Koinos::exception Koinos::crypto Koinos::log
   Koinos::util Koinos::proto vm_manager)
 
 # ── Block Producer library (monolith-native producer loop) ──
@@ -255,8 +418,16 @@ if(KOINOS_ENABLE_LIBP2P)
     endif()
   endif()
 
-  find_library(GMP_LIBRARY NAMES gmp)
+  set(GMP_LIBRARY "" CACHE FILEPATH "GMP library used by cpp-libp2p VRF dependencies")
+  if(NOT GMP_LIBRARY)
+    find_library(GMP_LIBRARY NAMES libgmp.a gmp)
+  endif()
   if(GMP_LIBRARY)
+    message(STATUS "teleno_node: GMP library: ${GMP_LIBRARY}")
+    if(TARGET secp256k1-vrf::secp256k1-vrf)
+      set_property(TARGET secp256k1-vrf::secp256k1-vrf PROPERTY
+        INTERFACE_LINK_LIBRARIES "${GMP_LIBRARY}")
+    endif()
     target_link_libraries(koinos_p2p_lib PUBLIC "${GMP_LIBRARY}")
   endif()
 
@@ -292,6 +463,62 @@ if(KOINOS_BUILD_TESTS)
     koinos_node_core)
 
   add_test(NAME koinos_service_registry_test COMMAND koinos_service_registry_test)
+
+  add_executable(koinos_rocksdb_manager_test
+    ../tests/storage/rocksdb_manager_test.cpp)
+
+  target_link_libraries(koinos_rocksdb_manager_test PRIVATE
+    koinos_storage_lib)
+
+  add_test(NAME koinos_rocksdb_manager_test COMMAND koinos_rocksdb_manager_test)
+
+  add_executable(koinos_backup_plan_test
+    ../tests/backup/backup_plan_test.cpp)
+
+  target_link_libraries(koinos_backup_plan_test PRIVATE
+    koinos_backup_lib)
+
+  add_test(NAME koinos_backup_plan_test COMMAND koinos_backup_plan_test)
+
+  add_executable(koinos_backup_checkpoint_test
+    ../tests/backup/backup_checkpoint_test.cpp)
+
+  target_link_libraries(koinos_backup_checkpoint_test PRIVATE
+    koinos_backup_checkpoint_lib)
+
+  add_test(NAME koinos_backup_checkpoint_test COMMAND koinos_backup_checkpoint_test)
+
+  add_executable(koinos_backup_snapshot_test
+    ../tests/backup/backup_snapshot_test.cpp)
+
+  target_link_libraries(koinos_backup_snapshot_test PRIVATE
+    koinos_backup_snapshot_lib)
+
+  add_test(NAME koinos_backup_snapshot_test COMMAND koinos_backup_snapshot_test)
+
+  add_executable(koinos_backup_sftp_test
+    ../tests/backup/backup_sftp_test.cpp)
+
+  target_link_libraries(koinos_backup_sftp_test PRIVATE
+    koinos_backup_sftp_lib)
+
+  add_test(NAME koinos_backup_sftp_test COMMAND koinos_backup_sftp_test)
+
+  add_executable(koinos_backup_service_test
+    ../tests/backup/backup_service_test.cpp)
+
+  target_link_libraries(koinos_backup_service_test PRIVATE
+    koinos_backup_service_lib)
+
+  add_test(NAME koinos_backup_service_test COMMAND koinos_backup_service_test)
+
+  add_executable(koinos_backup_admin_server_test
+    ../tests/backup/backup_admin_server_test.cpp)
+
+  target_link_libraries(koinos_backup_admin_server_test PRIVATE
+    koinos_backup_admin_lib)
+
+  add_test(NAME koinos_backup_admin_server_test COMMAND koinos_backup_admin_server_test)
 
   add_executable(koinos_gorpc_codec_test
     ../tests/p2p/gorpc_codec_test.cpp
@@ -424,6 +651,13 @@ target_link_libraries(
     PRIVATE
       koinos_node_core
       koinos_node_interfaces
+      koinos_backup_lib
+      koinos_backup_checkpoint_lib
+      koinos_backup_snapshot_lib
+      koinos_backup_sftp_lib
+      koinos_backup_service_lib
+      koinos_backup_admin_lib
+      koinos_storage_lib
       koinos_block_store_lib
       mempool_lib
       koinos_p2p_lib
@@ -438,7 +672,7 @@ target_link_libraries(
       Koinos::util
       Koinos::exception
       Koinos::crypto
-      Koinos::state_db
+      koinos_state_db_local
       RocksDB::rocksdb
       Boost::program_options
       Boost::thread

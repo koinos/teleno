@@ -12,6 +12,10 @@
 #include <map>
 #include <memory>
 
+namespace koinos::state_db::backends {
+class abstract_backend;
+}
+
 namespace koinos::chain {
 
 namespace detail {
@@ -35,6 +39,10 @@ public:
 
   void
   open( const std::filesystem::path& p, const chain::genesis_data& data, fork_resolution_algorithm algo, bool reset );
+  void open( std::shared_ptr< state_db::backends::abstract_backend > backend,
+             const chain::genesis_data& data,
+             fork_resolution_algorithm algo,
+             bool reset );
   void close();
   void set_client( std::shared_ptr< node::IRpcClient > c );
 

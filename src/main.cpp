@@ -12,7 +12,6 @@
 #include <csignal>
 #include <cstdlib>
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -20,6 +19,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -73,14 +73,14 @@
 #include "transaction_store/transaction_store.hpp"
 
 #include "block_production/block_producer.hpp"
-
-#include <rocksdb/db.h>
-#include <rocksdb/cache.h>
-#include <rocksdb/convenience.h>
-#include <rocksdb/filter_policy.h>
-#include <rocksdb/options.h>
-#include <rocksdb/slice_transform.h>
-#include <rocksdb/table.h>
+#include "backup/backup_admin_server.hpp"
+#include "backup/backup_service.hpp"
+#include "backup/checkpoint_manager.hpp"
+#include "backup/backup_plan.hpp"
+#include "backup/sftp_uploader.hpp"
+#include "backup/snapshot_repository.hpp"
+#include "storage/chain_migration.hpp"
+#include "storage/rocksdb_manager.hpp"
 
 #if defined( __APPLE__ )
 #include <mach/mach_init.h>
@@ -94,6 +94,7 @@
 #include <koinos/rpc/chain/chain_rpc.pb.h>
 #include <koinos/rpc/block_store/block_store_rpc.pb.h>
 #include <koinos/rpc/mempool/mempool_rpc.pb.h>
+#include <koinos/state_db/backends/rocksdb/rocksdb_backend.hpp>
 #include <koinos/util/hex.hpp>
 
 #include <google/protobuf/util/json_util.h>
@@ -108,6 +109,23 @@
 #define JOBS_OPTION    "jobs"
 #define P2P_LISTEN_OPTION     "p2p-listen"
 #define JSONRPC_LISTEN_OPTION "jsonrpc-listen"
+#define STORAGE_REPORT_OPTION "storage-report"
+#define MIGRATE_CHAIN_DB_OPTION "migrate-chain-db-to-unified-rocksdb"
+#define ROLLBACK_CHAIN_DB_MIGRATION_OPTION "rollback-unified-chain-db-migration"
+#define REQUIRE_ROCKSDB_COMPRESSION_OPTION "require-rocksdb-compression"
+#define COMPACT_DB_OPTION "compact-db"
+#define COMPACT_CF_OPTION "compact-cf"
+#define BACKUP_DRY_RUN_OPTION "backup-dry-run"
+#define BACKUP_CHECKPOINT_OPTION "backup-checkpoint"
+#define BACKUP_CREATE_LOCAL_OPTION "backup-create-local"
+#define BACKUP_UPLOAD_LATEST_OPTION "backup-upload-latest"
+#define BACKUP_RESTORE_PREFLIGHT_OPTION "backup-restore-preflight"
+#define BACKUP_RESTORE_STAGE_OPTION "backup-restore-stage"
+#define BACKUP_RESTORE_ACTIVATE_OPTION "backup-restore-activate"
+#define BACKUP_RESTORE_FETCH_OPTION "backup-restore-fetch"
+#define BACKUP_OUTPUT_OPTION "backup-output"
+#define BACKUP_JSON_OPTION "backup-json"
+#define ALL_OPTION "all"
 
 namespace po = boost::program_options;
 using namespace koinos;
@@ -168,93 +186,74 @@ std::pair< std::string, uint16_t > parse_jsonrpc_listen( const std::string& list
   return { "0.0.0.0", static_cast< uint16_t >( std::stoi( listen ) ) };
 }
 
-std::string lowercase( std::string value )
+std::string join_strings( const std::vector< std::string >& values, const std::string& separator )
 {
-  std::transform( value.begin(), value.end(), value.begin(),
-                  []( unsigned char ch ) { return static_cast< char >( std::tolower( ch ) ); } );
-  return value;
-}
-
-std::string compression_name( rocksdb::CompressionType compression )
-{
-  switch( compression )
+  std::ostringstream out;
+  for( std::size_t i = 0; i < values.size(); ++i )
   {
-    case rocksdb::kNoCompression:
-      return "none";
-    case rocksdb::kSnappyCompression:
-      return "snappy";
-    case rocksdb::kZSTD:
-      return "zstd";
-    default:
-      return std::to_string( static_cast< int >( compression ) );
+    if( i )
+      out << separator;
+    out << values[ i ];
   }
+  return out.str();
 }
 
-rocksdb::CompressionType select_supported_compression( const std::string& requested,
-                                                       std::string& fallback_note )
+std::string read_backup_admin_token_file( const std::filesystem::path& token_file )
 {
-  const auto token = lowercase( requested );
-  std::vector< rocksdb::CompressionType > preferences;
+  if( token_file.empty() )
+    throw std::runtime_error( "backup.admin.token-file is required when backup.admin.enabled is true" );
 
-  if( token == "none" || token == "no" || token == "disabled" || token == "off" )
-    preferences = { rocksdb::kNoCompression };
-  else if( token == "snappy" || token == "ksnappycompression" )
-    preferences = { rocksdb::kSnappyCompression, rocksdb::kNoCompression };
-  else
-    preferences = { rocksdb::kZSTD, rocksdb::kSnappyCompression, rocksdb::kNoCompression };
+  std::ifstream input( token_file, std::ios::binary );
+  if( !input )
+    throw std::runtime_error( "failed to read backup admin token file: " + token_file.string() );
 
-  auto supported = rocksdb::GetSupportedCompressions();
-  supported.push_back( rocksdb::kNoCompression );
+  std::string token( ( std::istreambuf_iterator< char >( input ) ),
+                     std::istreambuf_iterator< char >() );
+  const auto is_token_whitespace = []( char ch ) {
+    return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
+  };
+  while( !token.empty() && is_token_whitespace( token.front() ) )
+    token.erase( token.begin() );
+  while( !token.empty() && is_token_whitespace( token.back() ) )
+    token.pop_back();
 
-  for( auto candidate: preferences )
+  if( token.empty() )
+    throw std::runtime_error( "backup admin token file is empty: " + token_file.string() );
+
+  return token;
+}
+
+void print_storage_report( std::ostream& os,
+                           const std::filesystem::path& basedir,
+                           const std::filesystem::path& state_dir,
+                           const node::storage::RocksDBManager& storage_db )
+{
+  os << "Teleno storage report\n";
+  os << "basedir: " << basedir.string() << "\n";
+  os << "shared_db: " << storage_db.path().string() << "\n";
+  os << "chain_state_db: " << state_dir.string() << "\n";
+  os << "chain_state_db_exists: " << ( std::filesystem::exists( state_dir ) ? "true" : "false" ) << "\n";
+  os << "layout.version: " << storage_db.read_metadata( "layout.version" ) << "\n";
+  os << "layout.chain_storage: " << storage_db.read_metadata( "layout.chain_storage" ) << "\n";
+  os << "layout.network: " << storage_db.read_metadata( "layout.network" ) << "\n";
+  os << "layout.created_by: " << storage_db.read_metadata( "layout.created_by" ) << "\n";
+  const auto& compression = storage_db.compression_status();
+  os << "compression.requested_default: " << compression.requested_default << "\n";
+  os << "compression.selected_default: " << compression.selected_default << "\n";
+  os << "compression.requested_blocks: " << compression.requested_blocks << "\n";
+  os << "compression.selected_blocks: " << compression.selected_blocks << "\n";
+  os << "compression.supported: " << join_strings( compression.supported_compressions, "," ) << "\n";
+  if( !compression.fallback_note.empty() )
+    os << "compression.fallback: " << compression.fallback_note << "\n";
+  os << "column_families:\n";
+  for( const auto& row: storage_db.column_family_stats() )
   {
-    if( std::find( supported.begin(), supported.end(), candidate ) != supported.end() )
-    {
-      if( !preferences.empty() && candidate != preferences.front() )
-      {
-        fallback_note = "requested " + requested + ", selected "
-                        + compression_name( candidate ) + " because the requested codec is unsupported";
-      }
-      return candidate;
-    }
+    os << "  - name: " << row.name
+       << " estimated_keys: " << row.estimated_keys
+       << " total_sst_file_size: " << row.total_sst_file_size
+       << " estimated_live_data_size: " << row.estimated_live_data_size
+       << "\n";
   }
-
-  fallback_note = "requested " + requested + ", selected none because no requested codec is supported";
-  return rocksdb::kNoCompression;
-}
-
-rocksdb::BlockBasedTableOptions make_table_options( uint64_t block_size,
-                                                    const std::shared_ptr< rocksdb::Cache >& block_cache,
-                                                    bool bloom_filter,
-                                                    bool whole_key_filtering = true )
-{
-  rocksdb::BlockBasedTableOptions opts;
-  opts.block_size                                  = static_cast< size_t >( block_size );
-  opts.block_cache                                 = block_cache;
-  opts.cache_index_and_filter_blocks               = true;
-  opts.cache_index_and_filter_blocks_with_high_priority = true;
-  opts.pin_l0_filter_and_index_blocks_in_cache     = true;
-  opts.whole_key_filtering                         = whole_key_filtering;
-
-  if( bloom_filter )
-    opts.filter_policy.reset( rocksdb::NewBloomFilterPolicy( 10 ) );
-
-  return opts;
-}
-
-void apply_point_lookup_cf_tuning( rocksdb::ColumnFamilyOptions& cf,
-                                   uint64_t write_buffer_size,
-                                   uint64_t max_write_buffer_number,
-                                   uint64_t target_file_size_base,
-                                   uint64_t max_bytes_for_level_base )
-{
-  cf.write_buffer_size                = static_cast< size_t >( write_buffer_size );
-  cf.max_write_buffer_number          = static_cast< int >( std::max< uint64_t >( 1, max_write_buffer_number ) );
-  cf.target_file_size_base            = target_file_size_base;
-  cf.max_bytes_for_level_base         = max_bytes_for_level_base;
-  cf.level_compaction_dynamic_level_bytes = true;
-  cf.optimize_filters_for_hits        = true;
-  cf.memtable_whole_key_filtering     = true;
 }
 
 } // anonymous namespace
@@ -366,7 +365,41 @@ int main( int argc, char** argv )
       ( P2P_LISTEN_OPTION,     po::value< std::string >()->default_value( "" ),
         "P2P listen address override" )
       ( JSONRPC_LISTEN_OPTION, po::value< std::string >()->default_value( "" ),
-        "JSON-RPC listen address override" );
+        "JSON-RPC listen address override" )
+      ( STORAGE_REPORT_OPTION,
+        "Print storage layout metadata and RocksDB column-family estimates, then exit" )
+      ( MIGRATE_CHAIN_DB_OPTION,
+        "Migrate legacy chain state into the shared RocksDB layout, then exit" )
+      ( ROLLBACK_CHAIN_DB_MIGRATION_OPTION,
+        "Restore the preserved legacy chain DB after unified storage migration, then exit" )
+      ( REQUIRE_ROCKSDB_COMPRESSION_OPTION,
+        "Fail if configured RocksDB compression is not exactly supported by the linked library" )
+      ( COMPACT_DB_OPTION,
+        "Compact the shared RocksDB database, then exit" )
+      ( COMPACT_CF_OPTION, po::value< std::vector< std::string > >()->multitoken(),
+        "Column family to compact; repeat or use with multiple names" )
+      ( BACKUP_DRY_RUN_OPTION,
+        "Validate native backup configuration and print the backup plan, then exit without opening RocksDB" )
+      ( BACKUP_CHECKPOINT_OPTION,
+        "Create a local RocksDB checkpoint of unified BASEDIR/db, then exit without starting node services" )
+      ( BACKUP_CREATE_LOCAL_OPTION,
+        "Create a local object-store backup snapshot from unified BASEDIR/db, then exit without starting node services" )
+      ( BACKUP_UPLOAD_LATEST_OPTION,
+        "Upload backup.local.directory latest snapshot to backup.remote.directory over OpenSSH SFTP, then exit" )
+      ( BACKUP_RESTORE_PREFLIGHT_OPTION,
+        "Validate the latest local backup snapshot and target disk space before restore, then exit without opening RocksDB" )
+      ( BACKUP_RESTORE_STAGE_OPTION,
+        "Rebuild the latest local backup snapshot into a restore staging directory, then exit without opening RocksDB" )
+      ( BACKUP_RESTORE_ACTIVATE_OPTION,
+        "Activate a staged local backup restore while the node is stopped, then exit without opening RocksDB" )
+      ( BACKUP_RESTORE_FETCH_OPTION,
+        "Fetch latest remote backup metadata and missing objects over OpenSSH SFTP, then exit without opening RocksDB" )
+      ( BACKUP_OUTPUT_OPTION, po::value< std::string >()->default_value( "" ),
+        "Output directory for --backup-checkpoint, --backup-restore-stage, or staged dir for --backup-restore-activate" )
+      ( BACKUP_JSON_OPTION,
+        "Print backup command output as JSON when used with backup command modes" )
+      ( ALL_OPTION,
+        "When used with --compact-db, compact all shared RocksDB column families" );
 
     po::variables_map vm;
     po::store( po::parse_command_line( argc, argv, desc ), vm );
@@ -414,6 +447,135 @@ int main( int argc, char** argv )
       cfg.p2p_listen = p2p;
     if( auto jrpc = vm[ JSONRPC_LISTEN_OPTION ].as< std::string >(); !jrpc.empty() )
       cfg.jsonrpc_listen = jrpc;
+    if( vm.count( REQUIRE_ROCKSDB_COMPRESSION_OPTION ) )
+      cfg.rocksdb_require_compression = true;
+
+    if( vm.count( BACKUP_JSON_OPTION )
+        && !vm.count( BACKUP_DRY_RUN_OPTION )
+        && !vm.count( BACKUP_CHECKPOINT_OPTION )
+        && !vm.count( BACKUP_CREATE_LOCAL_OPTION )
+        && !vm.count( BACKUP_UPLOAD_LATEST_OPTION )
+        && !vm.count( BACKUP_RESTORE_PREFLIGHT_OPTION )
+        && !vm.count( BACKUP_RESTORE_STAGE_OPTION )
+        && !vm.count( BACKUP_RESTORE_ACTIVATE_OPTION )
+        && !vm.count( BACKUP_RESTORE_FETCH_OPTION ) )
+      throw std::runtime_error( "--backup-json requires a backup command mode" );
+
+    if( vm.count( BACKUP_DRY_RUN_OPTION ) )
+    {
+      auto plan = node::backup::build_backup_dry_run_plan( cfg, basedir, config_path );
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << node::backup::backup_dry_run_plan_to_json( plan );
+      else
+        std::cout << node::backup::backup_dry_run_plan_to_text( plan );
+      return plan.has_errors() ? EXIT_FAILURE : EXIT_SUCCESS;
+    }
+
+    if( vm.count( BACKUP_UPLOAD_LATEST_OPTION ) )
+    {
+      auto plan = node::backup::build_backup_dry_run_plan( cfg, basedir, config_path );
+      if( plan.has_errors() )
+      {
+        if( vm.count( BACKUP_JSON_OPTION ) )
+          std::cout << node::backup::backup_dry_run_plan_to_json( plan );
+        else
+          std::cout << node::backup::backup_dry_run_plan_to_text( plan );
+        return EXIT_FAILURE;
+      }
+      if( !cfg.backup.local.enabled )
+        throw std::runtime_error( "--backup-upload-latest requires backup.local.enabled=true" );
+      if( !cfg.backup.remote.enabled )
+        throw std::runtime_error( "--backup-upload-latest requires backup.remote.enabled=true" );
+      if( !cfg.backup.ssh.enabled )
+        throw std::runtime_error( "--backup-upload-latest requires backup.ssh.enabled=true" );
+
+      auto result = node::backup::upload_latest_snapshot_with_open_ssh_sftp(
+        cfg.backup.local.directory,
+        cfg.backup.ssh,
+        cfg.backup.remote );
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << node::backup::sftp_upload_result_to_json( result );
+      else
+        std::cout << node::backup::sftp_upload_result_to_text( result );
+      return EXIT_SUCCESS;
+    }
+
+    if( vm.count( BACKUP_RESTORE_PREFLIGHT_OPTION ) )
+    {
+      if( !cfg.backup.local.enabled )
+        throw std::runtime_error( "--backup-restore-preflight requires backup.local.enabled=true" );
+      if( cfg.backup.local.directory.empty() )
+        throw std::runtime_error( "--backup-restore-preflight requires backup.local.directory" );
+
+      auto result = node::backup::build_local_restore_preflight( cfg.backup.local.directory, basedir );
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << node::backup::restore_preflight_result_to_json( result );
+      else
+        std::cout << node::backup::restore_preflight_result_to_text( result );
+      return result.ready_to_restore ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+
+    if( vm.count( BACKUP_RESTORE_STAGE_OPTION ) )
+    {
+      if( !cfg.backup.local.enabled )
+        throw std::runtime_error( "--backup-restore-stage requires backup.local.enabled=true" );
+      if( cfg.backup.local.directory.empty() )
+        throw std::runtime_error( "--backup-restore-stage requires backup.local.directory" );
+
+      const auto output = vm[ BACKUP_OUTPUT_OPTION ].as< std::string >();
+      auto result = node::backup::stage_local_restore_snapshot( cfg.backup.local.directory, basedir, output );
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << node::backup::restore_stage_result_to_json( result );
+      else
+        std::cout << node::backup::restore_stage_result_to_text( result );
+      return EXIT_SUCCESS;
+    }
+
+    if( vm.count( BACKUP_RESTORE_ACTIVATE_OPTION ) )
+    {
+      auto staging_dir = std::filesystem::path( vm[ BACKUP_OUTPUT_OPTION ].as< std::string >() );
+      if( staging_dir.empty() )
+      {
+        if( !cfg.backup.local.enabled )
+          throw std::runtime_error( "--backup-restore-activate without --backup-output requires backup.local.enabled=true" );
+        if( cfg.backup.local.directory.empty() )
+          throw std::runtime_error( "--backup-restore-activate without --backup-output requires backup.local.directory" );
+        auto preflight = node::backup::build_local_restore_preflight( cfg.backup.local.directory, basedir );
+        staging_dir = basedir / ".teleno-restore-staging" / preflight.backup_id;
+      }
+
+      auto result = node::backup::activate_staged_restore_snapshot( staging_dir, basedir );
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << node::backup::restore_activation_result_to_json( result );
+      else
+        std::cout << node::backup::restore_activation_result_to_text( result );
+      return EXIT_SUCCESS;
+    }
+
+    if( vm.count( BACKUP_RESTORE_FETCH_OPTION ) )
+    {
+      if( !cfg.backup.local.enabled )
+        throw std::runtime_error( "--backup-restore-fetch requires backup.local.enabled=true" );
+      if( cfg.backup.local.directory.empty() )
+        throw std::runtime_error( "--backup-restore-fetch requires backup.local.directory" );
+      if( !cfg.backup.remote.enabled )
+        throw std::runtime_error( "--backup-restore-fetch requires backup.remote.enabled=true" );
+      if( cfg.backup.remote.directory.empty() )
+        throw std::runtime_error( "--backup-restore-fetch requires backup.remote.directory" );
+      if( !cfg.backup.ssh.enabled )
+        throw std::runtime_error( "--backup-restore-fetch requires backup.ssh.enabled=true" );
+
+      auto result = node::backup::fetch_latest_restore_snapshot_with_open_ssh_sftp(
+        cfg.backup.local.directory,
+        basedir,
+        cfg.backup.ssh,
+        cfg.backup.remote );
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << node::backup::sftp_restore_fetch_result_to_json( result );
+      else
+        std::cout << node::backup::sftp_restore_fetch_result_to_text( result );
+      return result.ready_to_stage ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
 
     // ── Initialize logging ──
     koinos::initialize_logging( node::node_name(), {}, cfg.log_level );
@@ -435,6 +597,7 @@ int main( int argc, char** argv )
                 << " p2p_requested_io_threads=" << std::max< uint64_t >( 1, cfg.p2p_jobs )
                 << " p2p_effective_io_threads=1"
                 << " p2p_sync_threads=per-peer"
+                << " p2p_peer_log_interval_seconds=" << cfg.p2p_peer_log_interval_seconds
                 << " rocksdb_background_jobs=" << std::max< uint64_t >( 1, cfg.rocksdb_max_background_jobs );
 
     // ── Core objects ──
@@ -477,6 +640,7 @@ int main( int argc, char** argv )
     if( !cfg.disable_pending_transaction_limit )
       pending_limit = cfg.pending_transaction_limit;
 
+    node::storage::RocksDBManager storage_db;
     chain::controller controller(
       cfg.read_compute_bandwidth_limit,
       64'000,
@@ -484,157 +648,160 @@ int main( int argc, char** argv )
     );
 
     auto state_dir = basedir / "chain" / "blockchain";
-    std::filesystem::create_directories( state_dir );
-
 
     // ── Mempool ──
     koinos::mempool::mempool mempool_impl;
     node::MempoolAdapter mempool_adapter( mempool_impl );
 
     // ── Phase 2: RocksDB + Block Store ──
-    rocksdb::DB* raw_db = nullptr;
-    std::vector< rocksdb::ColumnFamilyHandle* > cf_handles;
+    storage_db.open( basedir, cfg );
+    auto* raw_db = storage_db.db();
 
-    rocksdb::Options db_options;
-    db_options.create_if_missing              = true;
-    db_options.create_missing_column_families = true;
-    db_options.max_background_jobs            = static_cast< int >( std::max< uint64_t >( 1, cfg.rocksdb_max_background_jobs ) );
-    db_options.max_subcompactions             = static_cast< uint32_t >( std::max< uint64_t >( 1, cfg.rocksdb_max_background_jobs / 2 ) );
-    db_options.bytes_per_sync                 = cfg.rocksdb_bytes_per_sync;
-    db_options.db_write_buffer_size           = static_cast< size_t >( cfg.rocksdb_db_write_buffer_size );
-    db_options.enable_pipelined_write         = true;
+    const auto migration_modes = static_cast< int >( vm.count( MIGRATE_CHAIN_DB_OPTION ) > 0 )
+                               + static_cast< int >( vm.count( ROLLBACK_CHAIN_DB_MIGRATION_OPTION ) > 0 )
+                               + static_cast< int >( vm.count( COMPACT_DB_OPTION ) > 0 )
+                               + static_cast< int >( vm.count( BACKUP_CHECKPOINT_OPTION ) > 0 )
+                               + static_cast< int >( vm.count( BACKUP_CREATE_LOCAL_OPTION ) > 0 );
+    if( migration_modes > 1 )
+      throw std::runtime_error( "choose only one storage mutation command" );
 
-    auto db_path = basedir / "db";
-    std::filesystem::create_directories( db_path );
-
-    // ── Per-CF tuning (Phase 5/Sprint 5) ──
-    auto shared_block_cache = rocksdb::NewLRUCache(
-      static_cast< size_t >( cfg.rocksdb_block_cache_mb * 1024 * 1024 ),
-      -1,
-      false,
-      0.35
-    );
-
-    std::string compression_fallback_note;
-    auto blocks_compression = select_supported_compression( cfg.rocksdb_blocks_compression,
-                                                            compression_fallback_note );
-
-    // Default CF (chain state): small blocks, point lookups + iterators
-    rocksdb::ColumnFamilyOptions cf_default;
-    apply_point_lookup_cf_tuning( cf_default,
-                                  cfg.rocksdb_write_buffer_size,
-                                  cfg.rocksdb_max_write_buffer_number,
-                                  cfg.rocksdb_target_file_size_base,
-                                  cfg.rocksdb_max_bytes_for_level_base );
-    auto default_table_opts = make_table_options( cfg.rocksdb_default_block_size,
-                                                  shared_block_cache,
-                                                  true );
-    cf_default.table_factory.reset( rocksdb::NewBlockBasedTableFactory( default_table_opts ) );
-
-    // Blocks CF: large values (full blocks), zstd compression, bloom filters
-    rocksdb::ColumnFamilyOptions cf_blocks;
-    apply_point_lookup_cf_tuning( cf_blocks,
-                                  cfg.rocksdb_write_buffer_size,
-                                  cfg.rocksdb_max_write_buffer_number,
-                                  cfg.rocksdb_target_file_size_base,
-                                  cfg.rocksdb_max_bytes_for_level_base );
-    auto blocks_table_opts = make_table_options( cfg.rocksdb_blocks_block_size,
-                                                 shared_block_cache,
-                                                 true );
-    cf_blocks.table_factory.reset( rocksdb::NewBlockBasedTableFactory( blocks_table_opts ) );
-    cf_blocks.compression           = blocks_compression;
-    cf_blocks.bottommost_compression = blocks_compression;
-
-    // Block meta CF: tiny (single key)
-    rocksdb::ColumnFamilyOptions cf_block_meta;
-    apply_point_lookup_cf_tuning( cf_block_meta,
-                                  cfg.rocksdb_write_buffer_size,
-                                  cfg.rocksdb_max_write_buffer_number,
-                                  cfg.rocksdb_target_file_size_base,
-                                  cfg.rocksdb_max_bytes_for_level_base );
-    auto block_meta_table_opts = make_table_options( cfg.rocksdb_default_block_size,
-                                                     shared_block_cache,
-                                                     true );
-    cf_block_meta.table_factory.reset( rocksdb::NewBlockBasedTableFactory( block_meta_table_opts ) );
-
-    // Contract meta CF: small values (ABI strings), bloom filters
-    rocksdb::ColumnFamilyOptions cf_contract_meta;
-    apply_point_lookup_cf_tuning( cf_contract_meta,
-                                  cfg.rocksdb_write_buffer_size,
-                                  cfg.rocksdb_max_write_buffer_number,
-                                  cfg.rocksdb_target_file_size_base,
-                                  cfg.rocksdb_max_bytes_for_level_base );
-    auto contract_meta_table_opts = make_table_options( cfg.rocksdb_default_block_size,
-                                                        shared_block_cache,
-                                                        true );
-    cf_contract_meta.table_factory.reset( rocksdb::NewBlockBasedTableFactory( contract_meta_table_opts ) );
-
-    // Transaction index CF: moderate, bloom filters for point lookups
-    rocksdb::ColumnFamilyOptions cf_tx_index;
-    apply_point_lookup_cf_tuning( cf_tx_index,
-                                  cfg.rocksdb_write_buffer_size,
-                                  cfg.rocksdb_max_write_buffer_number,
-                                  cfg.rocksdb_target_file_size_base,
-                                  cfg.rocksdb_max_bytes_for_level_base );
-    auto tx_index_table_opts = make_table_options( cfg.rocksdb_default_block_size,
-                                                   shared_block_cache,
-                                                   true );
-    cf_tx_index.table_factory.reset( rocksdb::NewBlockBasedTableFactory( tx_index_table_opts ) );
-
-    // Account history CF: prefix range scans with prefix Bloom filters
-    rocksdb::ColumnFamilyOptions cf_acct_history;
-    apply_point_lookup_cf_tuning( cf_acct_history,
-                                  cfg.rocksdb_write_buffer_size,
-                                  cfg.rocksdb_max_write_buffer_number,
-                                  cfg.rocksdb_target_file_size_base,
-                                  cfg.rocksdb_max_bytes_for_level_base );
-    cf_acct_history.prefix_extractor.reset( rocksdb::NewFixedPrefixTransform( 34 ) ); // address length
-    cf_acct_history.memtable_whole_key_filtering = false;
-    auto acct_history_table_opts = make_table_options( cfg.rocksdb_default_block_size,
-                                                       shared_block_cache,
-                                                       true,
-                                                       false );
-    cf_acct_history.table_factory.reset( rocksdb::NewBlockBasedTableFactory( acct_history_table_opts ) );
-
-    LOG( info ) << "[db] RocksDB tuning: block_cache_mb=" << cfg.rocksdb_block_cache_mb
-                << " max_background_jobs=" << db_options.max_background_jobs
-                << " max_subcompactions=" << db_options.max_subcompactions
-                << " default_block_size=" << cfg.rocksdb_default_block_size
-                << " blocks_block_size=" << cfg.rocksdb_blocks_block_size
-                << " blocks_compression=" << compression_name( blocks_compression );
-    if( !compression_fallback_note.empty() )
-      LOG( info ) << "[db] RocksDB compression fallback: " << compression_fallback_note;
-
-    // Column families
-    std::vector< rocksdb::ColumnFamilyDescriptor > cf_descriptors = {
-      { rocksdb::kDefaultColumnFamilyName, cf_default },      // 0: chain state
-      { "blocks",            cf_blocks },                      // 1: block store
-      { "block_meta",        cf_block_meta },                  // 2: block metadata
-      { "contract_meta",     cf_contract_meta },               // 3: contract ABI
-      { "transaction_index", cf_tx_index },                    // 4: tx index
-      { "account_history",   cf_acct_history }                 // 5: account history
-    };
-
-    auto db_status = rocksdb::DB::Open( db_options, db_path.string(), cf_descriptors, &cf_handles, &raw_db );
-    if( !db_status.ok() )
+    if( vm.count( BACKUP_CHECKPOINT_OPTION ) )
     {
-      LOG( error ) << "[db] Failed to open RocksDB at " << db_path.string() << ": " << db_status.ToString();
-      return EXIT_FAILURE;
+      const auto output = vm[ BACKUP_OUTPUT_OPTION ].as< std::string >();
+      if( output.empty() )
+        throw std::runtime_error( "--backup-checkpoint requires --backup-output <directory>" );
+
+      const auto chain_layout = storage_db.read_metadata( "layout.chain_storage" );
+      if( chain_layout != "unified" )
+        throw std::runtime_error( "--backup-checkpoint currently requires unified chain storage; current layout is "
+                                  + ( chain_layout.empty() ? std::string( "unknown" ) : chain_layout ) );
+
+      node::backup::CheckpointManager checkpoint_manager( basedir, storage_db );
+      auto checkpoint_result = checkpoint_manager.create_checkpoint( output );
+
+      if( vm.count( BACKUP_JSON_OPTION ) )
+      {
+        std::cout << "{\n"
+                  << "  \"checkpoint_dir\": \"" << checkpoint_result.checkpoint_dir.string() << "\",\n"
+                  << "  \"db_dir\": \"" << checkpoint_result.db_dir.string() << "\",\n"
+                  << "  \"file_count\": " << checkpoint_result.file_count << ",\n"
+                  << "  \"total_bytes\": " << checkpoint_result.total_bytes << "\n"
+                  << "}\n";
+      }
+      else
+      {
+        std::cout << "Created RocksDB checkpoint\n"
+                  << "checkpoint_dir: " << checkpoint_result.checkpoint_dir.string() << "\n"
+                  << "db_dir: " << checkpoint_result.db_dir.string() << "\n"
+                  << "file_count: " << checkpoint_result.file_count << "\n"
+                  << "total_bytes: " << checkpoint_result.total_bytes << "\n";
+      }
+      return EXIT_SUCCESS;
     }
-    std::unique_ptr< rocksdb::DB > db( raw_db );
-    LOG( info ) << "[db] RocksDB opened at " << db_path.string()
-                << " with " << cf_handles.size() << " column families";
+
+    if( vm.count( BACKUP_CREATE_LOCAL_OPTION ) )
+    {
+      auto plan = node::backup::build_backup_dry_run_plan( cfg, basedir, config_path );
+      if( plan.has_errors() )
+      {
+        if( vm.count( BACKUP_JSON_OPTION ) )
+          std::cout << node::backup::backup_dry_run_plan_to_json( plan );
+        else
+          std::cout << node::backup::backup_dry_run_plan_to_text( plan );
+        return EXIT_FAILURE;
+      }
+      node::backup::BackupService backup_service( cfg, basedir, config_path, storage_db );
+      auto snapshot_result = backup_service.create_local_snapshot();
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << node::backup::local_snapshot_result_to_json( snapshot_result );
+      else
+        std::cout << node::backup::local_snapshot_result_to_text( snapshot_result );
+
+      return EXIT_SUCCESS;
+    }
+
+    if( vm.count( MIGRATE_CHAIN_DB_OPTION ) )
+    {
+      auto result = node::storage::migrate_legacy_chain_db_to_unified( basedir, storage_db );
+      std::cout << "Migrated legacy chain DB to unified RocksDB\n";
+      std::cout << "source: " << result.source_path.string() << "\n";
+      std::cout << "backup: " << result.backup_path.string() << "\n";
+      std::cout << "objects: count=" << result.objects.record_count
+                << " bytes=" << result.objects.byte_count
+                << " sha256=" << result.objects.source_hash << "\n";
+      std::cout << "metadata: count=" << result.metadata.record_count
+                << " bytes=" << result.metadata.byte_count
+                << " sha256=" << result.metadata.source_hash << "\n";
+      return EXIT_SUCCESS;
+    }
+
+    if( vm.count( ROLLBACK_CHAIN_DB_MIGRATION_OPTION ) )
+    {
+      auto result = node::storage::rollback_unified_chain_db_migration( basedir, storage_db );
+      std::cout << "Rolled back unified chain DB migration\n";
+      std::cout << "restored: " << result.restored_path.string() << "\n";
+      std::cout << "from backup: " << result.backup_path.string() << "\n";
+      return EXIT_SUCCESS;
+    }
+
+    if( vm.count( COMPACT_CF_OPTION ) && !vm.count( COMPACT_DB_OPTION ) )
+      throw std::runtime_error( "--compact-cf requires --compact-db" );
+    if( vm.count( ALL_OPTION ) && !vm.count( COMPACT_DB_OPTION ) )
+      throw std::runtime_error( "--all requires --compact-db" );
+
+    if( vm.count( COMPACT_DB_OPTION ) )
+    {
+      if( vm.count( ALL_OPTION ) && vm.count( COMPACT_CF_OPTION ) )
+        throw std::runtime_error( "choose either --all or --compact-cf, not both" );
+      if( !vm.count( ALL_OPTION ) && !vm.count( COMPACT_CF_OPTION ) )
+        throw std::runtime_error( "--compact-db requires --all or at least one --compact-cf" );
+
+      if( vm.count( ALL_OPTION ) )
+      {
+        storage_db.compact_all_column_families();
+        std::cout << "Compacted all shared RocksDB column families\n";
+      }
+      else
+      {
+        for( const auto& cf_name: vm[ COMPACT_CF_OPTION ].as< std::vector< std::string > >() )
+        {
+          const auto cf = node::storage::column_family_from_name( cf_name );
+          storage_db.compact_column_family( cf );
+          std::cout << "Compacted RocksDB column family: " << node::storage::column_family_name( cf ) << "\n";
+        }
+      }
+
+      if( vm.count( STORAGE_REPORT_OPTION ) )
+        print_storage_report( std::cout, basedir, state_dir, storage_db );
+      return EXIT_SUCCESS;
+    }
+
+    if( vm.count( STORAGE_REPORT_OPTION ) )
+    {
+      print_storage_report( std::cout, basedir, state_dir, storage_db );
+      return EXIT_SUCCESS;
+    }
 
     // Block store using RocksDB column families
-    node::block_store::BlockStore block_store_impl( raw_db, cf_handles[ 1 ], cf_handles[ 2 ] );
+    node::block_store::BlockStore block_store_impl(
+      raw_db,
+      storage_db.handle( node::storage::ColumnFamily::blocks ),
+      storage_db.handle( node::storage::ColumnFamily::block_meta ) );
 
     // Phase 4: Contract meta store + Transaction store
-    node::contract_meta_store::ContractMetaStore contract_meta_impl( raw_db, cf_handles[ 3 ] );
-    node::transaction_store::TransactionStore transaction_store_impl( raw_db, cf_handles[ 4 ] );
-    node::account_history::AccountHistory account_history_impl( raw_db, cf_handles[ 5 ] );
+    node::contract_meta_store::ContractMetaStore contract_meta_impl(
+      raw_db,
+      storage_db.handle( node::storage::ColumnFamily::contract_meta ) );
+    node::transaction_store::TransactionStore transaction_store_impl(
+      raw_db,
+      storage_db.handle( node::storage::ColumnFamily::transaction_index ) );
+    node::account_history::AccountHistory account_history_impl(
+      raw_db,
+      storage_db.handle( node::storage::ColumnFamily::account_history ) );
 
     // Chain adapter implements IChain
     ChainAdapter chain_adapter( controller );
+    const auto chain_storage_layout = storage_db.read_metadata( "layout.chain_storage" );
 
     // Register block store component
     if( cfg.is_enabled( "block_store" ) )
@@ -657,6 +824,9 @@ int main( int argc, char** argv )
     if( std::filesystem::exists( backup_marker ) )
     {
       LOG( info ) << "[chain] Backup restore detected — enabling verify-blocks for merkle correction";
+      if( cfg.is_enabled( "block_producer" ) )
+        LOG( warning ) << "[block_producer] Backup restore first start detected — disabling block production for observer recovery";
+      cfg.features[ "block_producer" ] = false;
       force_verify = true;
       std::filesystem::remove( backup_marker );
     }
@@ -669,8 +839,23 @@ int main( int argc, char** argv )
       registry.add(
         "chain",
         [&]() {
-          controller.open( state_dir, genesis, fork_algo, cfg.reset );
-          LOG( info ) << "[chain] State DB opened at " << state_dir.string();
+          if( chain_storage_layout == "unified" )
+          {
+            auto backend = std::make_shared< state_db::backends::rocksdb::rocksdb_backend >();
+            backend->open(
+              *raw_db,
+              *storage_db.handle( node::storage::ColumnFamily::default_state ),
+              *storage_db.handle( node::storage::ColumnFamily::chain_state ),
+              *storage_db.handle( node::storage::ColumnFamily::chain_metadata ) );
+            controller.open( std::move( backend ), genesis, fork_algo, cfg.reset );
+            LOG( info ) << "[chain] State DB opened from shared RocksDB column families";
+          }
+          else
+          {
+            std::filesystem::create_directories( state_dir );
+            controller.open( state_dir, genesis, fork_algo, cfg.reset );
+            LOG( info ) << "[chain] State DB opened at " << state_dir.string();
+          }
         },
         [&]() {
           controller.close();
@@ -937,6 +1122,7 @@ int main( int argc, char** argv )
 	        static_cast< uint32_t >( cfg.p2p_max_candidate_dials_per_cycle );
 	      p2p_opts.peer_acquisition_interval = std::chrono::seconds( cfg.p2p_peer_acquisition_interval_seconds );
 	      p2p_opts.candidate_redial_interval = std::chrono::seconds( cfg.p2p_candidate_redial_interval_seconds );
+	      p2p_opts.peer_log_interval        = std::chrono::seconds( cfg.p2p_peer_log_interval_seconds );
 	      p2p_opts.always_enable_gossip    = cfg.p2p_force_gossip;
 	      p2p_opts.always_disable_gossip   = cfg.p2p_disable_gossip;
       for( const auto& checkpoint: cfg.p2p_checkpoints )
@@ -979,6 +1165,7 @@ int main( int argc, char** argv )
 	        static_cast< uint32_t >( cfg.p2p_max_candidate_dials_per_cycle );
 	      p2p_opts.peer_acquisition_interval = std::chrono::seconds( cfg.p2p_peer_acquisition_interval_seconds );
 	      p2p_opts.candidate_redial_interval = std::chrono::seconds( cfg.p2p_candidate_redial_interval_seconds );
+	      p2p_opts.peer_log_interval        = std::chrono::seconds( cfg.p2p_peer_log_interval_seconds );
 	      p2p_opts.always_enable_gossip    = cfg.p2p_force_gossip;
 	      p2p_opts.always_disable_gossip   = cfg.p2p_disable_gossip;
       for( const auto& checkpoint: cfg.p2p_checkpoints )
@@ -1054,6 +1241,36 @@ int main( int argc, char** argv )
         "jsonrpc",
         [&]() { jsonrpc_server->start(); },
         [&]() { jsonrpc_server->stop(); }
+      );
+    }
+
+    std::unique_ptr< node::backup::BackupService > backup_service_runtime;
+    std::unique_ptr< node::backup::BackupAdminServer > backup_admin_server;
+    if( cfg.backup.admin.enabled )
+    {
+      auto [admin_host, admin_port] = parse_jsonrpc_listen( cfg.backup.admin.listen );
+      if( cfg.backup.admin.listen.find( ':' ) == std::string::npos
+          && cfg.backup.admin.listen.find( "/tcp/" ) == std::string::npos )
+        admin_host = "127.0.0.1";
+
+      const auto admin_token = read_backup_admin_token_file( cfg.backup.admin.token_file );
+
+      backup_service_runtime = std::make_unique< node::backup::BackupService >(
+        cfg,
+        basedir,
+        config_path,
+        storage_db );
+      backup_admin_server = std::make_unique< node::backup::BackupAdminServer >(
+        backup_service_runtime.get(),
+        admin_host,
+        admin_port,
+        static_cast< unsigned int >( std::max< uint64_t >( 1, cfg.backup.admin.jobs ) ),
+        admin_token );
+
+      registry.add(
+        "backup_admin",
+        [&]() { backup_admin_server->start(); },
+        [&]() { backup_admin_server->stop(); }
       );
     }
 
@@ -1147,10 +1364,6 @@ int main( int argc, char** argv )
 
     // ── Run main event loop ──
     main_ioc.run();
-
-    // Clean up RocksDB column family handles
-    for( auto* h: cf_handles )
-      delete h;
 
     LOG( info ) << "[node] " << node::node_name() << " shutdown complete";
     return EXIT_SUCCESS;

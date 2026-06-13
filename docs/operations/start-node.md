@@ -53,6 +53,17 @@ curl -sS http://127.0.0.1:18122/ \
   --data '{"jsonrpc":"2.0","id":1,"method":"chain.get_head_info","params":{}}'
 ```
 
+## Peer Snapshot Log Interval
+
+Connected-peer snapshots are written to the node log at most once per configured interval. The default is `60` seconds:
+
+```yaml
+p2p:
+  peer-log-interval-seconds: 60
+```
+
+Set `peer-log-interval-seconds: 0` to disable periodic connected-peer snapshots. Peer connect/disconnect and handshake events are still logged separately.
+
 ## Mainnet / Production
 
 The restored mainnet basedir is:

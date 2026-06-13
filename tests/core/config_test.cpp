@@ -36,6 +36,7 @@ global:
     - chain.get_head_info
 p2p:
   identity-seed: stable-seed
+  peer-log-interval-seconds: 60
   checkpoint:
     - "7:0x1220abcd"
   peer:
@@ -47,9 +48,97 @@ p2p:
     assert( cfg.rpc_whitelist.size() == 1 );
     assert( cfg.p2p_identity_seed == "stable-seed" );
     assert( cfg.p2p_seeds.size() == 1 );
+    assert( cfg.p2p_peer_log_interval_seconds == 60 );
     assert( cfg.p2p_checkpoints.size() == 1 );
     assert( cfg.p2p_checkpoints[ 0 ].block_height == 7 );
     assert( cfg.p2p_checkpoints[ 0 ].block_id == std::string( "\x12\x20\xab\xcd", 4 ) );
+
+    std::filesystem::remove( path );
+  }
+
+  {
+    auto path = write_config( R"(
+p2p:
+  peer-log-interval-seconds: 120
+)" );
+
+    auto cfg = load_config( path );
+    assert( cfg.p2p_peer_log_interval_seconds == 120 );
+
+    std::filesystem::remove( path );
+  }
+
+  {
+    auto path = write_config( R"(
+backup:
+  enabled: true
+  node-id: testnet-producer-1
+  workspace: /tmp/teleno-backup-work
+  schedule:
+    enabled: true
+    interval: 6h
+    run-on-startup-if-missed: true
+    jitter-seconds: 120
+    minimum-head-progress: 2
+    skip-if-syncing-from-genesis: true
+    max-concurrent-backups: 1
+  local:
+    enabled: true
+    directory: /tmp/teleno-local-backups
+    retention-count: 3
+  ssh:
+    enabled: true
+    transport: native
+    host: 10.0.0.2
+    port: 2222
+    user: teleno-backup
+    auth: password-file
+    password-file: /tmp/teleno-backup-password
+    known-hosts-file: /tmp/teleno-known-hosts
+    strict-host-key-checking: true
+    connect-timeout-seconds: 20
+  remote:
+    enabled: true
+    directory: /srv/teleno-backups
+    retention-count: 14
+    retention-days: 30
+    upload-temp-suffix: .uploading
+  admin:
+    enabled: true
+    listen: 127.0.0.1:18089
+    token-file: /tmp/teleno-backup-admin-token
+    jobs: 2
+)" );
+
+    auto cfg = load_config( path );
+    assert( cfg.backup.enabled );
+    assert( cfg.backup.node_id == "testnet-producer-1" );
+    assert( cfg.backup.workspace == "/tmp/teleno-backup-work" );
+    assert( cfg.backup.schedule.enabled );
+    assert( cfg.backup.schedule.interval == "6h" );
+    assert( cfg.backup.schedule.run_on_startup_if_missed );
+    assert( cfg.backup.schedule.jitter_seconds == 120 );
+    assert( cfg.backup.schedule.minimum_head_progress == 2 );
+    assert( cfg.backup.schedule.skip_if_syncing_from_genesis );
+    assert( cfg.backup.local.enabled );
+    assert( cfg.backup.local.directory == "/tmp/teleno-local-backups" );
+    assert( cfg.backup.local.retention_count == 3 );
+    assert( cfg.backup.ssh.enabled );
+    assert( cfg.backup.ssh.host == "10.0.0.2" );
+    assert( cfg.backup.ssh.port == 2222 );
+    assert( cfg.backup.ssh.user == "teleno-backup" );
+    assert( cfg.backup.ssh.password_file == "/tmp/teleno-backup-password" );
+    assert( cfg.backup.ssh.known_hosts_file == "/tmp/teleno-known-hosts" );
+    assert( cfg.backup.ssh.connect_timeout_seconds == 20 );
+    assert( cfg.backup.remote.enabled );
+    assert( cfg.backup.remote.directory == "/srv/teleno-backups" );
+    assert( cfg.backup.remote.retention_count == 14 );
+    assert( cfg.backup.remote.retention_days == 30 );
+    assert( cfg.backup.remote.upload_temp_suffix == ".uploading" );
+    assert( cfg.backup.admin.enabled );
+    assert( cfg.backup.admin.listen == "127.0.0.1:18089" );
+    assert( cfg.backup.admin.token_file == "/tmp/teleno-backup-admin-token" );
+    assert( cfg.backup.admin.jobs == 2 );
 
     std::filesystem::remove( path );
   }
@@ -62,6 +151,7 @@ p2p:
 
     auto cfg = load_config( path );
     assert( cfg.p2p_identity_seed == "legacy-identity-seed" );
+    assert( cfg.p2p_peer_log_interval_seconds == 60 );
     assert( cfg.p2p_seeds.empty() );
 
     std::filesystem::remove( path );

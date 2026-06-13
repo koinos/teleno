@@ -236,6 +236,8 @@ NodeConfig load_config( const std::filesystem::path& config_path,
         yaml_get< uint64_t >( p, "peer-acquisition-interval-seconds", cfg.p2p_peer_acquisition_interval_seconds );
       cfg.p2p_candidate_redial_interval_seconds =
         yaml_get< uint64_t >( p, "candidate-redial-interval-seconds", cfg.p2p_candidate_redial_interval_seconds );
+      cfg.p2p_peer_log_interval_seconds =
+        yaml_get< uint64_t >( p, "peer-log-interval-seconds", cfg.p2p_peer_log_interval_seconds );
       cfg.p2p_force_gossip = yaml_get< bool >( p, "force-gossip", cfg.p2p_force_gossip );
       cfg.p2p_disable_gossip = yaml_get< bool >( p, "disable-gossip", cfg.p2p_disable_gossip );
       cfg.p2p_identity_seed = yaml_get_string_scalar( p, "identity-seed", cfg.p2p_identity_seed );
@@ -307,7 +309,99 @@ NodeConfig load_config( const std::filesystem::path& config_path,
       cfg.rocksdb_write_buffer_size        = yaml_get< uint64_t >( r, "write-buffer-size", cfg.rocksdb_write_buffer_size );
       cfg.rocksdb_db_write_buffer_size     = yaml_get< uint64_t >( r, "db-write-buffer-size", cfg.rocksdb_db_write_buffer_size );
       cfg.rocksdb_max_write_buffer_number  = yaml_get< uint64_t >( r, "max-write-buffer-number", cfg.rocksdb_max_write_buffer_number );
+      cfg.rocksdb_compression              = yaml_get< std::string >( r, "compression", cfg.rocksdb_compression );
       cfg.rocksdb_blocks_compression       = yaml_get< std::string >( r, "blocks-compression", cfg.rocksdb_blocks_compression );
+      cfg.rocksdb_require_compression      = yaml_get< bool >( r, "require-compression", cfg.rocksdb_require_compression );
+    }
+
+    // ── Backup ──
+    if( auto b = yaml_child( root, "backup" ); b.IsDefined() )
+    {
+      cfg.backup.enabled = yaml_get< bool >( b, "enabled", cfg.backup.enabled );
+      cfg.backup.node_id = yaml_get< std::string >( b, "node-id", cfg.backup.node_id );
+      cfg.backup.workspace = yaml_get< std::string >( b, "workspace", cfg.backup.workspace );
+
+      if( auto schedule = yaml_child( b, "schedule" ); schedule.IsDefined() )
+      {
+        cfg.backup.schedule.enabled =
+          yaml_get< bool >( schedule, "enabled", cfg.backup.schedule.enabled );
+        cfg.backup.schedule.interval =
+          yaml_get< std::string >( schedule, "interval", cfg.backup.schedule.interval );
+        cfg.backup.schedule.run_on_startup_if_missed =
+          yaml_get< bool >( schedule, "run-on-startup-if-missed", cfg.backup.schedule.run_on_startup_if_missed );
+        cfg.backup.schedule.jitter_seconds =
+          yaml_get< uint64_t >( schedule, "jitter-seconds", cfg.backup.schedule.jitter_seconds );
+        cfg.backup.schedule.minimum_head_progress =
+          yaml_get< uint64_t >( schedule, "minimum-head-progress", cfg.backup.schedule.minimum_head_progress );
+        cfg.backup.schedule.skip_if_syncing_from_genesis =
+          yaml_get< bool >( schedule, "skip-if-syncing-from-genesis", cfg.backup.schedule.skip_if_syncing_from_genesis );
+        cfg.backup.schedule.max_concurrent_backups =
+          yaml_get< uint64_t >( schedule, "max-concurrent-backups", cfg.backup.schedule.max_concurrent_backups );
+      }
+
+      if( auto local = yaml_child( b, "local" ); local.IsDefined() )
+      {
+        cfg.backup.local.enabled =
+          yaml_get< bool >( local, "enabled", cfg.backup.local.enabled );
+        cfg.backup.local.directory =
+          yaml_get< std::string >( local, "directory", cfg.backup.local.directory );
+        cfg.backup.local.retention_count =
+          yaml_get< uint64_t >( local, "retention-count", cfg.backup.local.retention_count );
+      }
+
+      if( auto ssh = yaml_child( b, "ssh" ); ssh.IsDefined() )
+      {
+        cfg.backup.ssh.enabled =
+          yaml_get< bool >( ssh, "enabled", cfg.backup.ssh.enabled );
+        cfg.backup.ssh.transport =
+          yaml_get< std::string >( ssh, "transport", cfg.backup.ssh.transport );
+        cfg.backup.ssh.host =
+          yaml_get< std::string >( ssh, "host", cfg.backup.ssh.host );
+        cfg.backup.ssh.port =
+          yaml_get< uint64_t >( ssh, "port", cfg.backup.ssh.port );
+        cfg.backup.ssh.user =
+          yaml_get< std::string >( ssh, "user", cfg.backup.ssh.user );
+        cfg.backup.ssh.auth =
+          yaml_get< std::string >( ssh, "auth", cfg.backup.ssh.auth );
+        cfg.backup.ssh.password_file =
+          yaml_get< std::string >( ssh, "password-file", cfg.backup.ssh.password_file );
+        cfg.backup.ssh.private_key_file =
+          yaml_get< std::string >( ssh, "private-key-file", cfg.backup.ssh.private_key_file );
+        cfg.backup.ssh.passphrase_file =
+          yaml_get< std::string >( ssh, "passphrase-file", cfg.backup.ssh.passphrase_file );
+        cfg.backup.ssh.known_hosts_file =
+          yaml_get< std::string >( ssh, "known-hosts-file", cfg.backup.ssh.known_hosts_file );
+        cfg.backup.ssh.strict_host_key_checking =
+          yaml_get< bool >( ssh, "strict-host-key-checking", cfg.backup.ssh.strict_host_key_checking );
+        cfg.backup.ssh.connect_timeout_seconds =
+          yaml_get< uint64_t >( ssh, "connect-timeout-seconds", cfg.backup.ssh.connect_timeout_seconds );
+      }
+
+      if( auto remote = yaml_child( b, "remote" ); remote.IsDefined() )
+      {
+        cfg.backup.remote.enabled =
+          yaml_get< bool >( remote, "enabled", cfg.backup.remote.enabled );
+        cfg.backup.remote.directory =
+          yaml_get< std::string >( remote, "directory", cfg.backup.remote.directory );
+        cfg.backup.remote.retention_count =
+          yaml_get< uint64_t >( remote, "retention-count", cfg.backup.remote.retention_count );
+        cfg.backup.remote.retention_days =
+          yaml_get< uint64_t >( remote, "retention-days", cfg.backup.remote.retention_days );
+        cfg.backup.remote.upload_temp_suffix =
+          yaml_get< std::string >( remote, "upload-temp-suffix", cfg.backup.remote.upload_temp_suffix );
+      }
+
+      if( auto admin = yaml_child( b, "admin" ); admin.IsDefined() )
+      {
+        cfg.backup.admin.enabled =
+          yaml_get< bool >( admin, "enabled", cfg.backup.admin.enabled );
+        cfg.backup.admin.listen =
+          yaml_get< std::string >( admin, "listen", cfg.backup.admin.listen );
+        cfg.backup.admin.token_file =
+          yaml_get< std::string >( admin, "token-file", cfg.backup.admin.token_file );
+        cfg.backup.admin.jobs =
+          yaml_get< uint64_t >( admin, "jobs", cfg.backup.admin.jobs );
+      }
     }
 
     // ── Feature flags ──
