@@ -126,6 +126,7 @@
 #define BACKUP_CREATE_OPTION "backup-create"
 #define BACKUP_CREATE_LOCAL_OPTION "backup-create-local"
 #define BACKUP_UPLOAD_LATEST_OPTION "backup-upload-latest"
+#define BACKUP_RESTORE_OPTION "backup-restore"
 #define BACKUP_RESTORE_PREFLIGHT_OPTION "backup-restore-preflight"
 #define BACKUP_RESTORE_STAGE_OPTION "backup-restore-stage"
 #define BACKUP_RESTORE_ACTIVATE_OPTION "backup-restore-activate"
@@ -295,6 +296,71 @@ std::string configured_backup_result_to_json(
   return result.dump( 2 ) + "\n";
 }
 
+std::string shell_quote( const std::filesystem::path& path )
+{
+  std::string value = path.string();
+  std::string out = "'";
+  for( char ch: value )
+  {
+    if( ch == '\'' )
+      out += "'\\''";
+    else
+      out.push_back( ch );
+  }
+  out += "'";
+  return out;
+}
+
+struct ConfiguredRestoreResult
+{
+  bool ok = false;
+  bool remote_enabled = false;
+  std::optional< node::backup::SftpRestoreFetchResult > remote_fetch;
+  node::backup::RestorePreflightResult preflight;
+  std::optional< node::backup::RestoreStageResult > stage;
+  std::optional< node::backup::RestoreActivationResult > activation;
+  std::string observer_start_command;
+};
+
+std::string configured_restore_result_to_text( const ConfiguredRestoreResult& result )
+{
+  std::ostringstream out;
+  out << ( result.ok ? "Restored configured Teleno backup\n"
+                     : "Teleno backup restore did not complete\n" );
+  out << "remote_enabled: " << ( result.remote_enabled ? "true" : "false" ) << "\n";
+  if( result.remote_fetch )
+    out << node::backup::sftp_restore_fetch_result_to_text( *result.remote_fetch );
+  out << node::backup::restore_preflight_result_to_text( result.preflight );
+  if( result.stage )
+    out << node::backup::restore_stage_result_to_text( *result.stage );
+  if( result.activation )
+  {
+    out << node::backup::restore_activation_result_to_text( *result.activation );
+    out << "observer_start_command: " << result.observer_start_command << "\n";
+  }
+  return out.str();
+}
+
+std::string configured_restore_result_to_json( const ConfiguredRestoreResult& result )
+{
+  nlohmann::json json;
+  json[ "ok" ] = result.ok;
+  json[ "remote_enabled" ] = result.remote_enabled;
+  json[ "remote_fetch" ] = result.remote_fetch
+    ? nlohmann::json::parse( node::backup::sftp_restore_fetch_result_to_json( *result.remote_fetch ) )
+    : nlohmann::json( nullptr );
+  json[ "preflight" ] = nlohmann::json::parse(
+    node::backup::restore_preflight_result_to_json( result.preflight ) );
+  json[ "stage" ] = result.stage
+    ? nlohmann::json::parse( node::backup::restore_stage_result_to_json( *result.stage ) )
+    : nlohmann::json( nullptr );
+  json[ "activation" ] = result.activation
+    ? nlohmann::json::parse( node::backup::restore_activation_result_to_json( *result.activation ) )
+    : nlohmann::json( nullptr );
+  json[ "observer_start_command" ] = result.observer_start_command;
+  return json.dump( 2 ) + "\n";
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -427,6 +493,8 @@ int main( int argc, char** argv )
         "Create a local object-store backup snapshot from unified BASEDIR/db, then exit without starting node services" )
       ( BACKUP_UPLOAD_LATEST_OPTION,
         "Upload backup.local.directory latest snapshot to backup.remote.directory over the managed SFTP transport, then exit" )
+      ( BACKUP_RESTORE_OPTION,
+        "Restore the configured latest native backup: fetch remote data when enabled, preflight, stage, activate, then exit" )
       ( BACKUP_RESTORE_PREFLIGHT_OPTION,
         "Validate the latest local backup snapshot and target disk space before restore, then exit without opening RocksDB" )
       ( BACKUP_RESTORE_STAGE_OPTION,
@@ -436,7 +504,7 @@ int main( int argc, char** argv )
       ( BACKUP_RESTORE_FETCH_OPTION,
         "Fetch latest remote backup metadata and missing objects over the managed SFTP transport, then exit without opening RocksDB" )
       ( BACKUP_OUTPUT_OPTION, po::value< std::string >()->default_value( "" ),
-        "Output directory for --backup-checkpoint, --backup-restore-stage, or staged dir for --backup-restore-activate" )
+        "Output directory for --backup-checkpoint, staging directory for --backup-restore/--backup-restore-stage, or staged dir for --backup-restore-activate" )
       ( BACKUP_JSON_OPTION,
         "Print backup command output as JSON when used with backup command modes" )
       ( ALL_OPTION,
@@ -497,6 +565,7 @@ int main( int argc, char** argv )
         && !vm.count( BACKUP_CREATE_OPTION )
         && !vm.count( BACKUP_CREATE_LOCAL_OPTION )
         && !vm.count( BACKUP_UPLOAD_LATEST_OPTION )
+        && !vm.count( BACKUP_RESTORE_OPTION )
         && !vm.count( BACKUP_RESTORE_PREFLIGHT_OPTION )
         && !vm.count( BACKUP_RESTORE_STAGE_OPTION )
         && !vm.count( BACKUP_RESTORE_ACTIVATE_OPTION )
@@ -539,6 +608,78 @@ int main( int argc, char** argv )
         std::cout << node::backup::sftp_upload_result_to_json( result );
       else
         std::cout << node::backup::sftp_upload_result_to_text( result );
+      return EXIT_SUCCESS;
+    }
+
+    if( vm.count( BACKUP_RESTORE_OPTION ) )
+    {
+      if( !cfg.backup.local.enabled )
+        throw std::runtime_error(
+          "--backup-restore requires backup.local.enabled=true because restore uses the local object repository as its verified cache" );
+      if( cfg.backup.local.directory.empty() )
+        throw std::runtime_error( "--backup-restore requires backup.local.directory" );
+      if( cfg.backup.remote.enabled )
+      {
+        if( cfg.backup.remote.directory.empty() )
+          throw std::runtime_error( "--backup-restore remote fetch requires backup.remote.directory" );
+        if( !cfg.backup.ssh.enabled )
+          throw std::runtime_error( "--backup-restore remote fetch requires backup.ssh.enabled=true" );
+      }
+
+      ConfiguredRestoreResult result;
+      result.remote_enabled = cfg.backup.remote.enabled;
+
+      if( cfg.backup.remote.enabled )
+      {
+        result.remote_fetch = node::backup::fetch_latest_restore_snapshot_with_managed_sftp(
+          cfg.backup.local.directory,
+          basedir,
+          cfg.backup.ssh,
+          cfg.backup.remote );
+        result.preflight = result.remote_fetch->preflight;
+        if( !result.remote_fetch->ready_to_stage )
+        {
+          if( vm.count( BACKUP_JSON_OPTION ) )
+            std::cout << configured_restore_result_to_json( result );
+          else
+            std::cout << configured_restore_result_to_text( result );
+          return EXIT_FAILURE;
+        }
+      }
+      else
+      {
+        result.preflight = node::backup::build_local_restore_preflight(
+          cfg.backup.local.directory,
+          basedir );
+        if( !result.preflight.ready_to_restore )
+        {
+          if( vm.count( BACKUP_JSON_OPTION ) )
+            std::cout << configured_restore_result_to_json( result );
+          else
+            std::cout << configured_restore_result_to_text( result );
+          return EXIT_FAILURE;
+        }
+      }
+
+      const auto output = vm[ BACKUP_OUTPUT_OPTION ].as< std::string >();
+      result.stage = node::backup::stage_local_restore_snapshot(
+        cfg.backup.local.directory,
+        basedir,
+        output );
+      result.activation = node::backup::activate_staged_restore_snapshot(
+        result.stage->staging_dir,
+        basedir );
+      result.ok = true;
+      std::ostringstream start_command;
+      start_command << "teleno_node --basedir " << shell_quote( basedir )
+                    << " --config " << shell_quote( config_path )
+                    << " --disable block_producer";
+      result.observer_start_command = start_command.str();
+
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << configured_restore_result_to_json( result );
+      else
+        std::cout << configured_restore_result_to_text( result );
       return EXIT_SUCCESS;
     }
 
