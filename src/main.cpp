@@ -21,6 +21,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -33,6 +34,7 @@
 #include <boost/thread.hpp>
 
 #include <koinos/log.hpp>
+#include <nlohmann/json.hpp>
 
 #include "core/config.hpp"
 #include "core/event_bus.hpp"
@@ -121,6 +123,7 @@
 #define COMPACT_CF_OPTION "compact-cf"
 #define BACKUP_DRY_RUN_OPTION "backup-dry-run"
 #define BACKUP_CHECKPOINT_OPTION "backup-checkpoint"
+#define BACKUP_CREATE_OPTION "backup-create"
 #define BACKUP_CREATE_LOCAL_OPTION "backup-create-local"
 #define BACKUP_UPLOAD_LATEST_OPTION "backup-upload-latest"
 #define BACKUP_RESTORE_PREFLIGHT_OPTION "backup-restore-preflight"
@@ -260,6 +263,38 @@ void print_storage_report( std::ostream& os,
   }
 }
 
+std::string configured_backup_result_to_text(
+  const node::backup::LocalSnapshotResult& snapshot,
+  const std::optional< node::backup::SftpUploadResult >& remote_upload )
+{
+  std::ostringstream out;
+  out << "Created configured Teleno backup\n";
+  out << node::backup::local_snapshot_result_to_text( snapshot );
+  out << "remote_enabled: " << ( remote_upload.has_value() ? "true" : "false" ) << "\n";
+  if( remote_upload )
+    out << node::backup::sftp_upload_result_to_text( *remote_upload );
+  else
+    out << "remote_upload: skipped\n";
+  return out.str();
+}
+
+std::string configured_backup_result_to_json(
+  const node::backup::LocalSnapshotResult& snapshot,
+  const std::optional< node::backup::SftpUploadResult >& remote_upload )
+{
+  nlohmann::json result;
+  result[ "ok" ] = true;
+  result[ "local_snapshot" ] = nlohmann::json::parse(
+    node::backup::local_snapshot_result_to_json( snapshot ) );
+  result[ "remote_enabled" ] = remote_upload.has_value();
+  if( remote_upload )
+    result[ "remote_upload" ] = nlohmann::json::parse(
+      node::backup::sftp_upload_result_to_json( *remote_upload ) );
+  else
+    result[ "remote_upload" ] = nullptr;
+  return result.dump( 2 ) + "\n";
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -386,6 +421,8 @@ int main( int argc, char** argv )
         "Validate native backup configuration and print the backup plan, then exit without opening RocksDB" )
       ( BACKUP_CHECKPOINT_OPTION,
         "Create a local RocksDB checkpoint of unified BASEDIR/db, then exit without starting node services" )
+      ( BACKUP_CREATE_OPTION,
+        "Create the configured native backup: local hot snapshot, plus remote upload when backup.remote.enabled=true" )
       ( BACKUP_CREATE_LOCAL_OPTION,
         "Create a local object-store backup snapshot from unified BASEDIR/db, then exit without starting node services" )
       ( BACKUP_UPLOAD_LATEST_OPTION,
@@ -457,6 +494,7 @@ int main( int argc, char** argv )
     if( vm.count( BACKUP_JSON_OPTION )
         && !vm.count( BACKUP_DRY_RUN_OPTION )
         && !vm.count( BACKUP_CHECKPOINT_OPTION )
+        && !vm.count( BACKUP_CREATE_OPTION )
         && !vm.count( BACKUP_CREATE_LOCAL_OPTION )
         && !vm.count( BACKUP_UPLOAD_LATEST_OPTION )
         && !vm.count( BACKUP_RESTORE_PREFLIGHT_OPTION )
@@ -677,6 +715,7 @@ int main( int argc, char** argv )
                                + static_cast< int >( vm.count( ROLLBACK_CHAIN_DB_MIGRATION_OPTION ) > 0 )
                                + static_cast< int >( vm.count( COMPACT_DB_OPTION ) > 0 )
                                + static_cast< int >( vm.count( BACKUP_CHECKPOINT_OPTION ) > 0 )
+                               + static_cast< int >( vm.count( BACKUP_CREATE_OPTION ) > 0 )
                                + static_cast< int >( vm.count( BACKUP_CREATE_LOCAL_OPTION ) > 0 );
     if( migration_modes > 1 )
       throw std::runtime_error( "choose only one storage mutation command" );
@@ -712,6 +751,50 @@ int main( int argc, char** argv )
                   << "file_count: " << checkpoint_result.file_count << "\n"
                   << "total_bytes: " << checkpoint_result.total_bytes << "\n";
       }
+      return EXIT_SUCCESS;
+    }
+
+    if( vm.count( BACKUP_CREATE_OPTION ) )
+    {
+      auto plan = node::backup::build_backup_dry_run_plan( cfg, basedir, config_path );
+      if( plan.has_errors() )
+      {
+        if( vm.count( BACKUP_JSON_OPTION ) )
+          std::cout << node::backup::backup_dry_run_plan_to_json( plan );
+        else
+          std::cout << node::backup::backup_dry_run_plan_to_text( plan );
+        return EXIT_FAILURE;
+      }
+      if( !cfg.backup.local.enabled )
+        throw std::runtime_error(
+          "--backup-create currently requires backup.local.enabled=true because remote upload is staged from the local object repository" );
+      if( cfg.backup.local.directory.empty() )
+        throw std::runtime_error( "--backup-create requires backup.local.directory" );
+      if( cfg.backup.remote.enabled )
+      {
+        if( !cfg.backup.ssh.enabled )
+          throw std::runtime_error( "--backup-create remote upload requires backup.ssh.enabled=true" );
+        if( cfg.backup.remote.directory.empty() )
+          throw std::runtime_error( "--backup-create remote upload requires backup.remote.directory" );
+      }
+
+      node::backup::BackupService backup_service( cfg, basedir, config_path, storage_db );
+      auto snapshot_result = backup_service.create_local_snapshot();
+
+      std::optional< node::backup::SftpUploadResult > remote_upload;
+      if( cfg.backup.remote.enabled )
+      {
+        remote_upload = node::backup::upload_latest_snapshot_with_managed_sftp(
+          cfg.backup.local.directory,
+          cfg.backup.ssh,
+          cfg.backup.remote );
+      }
+
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << configured_backup_result_to_json( snapshot_result, remote_upload );
+      else
+        std::cout << configured_backup_result_to_text( snapshot_result, remote_upload );
+
       return EXIT_SUCCESS;
     }
 
