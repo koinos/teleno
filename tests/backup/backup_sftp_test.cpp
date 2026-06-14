@@ -68,7 +68,7 @@ int main()
     write_file( repo / "snapshots" / backup_id / "manifest.json", "{\"manifest\":true}\n" );
     write_file( repo / "snapshots" / backup_id / "COMPLETE", "complete\n" );
 
-    auto plan = build_open_ssh_sftp_upload_plan( repo, "/srv/teleno-backups/testnet/teleno-dev" );
+    auto plan = build_sftp_upload_plan( repo, "/srv/teleno-backups/testnet/teleno-dev" );
     assert( plan.backup_id == backup_id );
     assert( plan.remote_directory == "/srv/teleno-backups/testnet/teleno-dev" );
     assert( plan.file_count == 5 );
@@ -79,6 +79,8 @@ int main()
     assert( has_command_containing( plan, "snapshots/" + backup_id + ".partial" ) );
     assert( has_command_containing( plan, "rename \"snapshots/" + backup_id + ".partial\"" ) );
     assert( has_command_containing( plan, "latest.json.partial" ) );
+    assert( has_command_containing( plan, "-rm \"latest.json\"" ) );
+    assert( has_command_containing( plan, "rename \"latest.json.partial\" \"latest.json\"" ) );
     assert( sftp_upload_plan_to_text( plan ).find( "SFTP upload plan" ) != std::string::npos );
 
     std::filesystem::remove_all( root );
@@ -89,7 +91,7 @@ int main()
     bool threw = false;
     try
     {
-      (void)build_open_ssh_sftp_upload_plan( root / "repo", "/srv/teleno-backups/testnet/teleno-dev" );
+      (void)build_sftp_upload_plan( root / "repo", "/srv/teleno-backups/testnet/teleno-dev" );
     }
     catch( const std::runtime_error& )
     {
@@ -104,7 +106,7 @@ int main()
     result.backup_id = "backup\"with\\chars";
     result.repository_dir = "/tmp/repo\nwith-line";
     result.remote_directory = "/srv/teleno-backups/testnet/teleno-dev";
-    result.transport = "managed-openssh";
+    result.transport = "native-libssh";
     result.batch_file = "/tmp/teleno.batch";
     result.batch_file_removed = true;
     result.batch_file_count = 1;
@@ -116,7 +118,7 @@ int main()
     assert( json.find( "backup\\\"with\\\\chars" ) != std::string::npos );
     assert( json.find( "/tmp/repo\\nwith-line" ) != std::string::npos );
     assert( json.find( "\"batch_file_removed\": true" ) != std::string::npos );
-    assert( json.find( "\"transport\": \"managed-openssh\"" ) != std::string::npos );
+    assert( json.find( "\"transport\": \"native-libssh\"" ) != std::string::npos );
     assert( json.find( "\"retry_count\": 2" ) != std::string::npos );
 
     const auto text = sftp_upload_result_to_text( result );
@@ -159,9 +161,9 @@ int main()
     }
     assert( threw );
 
-    ssh.auth = "password-file";
-    ssh.password_file = "/tmp/nonexistent-password";
+    ssh.transport = "managed-openssh";
     options.cancel_requested = {};
+    options.max_attempts = 1;
     threw = false;
     try
     {
@@ -169,7 +171,21 @@ int main()
     }
     catch( const std::runtime_error& e )
     {
-      threw = std::string( e.what() ).find( "native SSH library backend" ) != std::string::npos;
+      threw = std::string( e.what() ).find( "unsupported backup.ssh.transport" ) != std::string::npos;
+    }
+    assert( threw );
+
+    ssh.transport = "native";
+    ssh.auth = "password-file";
+    ssh.password_file = "/tmp/nonexistent-password";
+    threw = false;
+    try
+    {
+      (void)upload_latest_snapshot_with_managed_sftp( repo, ssh, remote, options );
+    }
+    catch( const std::runtime_error& e )
+    {
+      threw = std::string( e.what() ).find( "backup.ssh.password-file" ) != std::string::npos;
     }
     assert( threw );
 
@@ -219,7 +235,7 @@ int main()
     assert( preflight.missing_object_count == 2 );
     assert( !preflight.ready_to_restore );
 
-    auto plan = build_open_ssh_sftp_restore_object_fetch_plan(
+    auto plan = build_sftp_restore_object_fetch_plan(
       repo,
       "/srv/teleno-backups/testnet/teleno-dev",
       preflight );

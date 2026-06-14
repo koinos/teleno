@@ -4,6 +4,8 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -11,16 +13,37 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <sys/stat.h>
 #include <thread>
 #include <utility>
 
+#include <libssh/libssh.h>
+#include <libssh/sftp.h>
 #include <nlohmann/json.hpp>
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 
 namespace koinos::node::backup {
 namespace {
 
 constexpr uint64_t repository_download_margin_bytes = 128ULL * 1024ULL * 1024ULL;
+
+std::string read_file( const std::filesystem::path& path );
+
+std::string read_secret_file( const std::filesystem::path& path )
+{
+  auto secret = read_file( path );
+  while( !secret.empty() && ( secret.back() == '\n' || secret.back() == '\r' ) )
+    secret.pop_back();
+  return secret;
+}
+
+void burn_secret( std::string& secret )
+{
+  if( !secret.empty() )
+    OPENSSL_cleanse( secret.data(), secret.size() );
+  secret.clear();
+}
 
 std::string read_file( const std::filesystem::path& path )
 {
@@ -128,20 +151,6 @@ std::string sftp_quote( const std::string& value )
     out.push_back( ch );
   }
   out.push_back( '"' );
-  return out;
-}
-
-std::string shell_quote( const std::string& value )
-{
-  std::string out = "'";
-  for( char ch: value )
-  {
-    if( ch == '\'' )
-      out += "'\\''";
-    else
-      out.push_back( ch );
-  }
-  out.push_back( '\'' );
   return out;
 }
 
@@ -264,40 +273,6 @@ std::filesystem::path write_batch_file( const SftpUploadPlan& plan )
   return write_batch_file( plan.batch_commands, "teleno-sftp-upload" );
 }
 
-std::string build_sftp_command( const std::filesystem::path& batch_file,
-                                const BackupSshConfig& ssh )
-{
-  if( !ssh.transport.empty()
-      && ssh.transport != "native"
-      && ssh.transport != "openssh"
-      && ssh.transport != "managed-openssh" )
-    throw std::runtime_error( "unsupported backup.ssh.transport for managed SFTP backend: " + ssh.transport );
-  if( ssh.host.empty() || ssh.user.empty() )
-    throw std::runtime_error( "backup.ssh.host and backup.ssh.user are required for SFTP operation" );
-  if( ssh.auth != "private-key" )
-  {
-    throw std::runtime_error(
-      "backup.ssh.auth=" + ssh.auth
-      + " requires a native SSH library backend; current managed SFTP transport supports private-key auth only" );
-  }
-  if( ssh.private_key_file.empty() )
-    throw std::runtime_error( "backup.ssh.private-key-file is required for private-key SFTP operation" );
-
-  std::ostringstream cmd;
-  cmd << "/usr/bin/sftp"
-      << " -q"
-      << " -o BatchMode=yes"
-      << " -o ConnectTimeout=" << ( ssh.connect_timeout_seconds ? ssh.connect_timeout_seconds : 15 )
-      << " -o StrictHostKeyChecking=" << ( ssh.strict_host_key_checking ? "yes" : "accept-new" )
-      << " -i " << shell_quote( ssh.private_key_file );
-  if( !ssh.known_hosts_file.empty() )
-    cmd << " -o UserKnownHostsFile=" << shell_quote( ssh.known_hosts_file );
-  cmd << " -b " << shell_quote( batch_file.string() )
-      << " " << shell_quote( ssh.user + "@" + ssh.host )
-      << " 1>/dev/null";
-  return cmd.str();
-}
-
 bool transfer_cancel_requested( const SftpTransferOptions& options )
 {
   return options.cancel_requested && options.cancel_requested();
@@ -331,15 +306,498 @@ void emit_progress( const SftpTransferOptions& options,
   options.progress( progress );
 }
 
-void run_command_with_retries( const std::string& command,
-                               const SftpTransferOptions& options,
-                               const std::string& phase,
-                               const std::string& backup_id,
-                               uint64_t completed_batches,
-                               uint64_t total_batches,
-                               uint64_t file_count,
-                               uint64_t total_bytes,
-                               uint64_t& retry_count )
+struct ParsedSftpCommand
+{
+  bool ignore_errors = false;
+  std::string op;
+  std::vector< std::string > args;
+};
+
+ParsedSftpCommand parse_sftp_command( const std::string& command )
+{
+  ParsedSftpCommand parsed;
+  std::size_t pos = 0;
+  while( pos < command.size() && command[ pos ] == ' ' )
+    ++pos;
+  if( pos < command.size() && command[ pos ] == '-' )
+  {
+    parsed.ignore_errors = true;
+    ++pos;
+  }
+  while( pos < command.size() && command[ pos ] == ' ' )
+    ++pos;
+
+  const auto op_begin = pos;
+  while( pos < command.size() && command[ pos ] != ' ' )
+    ++pos;
+  parsed.op = command.substr( op_begin, pos - op_begin );
+  if( parsed.op.empty() )
+    throw std::runtime_error( "empty SFTP batch command" );
+
+  while( pos < command.size() )
+  {
+    while( pos < command.size() && command[ pos ] == ' ' )
+      ++pos;
+    if( pos >= command.size() )
+      break;
+
+    std::string arg;
+    if( command[ pos ] == '"' )
+    {
+      ++pos;
+      bool escaped = false;
+      bool closed = false;
+      for( ; pos < command.size(); ++pos )
+      {
+        const auto ch = command[ pos ];
+        if( escaped )
+        {
+          arg.push_back( ch );
+          escaped = false;
+          continue;
+        }
+        if( ch == '\\' )
+        {
+          escaped = true;
+          continue;
+        }
+        if( ch == '"' )
+        {
+          closed = true;
+          ++pos;
+          break;
+        }
+        arg.push_back( ch );
+      }
+      if( !closed )
+        throw std::runtime_error( "unterminated quoted SFTP batch argument" );
+    }
+    else
+    {
+      const auto arg_begin = pos;
+      while( pos < command.size() && command[ pos ] != ' ' )
+        ++pos;
+      arg = command.substr( arg_begin, pos - arg_begin );
+    }
+    parsed.args.push_back( std::move( arg ) );
+  }
+
+  return parsed;
+}
+
+std::string ssh_error_message( ssh_session session )
+{
+  const auto error = session ? ssh_get_error( session ) : nullptr;
+  return error ? std::string( error ) : std::string( "unknown SSH error" );
+}
+
+std::string sftp_error_message( ssh_session session, sftp_session sftp )
+{
+  std::ostringstream out;
+  out << "sftp_error=" << ( sftp ? sftp_get_error( sftp ) : SSH_ERROR )
+      << " ssh_error=" << ssh_error_message( session );
+  return out.str();
+}
+
+void throw_if_ssh_error( int rc, ssh_session session, const std::string& action )
+{
+  if( rc != SSH_OK )
+    throw std::runtime_error( action + ": " + ssh_error_message( session ) );
+}
+
+void require_regular_file( const std::string& field, const std::filesystem::path& path )
+{
+  if( path.empty() )
+    throw std::runtime_error( field + " is required for SFTP operation" );
+
+  std::error_code ec;
+  if( !std::filesystem::is_regular_file( path, ec ) )
+  {
+    auto message = field + " must point to a regular file: " + path.string();
+    if( ec )
+      message += " (" + ec.message() + ")";
+    throw std::runtime_error( message );
+  }
+
+  std::ifstream input( path, std::ios::binary );
+  if( !input )
+    throw std::runtime_error( field + " must be readable: " + path.string() );
+}
+
+class NativeSftpClient
+{
+public:
+  explicit NativeSftpClient( const BackupSshConfig& ssh )
+    : _ssh( ssh )
+  {
+    connect();
+  }
+
+  ~NativeSftpClient()
+  {
+    if( _sftp )
+      sftp_free( _sftp );
+    if( _session )
+    {
+      ssh_disconnect( _session );
+      ssh_free( _session );
+    }
+  }
+
+  NativeSftpClient( const NativeSftpClient& ) = delete;
+  NativeSftpClient& operator=( const NativeSftpClient& ) = delete;
+
+  void execute( const ParsedSftpCommand& command )
+  {
+    try
+    {
+      if( command.op == "cd" )
+      {
+        require_arg_count( command, 1 );
+        _cwd = command.args[ 0 ];
+      }
+      else if( command.op == "mkdir" )
+      {
+        require_arg_count( command, 1 );
+        make_directory( remote_path( command.args[ 0 ] ) );
+      }
+      else if( command.op == "put" )
+      {
+        require_arg_count( command, 2 );
+        upload_file( command.args[ 0 ], remote_path( command.args[ 1 ] ) );
+      }
+      else if( command.op == "get" )
+      {
+        require_arg_count( command, 2 );
+        download_file( remote_path( command.args[ 0 ] ), command.args[ 1 ] );
+      }
+      else if( command.op == "rm" )
+      {
+        require_arg_count( command, 1 );
+        remove_file( remote_path( command.args[ 0 ] ) );
+      }
+      else if( command.op == "rename" )
+      {
+        require_arg_count( command, 2 );
+        rename_path( remote_path( command.args[ 0 ] ), remote_path( command.args[ 1 ] ) );
+      }
+      else
+      {
+        throw std::runtime_error( "unsupported native SFTP command: " + command.op );
+      }
+    }
+    catch( const std::exception& )
+    {
+      if( command.ignore_errors )
+        return;
+      throw;
+    }
+  }
+
+private:
+  void require_arg_count( const ParsedSftpCommand& command, std::size_t expected )
+  {
+    if( command.args.size() != expected )
+      throw std::runtime_error( "SFTP command " + command.op + " expected "
+                                + std::to_string( expected ) + " args, got "
+                                + std::to_string( command.args.size() ) );
+  }
+
+  void set_option( enum ssh_options_e option, const void* value, const std::string& name )
+  {
+    throw_if_ssh_error( ssh_options_set( _session, option, value ), _session, "failed to set SSH option " + name );
+  }
+
+  void connect()
+  {
+    if( ssh_init() != SSH_OK )
+      throw std::runtime_error( "failed to initialize libssh" );
+    if( ! _ssh.transport.empty()
+        && _ssh.transport != "native"
+        && _ssh.transport != "libssh" )
+      throw std::runtime_error( "unsupported backup.ssh.transport for native libssh SFTP backend: " + _ssh.transport );
+    if( _ssh.host.empty() || _ssh.user.empty() )
+      throw std::runtime_error( "backup.ssh.host and backup.ssh.user are required for SFTP operation" );
+    if( _ssh.port == 0 || _ssh.port > 65535 )
+      throw std::runtime_error( "backup.ssh.port must be between 1 and 65535" );
+    validate_auth_config();
+
+    _session = ssh_new();
+    if( !_session )
+      throw std::runtime_error( "failed to allocate libssh session" );
+
+    const auto port = static_cast< unsigned int >( _ssh.port );
+    const auto timeout = static_cast< long >( _ssh.connect_timeout_seconds ? _ssh.connect_timeout_seconds : 15 );
+    const int process_config = 0;
+    set_option( SSH_OPTIONS_HOST, _ssh.host.c_str(), "host" );
+    set_option( SSH_OPTIONS_USER, _ssh.user.c_str(), "user" );
+    set_option( SSH_OPTIONS_PORT, &port, "port" );
+    set_option( SSH_OPTIONS_TIMEOUT, &timeout, "timeout" );
+    set_option( SSH_OPTIONS_PROCESS_CONFIG, &process_config, "process-config" );
+    if( !_ssh.known_hosts_file.empty() )
+      set_option( SSH_OPTIONS_KNOWNHOSTS, _ssh.known_hosts_file.c_str(), "known-hosts" );
+    if( _ssh.auth == "private-key" )
+      set_option( SSH_OPTIONS_ADD_IDENTITY, _ssh.private_key_file.c_str(), "identity" );
+
+    throw_if_ssh_error( ssh_connect( _session ), _session, "failed to connect SSH session" );
+    verify_known_host();
+    authenticate();
+
+    _sftp = sftp_new( _session );
+    if( !_sftp )
+      throw std::runtime_error( "failed to create SFTP session: " + ssh_error_message( _session ) );
+    if( sftp_init( _sftp ) != SSH_OK )
+      throw std::runtime_error( "failed to initialize SFTP session: " + sftp_error_message( _session, _sftp ) );
+  }
+
+  void validate_auth_config()
+  {
+    if( _ssh.auth == "private-key" )
+    {
+      require_regular_file( "backup.ssh.private-key-file", _ssh.private_key_file );
+      if( !_ssh.passphrase_file.empty() )
+        require_regular_file( "backup.ssh.passphrase-file", _ssh.passphrase_file );
+    }
+    else if( _ssh.auth == "password-file" )
+    {
+      require_regular_file( "backup.ssh.password-file", _ssh.password_file );
+    }
+    else if( _ssh.auth == "env-password" )
+    {
+      const auto* env_password = std::getenv( "TELENO_BACKUP_SSH_PASSWORD" );
+      if( !env_password || std::strlen( env_password ) == 0 )
+        throw std::runtime_error( "backup.ssh.auth=env-password requires TELENO_BACKUP_SSH_PASSWORD" );
+    }
+    else
+    {
+      throw std::runtime_error( "backup.ssh.auth must be password-file, private-key, or env-password" );
+    }
+  }
+
+  void verify_known_host()
+  {
+    const auto known = ssh_session_is_known_server( _session );
+    switch( known )
+    {
+      case SSH_KNOWN_HOSTS_OK:
+        return;
+      case SSH_KNOWN_HOSTS_NOT_FOUND:
+      case SSH_KNOWN_HOSTS_UNKNOWN:
+        if( _ssh.strict_host_key_checking )
+          throw std::runtime_error( "SSH host key is not trusted for " + _ssh.host );
+        throw_if_ssh_error( ssh_session_update_known_hosts( _session ),
+                            _session,
+                            "failed to record new SSH host key" );
+        return;
+      case SSH_KNOWN_HOSTS_CHANGED:
+        throw std::runtime_error( "SSH host key changed for " + _ssh.host );
+      case SSH_KNOWN_HOSTS_OTHER:
+        throw std::runtime_error( "SSH host key type differs for " + _ssh.host );
+      case SSH_KNOWN_HOSTS_ERROR:
+      default:
+        throw std::runtime_error( "failed to verify SSH host key for " + _ssh.host
+                                  + ": " + ssh_error_message( _session ) );
+    }
+  }
+
+  void authenticate()
+  {
+    int rc = SSH_AUTH_ERROR;
+    if( _ssh.auth == "private-key" )
+    {
+      std::string passphrase;
+      if( !_ssh.passphrase_file.empty() )
+        passphrase = read_secret_file( _ssh.passphrase_file );
+      rc = ssh_userauth_publickey_auto( _session,
+                                        nullptr,
+                                        passphrase.empty() ? nullptr : passphrase.c_str() );
+      burn_secret( passphrase );
+    }
+    else if( _ssh.auth == "password-file" )
+    {
+      if( _ssh.password_file.empty() )
+        throw std::runtime_error( "backup.ssh.password-file is required for password-file SFTP operation" );
+      auto password = read_secret_file( _ssh.password_file );
+      rc = ssh_userauth_password( _session, nullptr, password.c_str() );
+      burn_secret( password );
+    }
+    else if( _ssh.auth == "env-password" )
+    {
+      const auto* env_password = std::getenv( "TELENO_BACKUP_SSH_PASSWORD" );
+      if( !env_password || std::strlen( env_password ) == 0 )
+        throw std::runtime_error( "backup.ssh.auth=env-password requires TELENO_BACKUP_SSH_PASSWORD" );
+      rc = ssh_userauth_password( _session, nullptr, env_password );
+    }
+    else
+    {
+      throw std::runtime_error( "backup.ssh.auth must be password-file, private-key, or env-password" );
+    }
+
+    if( rc != SSH_AUTH_SUCCESS )
+      throw std::runtime_error( "SSH authentication failed for backup.ssh.auth="
+                                + _ssh.auth + ": " + ssh_error_message( _session ) );
+  }
+
+  std::string remote_path( const std::string& path ) const
+  {
+    if( path.empty() || path.front() == '/' || _cwd.empty() )
+      return path;
+    if( _cwd == "/" )
+      return "/" + path;
+    if( _cwd.back() == '/' )
+      return _cwd + path;
+    return _cwd + "/" + path;
+  }
+
+  void make_directory( const std::string& path )
+  {
+    if( sftp_mkdir( _sftp, path.c_str(), 0755 ) != SSH_OK )
+      throw std::runtime_error( "failed to create remote directory " + path
+                                + ": " + sftp_error_message( _session, _sftp ) );
+  }
+
+  void rename_path( const std::string& source, const std::string& destination )
+  {
+    if( sftp_rename( _sftp, source.c_str(), destination.c_str() ) == SSH_OK )
+      return;
+
+    if( !remote_exists( source ) && remote_exists( destination ) )
+      return;
+
+    throw std::runtime_error( "failed to rename remote path " + source + " to " + destination
+                              + ": " + sftp_error_message( _session, _sftp ) );
+  }
+
+  void remove_file( const std::string& path )
+  {
+    if( sftp_unlink( _sftp, path.c_str() ) != SSH_OK )
+      throw std::runtime_error( "failed to remove remote file " + path
+                                + ": " + sftp_error_message( _session, _sftp ) );
+  }
+
+  bool remote_exists( const std::string& path )
+  {
+    auto attributes = sftp_lstat( _sftp, path.c_str() );
+    if( attributes )
+    {
+      sftp_attributes_free( attributes );
+      return true;
+    }
+
+    const auto error = sftp_get_error( _sftp );
+    if( error == SSH_FX_NO_SUCH_FILE )
+      return false;
+    throw std::runtime_error( "failed to stat remote path " + path + ": "
+                              + sftp_error_message( _session, _sftp ) );
+  }
+
+  void upload_file( const std::filesystem::path& local_file, const std::string& remote_file )
+  {
+    std::ifstream input( local_file, std::ios::binary );
+    if( !input )
+      throw std::runtime_error( "failed to open local SFTP upload source: " + local_file.string() );
+
+    auto remote = sftp_open( _sftp,
+                             remote_file.c_str(),
+                             O_WRONLY | O_CREAT | O_TRUNC,
+                             S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH );
+    if( !remote )
+      throw std::runtime_error( "failed to open remote SFTP upload target " + remote_file
+                                + ": " + sftp_error_message( _session, _sftp ) );
+
+    std::array< char, 128 * 1024 > buffer{};
+    try
+    {
+      while( input )
+      {
+        input.read( buffer.data(), static_cast< std::streamsize >( buffer.size() ) );
+        auto remaining = input.gcount();
+        const char* cursor = buffer.data();
+        while( remaining > 0 )
+        {
+          const auto written = sftp_write( remote, cursor, static_cast< size_t >( remaining ) );
+          if( written <= 0 )
+            throw std::runtime_error( "failed to write remote SFTP file " + remote_file
+                                      + ": " + sftp_error_message( _session, _sftp ) );
+          cursor += written;
+          remaining -= written;
+        }
+      }
+    }
+    catch( ... )
+    {
+      sftp_close( remote );
+      throw;
+    }
+
+    if( sftp_close( remote ) != SSH_OK )
+      throw std::runtime_error( "failed to close remote SFTP upload target " + remote_file
+                                + ": " + sftp_error_message( _session, _sftp ) );
+  }
+
+  void download_file( const std::string& remote_file, const std::filesystem::path& local_file )
+  {
+    std::filesystem::create_directories( local_file.parent_path() );
+    std::ofstream output( local_file, std::ios::binary | std::ios::trunc );
+    if( !output )
+      throw std::runtime_error( "failed to open local SFTP download target: " + local_file.string() );
+
+    auto remote = sftp_open( _sftp, remote_file.c_str(), O_RDONLY, 0 );
+    if( !remote )
+      throw std::runtime_error( "failed to open remote SFTP download source " + remote_file
+                                + ": " + sftp_error_message( _session, _sftp ) );
+
+    std::array< char, 128 * 1024 > buffer{};
+    try
+    {
+      while( true )
+      {
+        const auto read_count = sftp_read( remote, buffer.data(), buffer.size() );
+        if( read_count < 0 )
+          throw std::runtime_error( "failed to read remote SFTP file " + remote_file
+                                    + ": " + sftp_error_message( _session, _sftp ) );
+        if( read_count == 0 )
+          break;
+        output.write( buffer.data(), static_cast< std::streamsize >( read_count ) );
+        if( !output )
+          throw std::runtime_error( "failed to write local SFTP download target: " + local_file.string() );
+      }
+    }
+    catch( ... )
+    {
+      sftp_close( remote );
+      throw;
+    }
+
+    if( sftp_close( remote ) != SSH_OK )
+      throw std::runtime_error( "failed to close remote SFTP download source " + remote_file
+                                + ": " + sftp_error_message( _session, _sftp ) );
+  }
+
+  BackupSshConfig _ssh;
+  ssh_session _session = nullptr;
+  sftp_session _sftp = nullptr;
+  std::string _cwd;
+};
+
+void execute_native_sftp_commands( const std::vector< std::string >& commands,
+                                   const BackupSshConfig& ssh )
+{
+  NativeSftpClient client( ssh );
+  for( const auto& command: commands )
+    client.execute( parse_sftp_command( command ) );
+}
+
+void run_native_sftp_commands_with_retries( const std::vector< std::string >& commands,
+                                            const BackupSshConfig& ssh,
+                                            const SftpTransferOptions& options,
+                                            const std::string& phase,
+                                            const std::string& backup_id,
+                                            uint64_t completed_batches,
+                                            uint64_t total_batches,
+                                            uint64_t file_count,
+                                            uint64_t total_bytes,
+                                            uint64_t& retry_count )
 {
   const auto max_attempts = std::max< uint64_t >( 1, options.max_attempts );
   for( uint64_t attempt = 1; attempt <= max_attempts; ++attempt )
@@ -354,12 +812,16 @@ void run_command_with_retries( const std::string& command,
                    file_count,
                    total_bytes );
 
-    const auto code = std::system( command.c_str() );
-    if( code == 0 )
+    try
+    {
+      execute_native_sftp_commands( commands, ssh );
       return;
-
-    if( attempt == max_attempts )
-      throw std::runtime_error( "SFTP operation failed with command exit code " + std::to_string( code ) );
+    }
+    catch( const std::exception& )
+    {
+      if( attempt == max_attempts )
+        throw;
+    }
 
     ++retry_count;
     const auto retry_delay = std::chrono::seconds( options.retry_delay_seconds );
@@ -388,16 +850,16 @@ void run_sftp_batch( const std::vector< std::string >& commands,
   const auto batch_file = write_batch_file( commands, batch_prefix );
   try
   {
-    const auto command = build_sftp_command( batch_file, ssh );
-    run_command_with_retries( command,
-                              options,
-                              phase,
-                              backup_id,
-                              batch_file_count,
-                              total_batches,
-                              file_count,
-                              total_bytes,
-                              retry_count );
+    run_native_sftp_commands_with_retries( commands,
+                                           ssh,
+                                           options,
+                                           phase,
+                                           backup_id,
+                                           batch_file_count,
+                                           total_batches,
+                                           file_count,
+                                           total_bytes,
+                                           retry_count );
     ++batch_file_count;
   }
   catch( ... )
@@ -545,8 +1007,8 @@ void fetch_remote_metadata( const std::filesystem::path& repository_dir,
 
 } // namespace
 
-SftpUploadPlan build_open_ssh_sftp_upload_plan( const std::filesystem::path& repository_dir,
-                                                const std::string& remote_directory )
+SftpUploadPlan build_sftp_upload_plan( const std::filesystem::path& repository_dir,
+                                       const std::string& remote_directory )
 {
   if( repository_dir.empty() )
     throw std::runtime_error( "local snapshot repository directory is required" );
@@ -583,17 +1045,18 @@ SftpUploadPlan build_open_ssh_sftp_upload_plan( const std::filesystem::path& rep
   add_put( plan, snapshot_dir / "files.json", remote_join( remote_partial_snapshot, "files.json" ) );
   add_put( plan, snapshot_dir / "manifest.json", remote_join( remote_partial_snapshot, "manifest.json" ) );
   add_put( plan, snapshot_dir / "COMPLETE", remote_join( remote_partial_snapshot, "COMPLETE" ) );
-  plan.batch_commands.push_back( "-rename " + sftp_quote( remote_partial_snapshot ) + " "
+  plan.batch_commands.push_back( "rename " + sftp_quote( remote_partial_snapshot ) + " "
                                   + sftp_quote( remote_final_snapshot ) );
 
   add_put( plan, repository_dir / "latest.json", "latest.json.partial" );
-  plan.batch_commands.push_back( "-rename " + sftp_quote( "latest.json.partial" ) + " "
+  plan.batch_commands.push_back( "-rm " + sftp_quote( "latest.json" ) );
+  plan.batch_commands.push_back( "rename " + sftp_quote( "latest.json.partial" ) + " "
                                   + sftp_quote( "latest.json" ) );
 
   return plan;
 }
 
-SftpRestoreObjectFetchPlan build_open_ssh_sftp_restore_object_fetch_plan(
+SftpRestoreObjectFetchPlan build_sftp_restore_object_fetch_plan(
   const std::filesystem::path& repository_dir,
   const std::string& remote_directory,
   const RestorePreflightResult& preflight )
@@ -647,9 +1110,9 @@ SftpRestoreObjectFetchPlan build_open_ssh_sftp_restore_object_fetch_plan(
   return plan;
 }
 
-SftpUploadResult upload_latest_snapshot_with_open_ssh_sftp( const std::filesystem::path& repository_dir,
-                                                            const BackupSshConfig& ssh,
-                                                            const BackupRemoteConfig& remote )
+SftpUploadResult upload_latest_snapshot_with_sftp( const std::filesystem::path& repository_dir,
+                                                   const BackupSshConfig& ssh,
+                                                   const BackupRemoteConfig& remote )
 {
   return upload_latest_snapshot_with_managed_sftp( repository_dir, ssh, remote );
 }
@@ -659,22 +1122,22 @@ SftpUploadResult upload_latest_snapshot_with_managed_sftp( const std::filesystem
                                                            const BackupRemoteConfig& remote,
                                                            const SftpTransferOptions& options )
 {
-  auto plan = build_open_ssh_sftp_upload_plan( repository_dir, remote.directory );
+  auto plan = build_sftp_upload_plan( repository_dir, remote.directory );
   auto batch_file = write_batch_file( plan );
 
   uint64_t retry_count = 0;
   try
   {
-    const auto command = build_sftp_command( batch_file, ssh );
-    run_command_with_retries( command,
-                              options,
-                              "upload-latest",
-                              plan.backup_id,
-                              0,
-                              1,
-                              plan.file_count,
-                              plan.total_bytes,
-                              retry_count );
+    run_native_sftp_commands_with_retries( plan.batch_commands,
+                                           ssh,
+                                           options,
+                                           "upload-latest",
+                                           plan.backup_id,
+                                           0,
+                                           1,
+                                           plan.file_count,
+                                           plan.total_bytes,
+                                           retry_count );
   }
   catch( ... )
   {
@@ -687,7 +1150,7 @@ SftpUploadResult upload_latest_snapshot_with_managed_sftp( const std::filesystem
   result.backup_id = plan.backup_id;
   result.repository_dir = plan.repository_dir;
   result.remote_directory = plan.remote_directory;
-  result.transport = "managed-openssh";
+  result.transport = "native-libssh";
   result.batch_file = batch_file;
   result.batch_file_removed = std::filesystem::remove( batch_file );
   result.file_count = plan.file_count;
@@ -697,10 +1160,10 @@ SftpUploadResult upload_latest_snapshot_with_managed_sftp( const std::filesystem
   return result;
 }
 
-SftpRestoreFetchResult fetch_latest_restore_snapshot_with_open_ssh_sftp( const std::filesystem::path& repository_dir,
-                                                                         const std::filesystem::path& target_basedir,
-                                                                         const BackupSshConfig& ssh,
-                                                                         const BackupRemoteConfig& remote )
+SftpRestoreFetchResult fetch_latest_restore_snapshot_with_sftp( const std::filesystem::path& repository_dir,
+                                                                const std::filesystem::path& target_basedir,
+                                                                const BackupSshConfig& ssh,
+                                                                const BackupRemoteConfig& remote )
 {
   return fetch_latest_restore_snapshot_with_managed_sftp( repository_dir, target_basedir, ssh, remote );
 }
@@ -715,7 +1178,7 @@ SftpRestoreFetchResult fetch_latest_restore_snapshot_with_managed_sftp( const st
   result.repository_dir = repository_dir;
   result.target_basedir = target_basedir;
   result.remote_directory = remote.directory;
-  result.transport = "managed-openssh";
+  result.transport = "native-libssh";
 
   std::string metadata_backup_id;
   fetch_remote_metadata( repository_dir,
@@ -736,7 +1199,7 @@ SftpRestoreFetchResult fetch_latest_restore_snapshot_with_managed_sftp( const st
     return result;
   }
 
-  auto object_plan = build_open_ssh_sftp_restore_object_fetch_plan(
+  auto object_plan = build_sftp_restore_object_fetch_plan(
     repository_dir,
     remote.directory,
     result.preflight );

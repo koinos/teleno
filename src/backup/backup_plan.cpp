@@ -148,6 +148,8 @@ void validate_ssh( BackupDryRunPlan& plan )
 
   if( plan.ssh_host.empty() )
     add_issue( plan, "error", "backup.ssh.host is required when SSH backup is enabled" );
+  if( !plan.ssh_transport.empty() && plan.ssh_transport != "native" && plan.ssh_transport != "libssh" )
+    add_issue( plan, "error", "backup.ssh.transport must be native or libssh" );
   if( plan.ssh_user.empty() )
     add_issue( plan, "error", "backup.ssh.user is required when SSH backup is enabled" );
   if( plan.ssh_port == 0 || plan.ssh_port > 65535 )

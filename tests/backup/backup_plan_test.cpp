@@ -135,6 +135,26 @@ int main()
   }
 
   {
+    auto root = unique_temp_dir( "teleno-backup-plan-invalid-transport" );
+    auto basedir = root / "basedir";
+    std::filesystem::create_directories( basedir / "db" );
+    std::filesystem::create_directories( root / "work" );
+    std::filesystem::create_directories( root / "local-repo" );
+    write_file( root / "secrets" / "ssh-password",
+                "secret\n",
+                std::filesystem::perms::owner_read | std::filesystem::perms::owner_write );
+
+    auto cfg = valid_backup_config( root );
+    cfg.backup.ssh.transport = "managed-openssh";
+
+    auto plan = build_backup_dry_run_plan( cfg, basedir, basedir / "config.yml" );
+    assert( plan.has_errors() );
+    assert( has_issue_containing( plan, "error", "backup.ssh.transport must be native or libssh" ) );
+
+    std::filesystem::remove_all( root );
+  }
+
+  {
     auto root = unique_temp_dir( "teleno-backup-plan-open-secret" );
     auto basedir = root / "basedir";
     std::filesystem::create_directories( basedir / "db" );

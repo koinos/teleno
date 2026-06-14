@@ -492,7 +492,7 @@ int main( int argc, char** argv )
       ( BACKUP_CREATE_LOCAL_OPTION,
         "Create a local object-store backup snapshot from unified BASEDIR/db, then exit without starting node services" )
       ( BACKUP_UPLOAD_LATEST_OPTION,
-        "Upload backup.local.directory latest snapshot to backup.remote.directory over the managed SFTP transport, then exit" )
+        "Upload backup.local.directory latest snapshot to backup.remote.directory over native libssh SFTP, then exit" )
       ( BACKUP_RESTORE_OPTION,
         "Restore the configured latest native backup: fetch remote data when enabled, preflight, stage, activate, then exit" )
       ( BACKUP_RESTORE_PREFLIGHT_OPTION,
@@ -502,7 +502,7 @@ int main( int argc, char** argv )
       ( BACKUP_RESTORE_ACTIVATE_OPTION,
         "Activate a staged local backup restore while the node is stopped, then exit without opening RocksDB" )
       ( BACKUP_RESTORE_FETCH_OPTION,
-        "Fetch latest remote backup metadata and missing objects over the managed SFTP transport, then exit without opening RocksDB" )
+        "Fetch latest remote backup metadata and missing objects over native libssh SFTP, then exit without opening RocksDB" )
       ( BACKUP_OUTPUT_OPTION, po::value< std::string >()->default_value( "" ),
         "Output directory for --backup-checkpoint, staging directory for --backup-restore/--backup-restore-stage, or staged dir for --backup-restore-activate" )
       ( BACKUP_JSON_OPTION,
@@ -600,7 +600,7 @@ int main( int argc, char** argv )
       if( !cfg.backup.ssh.enabled )
         throw std::runtime_error( "--backup-upload-latest requires backup.ssh.enabled=true" );
 
-      auto result = node::backup::upload_latest_snapshot_with_open_ssh_sftp(
+      auto result = node::backup::upload_latest_snapshot_with_sftp(
         cfg.backup.local.directory,
         cfg.backup.ssh,
         cfg.backup.remote );
@@ -748,7 +748,7 @@ int main( int argc, char** argv )
       if( !cfg.backup.ssh.enabled )
         throw std::runtime_error( "--backup-restore-fetch requires backup.ssh.enabled=true" );
 
-      auto result = node::backup::fetch_latest_restore_snapshot_with_open_ssh_sftp(
+      auto result = node::backup::fetch_latest_restore_snapshot_with_sftp(
         cfg.backup.local.directory,
         basedir,
         cfg.backup.ssh,

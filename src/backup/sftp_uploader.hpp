@@ -95,24 +95,24 @@ struct SftpTransferOptions
   std::function< void( const SftpTransferProgress& ) > progress;
 };
 
-SftpUploadPlan build_open_ssh_sftp_upload_plan( const std::filesystem::path& repository_dir,
-                                                const std::string& remote_directory );
-SftpRestoreObjectFetchPlan build_open_ssh_sftp_restore_object_fetch_plan(
+SftpUploadPlan build_sftp_upload_plan( const std::filesystem::path& repository_dir,
+                                       const std::string& remote_directory );
+SftpRestoreObjectFetchPlan build_sftp_restore_object_fetch_plan(
   const std::filesystem::path& repository_dir,
   const std::string& remote_directory,
   const RestorePreflightResult& preflight );
 
-SftpUploadResult upload_latest_snapshot_with_open_ssh_sftp( const std::filesystem::path& repository_dir,
-                                                            const BackupSshConfig& ssh,
-                                                            const BackupRemoteConfig& remote );
+SftpUploadResult upload_latest_snapshot_with_sftp( const std::filesystem::path& repository_dir,
+                                                   const BackupSshConfig& ssh,
+                                                   const BackupRemoteConfig& remote );
 SftpUploadResult upload_latest_snapshot_with_managed_sftp( const std::filesystem::path& repository_dir,
                                                            const BackupSshConfig& ssh,
                                                            const BackupRemoteConfig& remote,
                                                            const SftpTransferOptions& options = {} );
-SftpRestoreFetchResult fetch_latest_restore_snapshot_with_open_ssh_sftp( const std::filesystem::path& repository_dir,
-                                                                         const std::filesystem::path& target_basedir,
-                                                                         const BackupSshConfig& ssh,
-                                                                         const BackupRemoteConfig& remote );
+SftpRestoreFetchResult fetch_latest_restore_snapshot_with_sftp( const std::filesystem::path& repository_dir,
+                                                                const std::filesystem::path& target_basedir,
+                                                                const BackupSshConfig& ssh,
+                                                                const BackupRemoteConfig& remote );
 SftpRestoreFetchResult fetch_latest_restore_snapshot_with_managed_sftp( const std::filesystem::path& repository_dir,
                                                                         const std::filesystem::path& target_basedir,
                                                                         const BackupSshConfig& ssh,

@@ -166,6 +166,7 @@ target_link_libraries(
       koinos_node_core
       koinos_backup_snapshot_lib
       OpenSSL::Crypto
+      ssh
     PRIVATE
       nlohmann_json::nlohmann_json)
 
