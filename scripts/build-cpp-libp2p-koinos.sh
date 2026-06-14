@@ -24,6 +24,10 @@ ZSTD_INSTALL_DIR="${ZSTD_INSTALL_DIR:-$DEPS_ROOT/zstd-static-$ZSTD_VERSION}"
 TELENO_BUILD_LOCAL_GMP="${TELENO_BUILD_LOCAL_GMP:-1}"
 GMP_VERSION="${GMP_VERSION:-6.3.0}"
 GMP_INSTALL_DIR="${GMP_INSTALL_DIR:-$DEPS_ROOT/gmp-static-$GMP_VERSION}"
+TELENO_BUILD_LOCAL_LIBSSH="${TELENO_BUILD_LOCAL_LIBSSH:-1}"
+LIBSSH_VERSION="${LIBSSH_VERSION:-0.12.0}"
+LIBSSH_BOOTSTRAP_INSTALL_DIR="${LIBSSH_BOOTSTRAP_INSTALL_DIR:-$DEPS_ROOT/libssh-static-bootstrap-$LIBSSH_VERSION}"
+LIBSSH_INSTALL_DIR="${LIBSSH_INSTALL_DIR:-$DEPS_ROOT/libssh-static-$LIBSSH_VERSION}"
 CPP_LIBP2P_TAG="${CPP_LIBP2P_TAG:-v0.1.37}"
 CPP_LIBP2P_REPO="${CPP_LIBP2P_REPO:-https://github.com/libp2p/cpp-libp2p.git}"
 CPP_LIBP2P_PATCH="${CPP_LIBP2P_PATCH:-$NODE_DIR/cmake/cpp-libp2p-koinos.patch}"
@@ -147,11 +151,54 @@ prepare_local_gmp_if_needed() {
   fi
 }
 
+prepare_bootstrap_libssh_if_needed() {
+  if [[ "$TELENO_BUILD_LOCAL_LIBSSH" != "0" ]]; then
+    require_file "$ROOT_DIR/scripts/build-libssh-static.sh"
+    KOINOS_DEPS_ROOT="$DEPS_ROOT" \
+      LIBSSH_VERSION="$LIBSSH_VERSION" \
+      LIBSSH_INSTALL_DIR="$LIBSSH_BOOTSTRAP_INSTALL_DIR" \
+      JOBS="$JOBS" \
+      "$ROOT_DIR/scripts/build-libssh-static.sh"
+    LIBSSH_ROOT="$LIBSSH_BOOTSTRAP_INSTALL_DIR"
+  fi
+
+  if [[ -n "${LIBSSH_ROOT:-}" && ! -f "$LIBSSH_ROOT/lib/libssh.a" ]]; then
+    echo "LIBSSH_ROOT does not contain lib/libssh.a: $LIBSSH_ROOT" >&2
+    exit 1
+  fi
+}
+
+prepare_final_libssh_if_needed() {
+  if [[ "$TELENO_BUILD_LOCAL_LIBSSH" != "0" ]]; then
+    require_file "$ROOT_DIR/scripts/build-libssh-static.sh"
+    KOINOS_DEPS_ROOT="$DEPS_ROOT" \
+      LIBSSH_VERSION="$LIBSSH_VERSION" \
+      LIBSSH_INSTALL_DIR="$LIBSSH_INSTALL_DIR" \
+      OPENSSL_ROOT_DIR="$KOINOS_HUNTER_PREFIX" \
+      OPENSSL_INCLUDE_DIR="$KOINOS_HUNTER_PREFIX/include" \
+      OPENSSL_CRYPTO_LIBRARY="$KOINOS_HUNTER_PREFIX/lib/libcrypto.a" \
+      OPENSSL_SSL_LIBRARY="$KOINOS_HUNTER_PREFIX/lib/libssl.a" \
+      ZLIB_INCLUDE_DIR="$KOINOS_HUNTER_PREFIX/include" \
+      ZLIB_LIBRARY="$KOINOS_HUNTER_PREFIX/lib/libz.a" \
+      JOBS="$JOBS" \
+      "$ROOT_DIR/scripts/build-libssh-static.sh"
+    LIBSSH_ROOT="$LIBSSH_INSTALL_DIR"
+  fi
+
+  if [[ -n "${LIBSSH_ROOT:-}" && ! -f "$LIBSSH_ROOT/lib/libssh.a" ]]; then
+    echo "LIBSSH_ROOT does not contain lib/libssh.a: $LIBSSH_ROOT" >&2
+    exit 1
+  fi
+}
+
 require_file "$NODE_DIR/CMakeLists.hunter.txt"
 require_file "$CPP_LIBP2P_PATCH"
 require_file "$ROOT_DIR/scripts/build-rocksdb-zstd.sh"
+require_file "$ROOT_DIR/scripts/build-libssh-static.sh"
 
 mkdir -p "$DEPS_ROOT"
+
+prepare_bootstrap_libssh_if_needed
 
 echo "==> Preparing Hunter-enabled Teleno node source copy"
 rm -rf "$KOINOS_NODE_HUNTER_SOURCE"
@@ -164,7 +211,9 @@ cmake -S "$KOINOS_NODE_HUNTER_SOURCE" -B "$KOINOS_NODE_HUNTER_BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
   -DKOINOS_BUILD_TESTS=OFF \
-  -DKOINOS_ENABLE_LIBP2P=OFF
+  -DKOINOS_ENABLE_LIBP2P=OFF \
+  ${LIBSSH_ROOT:+"-DLIBSSH_ROOT=$LIBSSH_ROOT"} \
+  -DCMAKE_PREFIX_PATH="${LIBSSH_ROOT:-}"
 cmake --build "$KOINOS_NODE_HUNTER_BUILD" --target koinos_private_testnet_keygen --parallel "$JOBS"
 
 KOINOS_PROTO_DIR="$(cmake_cache_value "$KOINOS_NODE_HUNTER_BUILD" "koinos_proto_DIR" || true)"
@@ -210,6 +259,12 @@ GMP_CMAKE_ARGS=()
 prepare_local_gmp_if_needed
 if [[ -n "${GMP_LIBRARY:-}" ]]; then
   GMP_CMAKE_ARGS=( "-DGMP_LIBRARY=$GMP_LIBRARY" )
+fi
+
+prepare_final_libssh_if_needed
+LIBSSH_CMAKE_ARGS=()
+if [[ -n "${LIBSSH_ROOT:-}" ]]; then
+  LIBSSH_CMAKE_ARGS=( "-DLIBSSH_ROOT=$LIBSSH_ROOT" )
 fi
 
 echo "==> Preparing cpp-libp2p $CPP_LIBP2P_TAG source"
@@ -295,7 +350,8 @@ cmake -S "$NODE_DIR" -B "$KOINOS_NODE_BUILD_DIR" \
   -DCPP_LIBP2P_THIRDPARTY_INCLUDE_DIR="$CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR" \
   -DCMAKE_CXX_FLAGS="$CXXFLAGS -I$KOINOS_HUNTER_PREFIX/include -I$KOINOS_HUNTER_INSTALL/include -I$CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR" \
   -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="$KOINOS_NODE_BUILD_DIR" \
-  -DCMAKE_PREFIX_PATH="$NODE_DIR/cmake/shims;$CPP_LIBP2P_INSTALL_DIR;$KOINOS_HUNTER_PREFIX;$KOINOS_HUNTER_INSTALL;$CPP_AUX_HUNTER_PREFIX;$CPP_AUX_HUNTER_INSTALL" \
+  -DCMAKE_PREFIX_PATH="$NODE_DIR/cmake/shims;${LIBSSH_ROOT:-};$CPP_LIBP2P_INSTALL_DIR;$KOINOS_HUNTER_PREFIX;$KOINOS_HUNTER_INSTALL;$CPP_AUX_HUNTER_PREFIX;$CPP_AUX_HUNTER_INSTALL" \
+  ${LIBSSH_CMAKE_ARGS[@]+"${LIBSSH_CMAKE_ARGS[@]}"} \
   ${ROCKSDB_CMAKE_ARGS[@]+"${ROCKSDB_CMAKE_ARGS[@]}"} \
   ${GMP_CMAKE_ARGS[@]+"${GMP_CMAKE_ARGS[@]}"}
 
