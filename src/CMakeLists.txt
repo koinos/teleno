@@ -131,6 +131,8 @@ target_link_libraries(
 
 # ── Backup snapshot repository (local object store + restore preflight data) ──
 add_library(koinos_backup_snapshot_lib
+  backup/restore_activation_supervisor.cpp
+  backup/restore_activation_supervisor.hpp
   backup/snapshot_repository.cpp
   backup/snapshot_repository.hpp)
 
@@ -169,6 +171,8 @@ target_link_libraries(
 
 # ── Runtime backup service (in-process hot backup primitive) ──
 add_library(koinos_backup_service_lib
+  backup/backup_scheduler.cpp
+  backup/backup_scheduler.hpp
   backup/backup_service.cpp
   backup/backup_service.hpp)
 
@@ -181,7 +185,9 @@ target_link_libraries(
   koinos_backup_service_lib
     PUBLIC
       koinos_backup_snapshot_lib
-      koinos_storage_lib)
+      koinos_backup_sftp_lib
+      koinos_storage_lib
+      Koinos::log)
 
 # ── Local-only backup admin HTTP server ──
 add_library(koinos_backup_admin_lib

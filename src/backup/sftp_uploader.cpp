@@ -11,6 +11,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -266,12 +267,21 @@ std::filesystem::path write_batch_file( const SftpUploadPlan& plan )
 std::string build_sftp_command( const std::filesystem::path& batch_file,
                                 const BackupSshConfig& ssh )
 {
-  if( ssh.auth != "private-key" )
-    throw std::runtime_error( "OpenSSH SFTP validation backend currently requires backup.ssh.auth=private-key" );
+  if( !ssh.transport.empty()
+      && ssh.transport != "native"
+      && ssh.transport != "openssh"
+      && ssh.transport != "managed-openssh" )
+    throw std::runtime_error( "unsupported backup.ssh.transport for managed SFTP backend: " + ssh.transport );
   if( ssh.host.empty() || ssh.user.empty() )
     throw std::runtime_error( "backup.ssh.host and backup.ssh.user are required for SFTP operation" );
+  if( ssh.auth != "private-key" )
+  {
+    throw std::runtime_error(
+      "backup.ssh.auth=" + ssh.auth
+      + " requires a native SSH library backend; current managed SFTP transport supports private-key auth only" );
+  }
   if( ssh.private_key_file.empty() )
-    throw std::runtime_error( "backup.ssh.private-key-file is required for SFTP operation" );
+    throw std::runtime_error( "backup.ssh.private-key-file is required for private-key SFTP operation" );
 
   std::ostringstream cmd;
   cmd << "/usr/bin/sftp"
@@ -288,19 +298,116 @@ std::string build_sftp_command( const std::filesystem::path& batch_file,
   return cmd.str();
 }
 
+bool transfer_cancel_requested( const SftpTransferOptions& options )
+{
+  return options.cancel_requested && options.cancel_requested();
+}
+
+void throw_if_transfer_cancelled( const SftpTransferOptions& options )
+{
+  if( transfer_cancel_requested( options ) )
+    throw std::runtime_error( "SFTP operation cancelled" );
+}
+
+void emit_progress( const SftpTransferOptions& options,
+                    std::string phase,
+                    std::string backup_id,
+                    uint64_t completed_batches,
+                    uint64_t total_batches,
+                    uint64_t attempt,
+                    uint64_t file_count,
+                    uint64_t total_bytes )
+{
+  if( !options.progress )
+    return;
+  SftpTransferProgress progress;
+  progress.phase = std::move( phase );
+  progress.backup_id = std::move( backup_id );
+  progress.completed_batches = completed_batches;
+  progress.total_batches = total_batches;
+  progress.attempt = attempt;
+  progress.file_count = file_count;
+  progress.total_bytes = total_bytes;
+  options.progress( progress );
+}
+
+void run_command_with_retries( const std::string& command,
+                               const SftpTransferOptions& options,
+                               const std::string& phase,
+                               const std::string& backup_id,
+                               uint64_t completed_batches,
+                               uint64_t total_batches,
+                               uint64_t file_count,
+                               uint64_t total_bytes,
+                               uint64_t& retry_count )
+{
+  const auto max_attempts = std::max< uint64_t >( 1, options.max_attempts );
+  for( uint64_t attempt = 1; attempt <= max_attempts; ++attempt )
+  {
+    throw_if_transfer_cancelled( options );
+    emit_progress( options,
+                   phase,
+                   backup_id,
+                   completed_batches,
+                   total_batches,
+                   attempt,
+                   file_count,
+                   total_bytes );
+
+    const auto code = std::system( command.c_str() );
+    if( code == 0 )
+      return;
+
+    if( attempt == max_attempts )
+      throw std::runtime_error( "SFTP operation failed with command exit code " + std::to_string( code ) );
+
+    ++retry_count;
+    const auto retry_delay = std::chrono::seconds( options.retry_delay_seconds );
+    const auto deadline = std::chrono::steady_clock::now() + retry_delay;
+    while( std::chrono::steady_clock::now() < deadline )
+    {
+      throw_if_transfer_cancelled( options );
+      std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
+    }
+  }
+}
+
 void run_sftp_batch( const std::vector< std::string >& commands,
                      const std::string& batch_prefix,
                      const BackupSshConfig& ssh,
-                     uint64_t& batch_file_count )
+                     const SftpTransferOptions& options,
+                     const std::string& phase,
+                     const std::string& backup_id,
+                     uint64_t total_batches,
+                     uint64_t file_count,
+                     uint64_t total_bytes,
+                     uint64_t& batch_file_count,
+                     uint64_t& retry_count )
 {
+  throw_if_transfer_cancelled( options );
   const auto batch_file = write_batch_file( commands, batch_prefix );
-  const auto command = build_sftp_command( batch_file, ssh );
-  const auto code = std::system( command.c_str() );
+  try
+  {
+    const auto command = build_sftp_command( batch_file, ssh );
+    run_command_with_retries( command,
+                              options,
+                              phase,
+                              backup_id,
+                              batch_file_count,
+                              total_batches,
+                              file_count,
+                              total_bytes,
+                              retry_count );
+    ++batch_file_count;
+  }
+  catch( ... )
+  {
+    std::error_code ec;
+    std::filesystem::remove( batch_file, ec );
+    throw;
+  }
   const auto removed = std::filesystem::remove( batch_file );
   (void)removed;
-  ++batch_file_count;
-  if( code != 0 )
-    throw std::runtime_error( "SFTP operation failed with command exit code " + std::to_string( code ) );
 }
 
 uint64_t available_space_bytes( std::filesystem::path path )
@@ -334,7 +441,9 @@ void copy_file_atomic( const std::filesystem::path& source, const std::filesyste
 void fetch_remote_metadata( const std::filesystem::path& repository_dir,
                             const BackupSshConfig& ssh,
                             const BackupRemoteConfig& remote,
+                            const SftpTransferOptions& options,
                             uint64_t& batch_file_count,
+                            uint64_t& retry_count,
                             uint64_t& metadata_file_count,
                             std::string& backup_id_out )
 {
@@ -358,7 +467,14 @@ void fetch_remote_metadata( const std::filesystem::path& repository_dir,
       },
       "teleno-sftp-restore-metadata",
       ssh,
-      batch_file_count );
+      options,
+      "restore-metadata-latest",
+      {},
+      2,
+      1,
+      0,
+      batch_file_count,
+      retry_count );
     ++metadata_file_count;
 
     const auto latest = nlohmann::json::parse( read_file( latest_tmp ) );
@@ -386,7 +502,14 @@ void fetch_remote_metadata( const std::filesystem::path& repository_dir,
       },
       "teleno-sftp-restore-metadata",
       ssh,
-      batch_file_count );
+      options,
+      "restore-metadata-snapshot",
+      backup_id,
+      2,
+      3,
+      0,
+      batch_file_count,
+      retry_count );
     metadata_file_count += 3;
 
     const auto local_snapshot_dir = repository_dir / "snapshots" / snapshot_dir_name;
@@ -528,22 +651,49 @@ SftpUploadResult upload_latest_snapshot_with_open_ssh_sftp( const std::filesyste
                                                             const BackupSshConfig& ssh,
                                                             const BackupRemoteConfig& remote )
 {
+  return upload_latest_snapshot_with_managed_sftp( repository_dir, ssh, remote );
+}
+
+SftpUploadResult upload_latest_snapshot_with_managed_sftp( const std::filesystem::path& repository_dir,
+                                                           const BackupSshConfig& ssh,
+                                                           const BackupRemoteConfig& remote,
+                                                           const SftpTransferOptions& options )
+{
   auto plan = build_open_ssh_sftp_upload_plan( repository_dir, remote.directory );
   auto batch_file = write_batch_file( plan );
 
-  const auto command = build_sftp_command( batch_file, ssh );
-  const auto code = std::system( command.c_str() );
-  if( code != 0 )
-    throw std::runtime_error( "SFTP upload failed with command exit code " + std::to_string( code ) );
+  uint64_t retry_count = 0;
+  try
+  {
+    const auto command = build_sftp_command( batch_file, ssh );
+    run_command_with_retries( command,
+                              options,
+                              "upload-latest",
+                              plan.backup_id,
+                              0,
+                              1,
+                              plan.file_count,
+                              plan.total_bytes,
+                              retry_count );
+  }
+  catch( ... )
+  {
+    std::error_code ec;
+    std::filesystem::remove( batch_file, ec );
+    throw;
+  }
 
   SftpUploadResult result;
   result.backup_id = plan.backup_id;
   result.repository_dir = plan.repository_dir;
   result.remote_directory = plan.remote_directory;
+  result.transport = "managed-openssh";
   result.batch_file = batch_file;
   result.batch_file_removed = std::filesystem::remove( batch_file );
   result.file_count = plan.file_count;
   result.total_bytes = plan.total_bytes;
+  result.batch_file_count = 1;
+  result.retry_count = retry_count;
   return result;
 }
 
@@ -552,16 +702,28 @@ SftpRestoreFetchResult fetch_latest_restore_snapshot_with_open_ssh_sftp( const s
                                                                          const BackupSshConfig& ssh,
                                                                          const BackupRemoteConfig& remote )
 {
+  return fetch_latest_restore_snapshot_with_managed_sftp( repository_dir, target_basedir, ssh, remote );
+}
+
+SftpRestoreFetchResult fetch_latest_restore_snapshot_with_managed_sftp( const std::filesystem::path& repository_dir,
+                                                                        const std::filesystem::path& target_basedir,
+                                                                        const BackupSshConfig& ssh,
+                                                                        const BackupRemoteConfig& remote,
+                                                                        const SftpTransferOptions& options )
+{
   SftpRestoreFetchResult result;
   result.repository_dir = repository_dir;
   result.target_basedir = target_basedir;
   result.remote_directory = remote.directory;
+  result.transport = "managed-openssh";
 
   std::string metadata_backup_id;
   fetch_remote_metadata( repository_dir,
                          ssh,
                          remote,
+                         options,
                          result.batch_file_count,
+                         result.retry_count,
                          result.metadata_file_count,
                          metadata_backup_id );
   result.metadata_fetched = true;
@@ -598,7 +760,14 @@ SftpRestoreFetchResult fetch_latest_restore_snapshot_with_open_ssh_sftp( const s
     run_sftp_batch( object_plan.batch_commands,
                     "teleno-sftp-restore-objects",
                     ssh,
-                    result.batch_file_count );
+                    options,
+                    "restore-objects",
+                    result.backup_id,
+                    result.batch_file_count + 1,
+                    object_plan.object_count,
+                    object_plan.total_bytes,
+                    result.batch_file_count,
+                    result.retry_count );
 
     for( const auto& download: object_plan.downloads )
     {
@@ -644,8 +813,11 @@ std::string sftp_upload_result_to_text( const SftpUploadResult& result )
   out << "backup_id: " << result.backup_id << "\n";
   out << "repository_dir: " << result.repository_dir.string() << "\n";
   out << "remote_directory: " << result.remote_directory << "\n";
+  out << "transport: " << result.transport << "\n";
   out << "batch_file: " << result.batch_file.string()
       << ( result.batch_file_removed ? " (removed)" : "" ) << "\n";
+  out << "batch_file_count: " << result.batch_file_count << "\n";
+  out << "retry_count: " << result.retry_count << "\n";
   out << "file_count: " << result.file_count << "\n";
   out << "total_bytes: " << result.total_bytes << "\n";
   return out.str();
@@ -658,8 +830,11 @@ std::string sftp_upload_result_to_json( const SftpUploadResult& result )
   out << "  \"backup_id\": \"" << json_escape( result.backup_id ) << "\",\n";
   out << "  \"repository_dir\": \"" << json_escape( result.repository_dir.string() ) << "\",\n";
   out << "  \"remote_directory\": \"" << json_escape( result.remote_directory ) << "\",\n";
+  out << "  \"transport\": \"" << json_escape( result.transport ) << "\",\n";
   out << "  \"batch_file\": \"" << json_escape( result.batch_file.string() ) << "\",\n";
   out << "  \"batch_file_removed\": " << ( result.batch_file_removed ? "true" : "false" ) << ",\n";
+  out << "  \"batch_file_count\": " << result.batch_file_count << ",\n";
+  out << "  \"retry_count\": " << result.retry_count << ",\n";
   out << "  \"file_count\": " << result.file_count << ",\n";
   out << "  \"total_bytes\": " << result.total_bytes << "\n";
   out << "}\n";
@@ -674,12 +849,15 @@ std::string sftp_restore_fetch_result_to_text( const SftpRestoreFetchResult& res
   out << "repository_dir: " << result.repository_dir.string() << "\n";
   out << "target_basedir: " << result.target_basedir.string() << "\n";
   out << "remote_directory: " << result.remote_directory << "\n";
+  out << "transport: " << result.transport << "\n";
   out << "metadata_fetched: " << ( result.metadata_fetched ? "true" : "false" ) << "\n";
   out << "metadata_file_count: " << result.metadata_file_count << "\n";
   out << "object_file_count: " << result.object_file_count << "\n";
   out << "object_bytes: " << result.object_bytes << "\n";
   out << "repository_available_bytes: " << result.repository_available_bytes << "\n";
   out << "repository_required_bytes: " << result.repository_required_bytes << "\n";
+  out << "batch_file_count: " << result.batch_file_count << "\n";
+  out << "retry_count: " << result.retry_count << "\n";
   out << "objects_fetched: " << ( result.objects_fetched ? "true" : "false" ) << "\n";
   out << "ready_to_stage: " << ( result.ready_to_stage ? "true" : "false" ) << "\n";
   out << "target_space_check: " << result.preflight.space_check.message << "\n";
@@ -696,12 +874,15 @@ std::string sftp_restore_fetch_result_to_json( const SftpRestoreFetchResult& res
   out << "  \"repository_dir\": \"" << json_escape( result.repository_dir.string() ) << "\",\n";
   out << "  \"target_basedir\": \"" << json_escape( result.target_basedir.string() ) << "\",\n";
   out << "  \"remote_directory\": \"" << json_escape( result.remote_directory ) << "\",\n";
+  out << "  \"transport\": \"" << json_escape( result.transport ) << "\",\n";
   out << "  \"metadata_fetched\": " << ( result.metadata_fetched ? "true" : "false" ) << ",\n";
   out << "  \"metadata_file_count\": " << result.metadata_file_count << ",\n";
   out << "  \"object_file_count\": " << result.object_file_count << ",\n";
   out << "  \"object_bytes\": " << result.object_bytes << ",\n";
   out << "  \"repository_available_bytes\": " << result.repository_available_bytes << ",\n";
   out << "  \"repository_required_bytes\": " << result.repository_required_bytes << ",\n";
+  out << "  \"batch_file_count\": " << result.batch_file_count << ",\n";
+  out << "  \"retry_count\": " << result.retry_count << ",\n";
   out << "  \"objects_fetched\": " << ( result.objects_fetched ? "true" : "false" ) << ",\n";
   out << "  \"ready_to_stage\": " << ( result.ready_to_stage ? "true" : "false" ) << ",\n";
   out << "  \"download_skipped_reason\": \"" << json_escape( result.download_skipped_reason ) << "\",\n";

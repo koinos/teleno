@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -25,10 +26,13 @@ struct SftpUploadResult
   std::string backup_id;
   std::filesystem::path repository_dir;
   std::string remote_directory;
+  std::string transport;
   std::filesystem::path batch_file;
   bool batch_file_removed = false;
   uint64_t file_count = 0;
   uint64_t total_bytes = 0;
+  uint64_t batch_file_count = 0;
+  uint64_t retry_count = 0;
 };
 
 struct SftpRestoreObjectDownload
@@ -57,6 +61,7 @@ struct SftpRestoreFetchResult
   std::filesystem::path repository_dir;
   std::filesystem::path target_basedir;
   std::string remote_directory;
+  std::string transport;
   RestorePreflightResult preflight;
   uint64_t metadata_file_count = 0;
   uint64_t object_file_count = 0;
@@ -64,10 +69,30 @@ struct SftpRestoreFetchResult
   uint64_t repository_available_bytes = 0;
   uint64_t repository_required_bytes = 0;
   uint64_t batch_file_count = 0;
+  uint64_t retry_count = 0;
   bool metadata_fetched = false;
   bool objects_fetched = false;
   bool ready_to_stage = false;
   std::string download_skipped_reason;
+};
+
+struct SftpTransferProgress
+{
+  std::string phase;
+  std::string backup_id;
+  uint64_t completed_batches = 0;
+  uint64_t total_batches = 0;
+  uint64_t attempt = 0;
+  uint64_t file_count = 0;
+  uint64_t total_bytes = 0;
+};
+
+struct SftpTransferOptions
+{
+  uint64_t max_attempts = 3;
+  uint64_t retry_delay_seconds = 5;
+  std::function< bool() > cancel_requested;
+  std::function< void( const SftpTransferProgress& ) > progress;
 };
 
 SftpUploadPlan build_open_ssh_sftp_upload_plan( const std::filesystem::path& repository_dir,
@@ -80,10 +105,19 @@ SftpRestoreObjectFetchPlan build_open_ssh_sftp_restore_object_fetch_plan(
 SftpUploadResult upload_latest_snapshot_with_open_ssh_sftp( const std::filesystem::path& repository_dir,
                                                             const BackupSshConfig& ssh,
                                                             const BackupRemoteConfig& remote );
+SftpUploadResult upload_latest_snapshot_with_managed_sftp( const std::filesystem::path& repository_dir,
+                                                           const BackupSshConfig& ssh,
+                                                           const BackupRemoteConfig& remote,
+                                                           const SftpTransferOptions& options = {} );
 SftpRestoreFetchResult fetch_latest_restore_snapshot_with_open_ssh_sftp( const std::filesystem::path& repository_dir,
                                                                          const std::filesystem::path& target_basedir,
                                                                          const BackupSshConfig& ssh,
                                                                          const BackupRemoteConfig& remote );
+SftpRestoreFetchResult fetch_latest_restore_snapshot_with_managed_sftp( const std::filesystem::path& repository_dir,
+                                                                        const std::filesystem::path& target_basedir,
+                                                                        const BackupSshConfig& ssh,
+                                                                        const BackupRemoteConfig& remote,
+                                                                        const SftpTransferOptions& options = {} );
 
 std::string sftp_upload_plan_to_text( const SftpUploadPlan& plan );
 std::string sftp_upload_result_to_text( const SftpUploadResult& result );

@@ -1,5 +1,7 @@
 #include "backup/backup_service.hpp"
+#include "backup/backup_scheduler.hpp"
 
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
@@ -103,6 +105,100 @@ int main()
     restored.open( stage.staging_dir, cfg );
     assert( restored.read_metadata( "backup.service.test" ) == "present" );
     restored.close();
+
+    manager.close();
+    std::filesystem::remove_all( root );
+  }
+
+  {
+    assert( parse_backup_schedule_interval( "25ms" ) == std::chrono::milliseconds( 25 ) );
+    assert( parse_backup_schedule_interval( "2s" ) == std::chrono::seconds( 2 ) );
+    assert( parse_backup_schedule_interval( "3m" ) == std::chrono::minutes( 3 ) );
+    assert( parse_backup_schedule_interval( "4h" ) == std::chrono::hours( 4 ) );
+    assert( parse_backup_schedule_interval( "1d" ) == std::chrono::hours( 24 ) );
+
+    bool threw = false;
+    try
+    {
+      (void)parse_backup_schedule_interval( "0s" );
+    }
+    catch( const std::runtime_error& )
+    {
+      threw = true;
+    }
+    assert( threw );
+  }
+
+  {
+    auto root = unique_temp_dir( "teleno-backup-scheduler" );
+    auto basedir = root / "basedir";
+    auto config_path = basedir / "config.yml";
+    write_file( config_path, "backup:\n  enabled: true\n" );
+    write_file( basedir / "chain" / "genesis_data.json", "{\"genesis\":true}\n" );
+    write_file( basedir / "jsonrpc" / "descriptors" / "koinos_descriptors.pb", "descriptor-bytes" );
+
+    auto cfg = service_config( root );
+    cfg.backup.schedule.enabled = true;
+    cfg.backup.schedule.interval = "50ms";
+    cfg.backup.schedule.run_on_startup_if_missed = true;
+    cfg.backup.schedule.jitter_seconds = 0;
+    cfg.backup.schedule.minimum_head_progress = 1;
+    cfg.backup.schedule.skip_if_syncing_from_genesis = true;
+
+    storage::RocksDBManager manager;
+    manager.open( basedir, cfg );
+    manager.write_metadata( "layout.chain_storage", "unified" );
+    manager.write_metadata( "backup.scheduler.test", "present" );
+
+    std::atomic< uint64_t > head_height{ 2 };
+    BackupService service( cfg, basedir, config_path, manager );
+    BackupScheduler scheduler( &service, cfg, [&]() { return head_height.load(); } );
+    scheduler.start();
+
+    auto status = wait_for_terminal_status( service );
+    scheduler.stop();
+    service.wait_for_current_operation();
+    assert( status.state == BackupOperationState::succeeded );
+    assert( status.has_snapshot );
+    assert( std::filesystem::exists( status.snapshot.snapshot_dir / "COMPLETE" ) );
+
+    manager.close();
+    std::filesystem::remove_all( root );
+  }
+
+  {
+    auto root = unique_temp_dir( "teleno-backup-scheduler-skip" );
+    auto basedir = root / "basedir";
+    auto config_path = basedir / "config.yml";
+    write_file( config_path, "backup:\n  enabled: true\n" );
+    write_file( basedir / "chain" / "genesis_data.json", "{\"genesis\":true}\n" );
+    write_file( basedir / "jsonrpc" / "descriptors" / "koinos_descriptors.pb", "descriptor-bytes" );
+
+    auto cfg = service_config( root );
+    cfg.backup.schedule.enabled = true;
+    cfg.backup.schedule.interval = "30ms";
+    cfg.backup.schedule.run_on_startup_if_missed = true;
+    cfg.backup.schedule.jitter_seconds = 0;
+    cfg.backup.schedule.minimum_head_progress = 1;
+    cfg.backup.schedule.skip_if_syncing_from_genesis = true;
+
+    storage::RocksDBManager manager;
+    manager.open( basedir, cfg );
+    manager.write_metadata( "layout.chain_storage", "unified" );
+    manager.write_metadata( "backup.scheduler.skip.test", "present" );
+
+    std::atomic< uint64_t > head_height{ 0 };
+    BackupService service( cfg, basedir, config_path, manager );
+    BackupScheduler scheduler( &service, cfg, [&]() { return head_height.load(); } );
+    scheduler.start();
+    std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
+    assert( service.status().state == BackupOperationState::idle );
+
+    head_height = 2;
+    auto status = wait_for_terminal_status( service );
+    scheduler.stop();
+    service.wait_for_current_operation();
+    assert( status.state == BackupOperationState::succeeded );
 
     manager.close();
     std::filesystem::remove_all( root );

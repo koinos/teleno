@@ -8,6 +8,8 @@
 #include <string>
 
 using namespace koinos::node::backup;
+using koinos::node::BackupRemoteConfig;
+using koinos::node::BackupSshConfig;
 
 namespace {
 
@@ -102,8 +104,11 @@ int main()
     result.backup_id = "backup\"with\\chars";
     result.repository_dir = "/tmp/repo\nwith-line";
     result.remote_directory = "/srv/teleno-backups/testnet/teleno-dev";
+    result.transport = "managed-openssh";
     result.batch_file = "/tmp/teleno.batch";
     result.batch_file_removed = true;
+    result.batch_file_count = 1;
+    result.retry_count = 2;
     result.file_count = 2;
     result.total_bytes = 42;
 
@@ -111,9 +116,64 @@ int main()
     assert( json.find( "backup\\\"with\\\\chars" ) != std::string::npos );
     assert( json.find( "/tmp/repo\\nwith-line" ) != std::string::npos );
     assert( json.find( "\"batch_file_removed\": true" ) != std::string::npos );
+    assert( json.find( "\"transport\": \"managed-openssh\"" ) != std::string::npos );
+    assert( json.find( "\"retry_count\": 2" ) != std::string::npos );
 
     const auto text = sftp_upload_result_to_text( result );
     assert( text.find( "batch_file: /tmp/teleno.batch (removed)" ) != std::string::npos );
+  }
+
+  {
+    auto root = unique_temp_dir( "teleno-backup-sftp-managed-cancel" );
+    auto repo = root / "repo";
+    const std::string backup_id = "20260613T140000Z-ms-3-files-1";
+    write_file( repo / "latest.json",
+                "{ \"backup_id\": \"" + backup_id + "\", \"snapshot_dir\": \"" + backup_id + "\" }\n" );
+    write_file( repo / "snapshots" / backup_id / "files.json", "{\"files\":[]}\n" );
+    write_file( repo / "snapshots" / backup_id / "manifest.json", "{\"manifest\":true}\n" );
+    write_file( repo / "snapshots" / backup_id / "COMPLETE", "complete\n" );
+
+    BackupSshConfig ssh;
+    ssh.enabled = true;
+    ssh.transport = "native";
+    ssh.host = "127.0.0.1";
+    ssh.user = "backup";
+    ssh.auth = "private-key";
+    ssh.private_key_file = "/tmp/nonexistent-test-key";
+
+    BackupRemoteConfig remote;
+    remote.enabled = true;
+    remote.directory = "/srv/teleno-backups/testnet/teleno-dev";
+
+    SftpTransferOptions options;
+    options.cancel_requested = []() { return true; };
+
+    bool threw = false;
+    try
+    {
+      (void)upload_latest_snapshot_with_managed_sftp( repo, ssh, remote, options );
+    }
+    catch( const std::runtime_error& e )
+    {
+      threw = std::string( e.what() ).find( "cancelled" ) != std::string::npos;
+    }
+    assert( threw );
+
+    ssh.auth = "password-file";
+    ssh.password_file = "/tmp/nonexistent-password";
+    options.cancel_requested = {};
+    threw = false;
+    try
+    {
+      (void)upload_latest_snapshot_with_managed_sftp( repo, ssh, remote, options );
+    }
+    catch( const std::runtime_error& e )
+    {
+      threw = std::string( e.what() ).find( "native SSH library backend" ) != std::string::npos;
+    }
+    assert( threw );
+
+    std::filesystem::remove_all( root );
   }
 
   {

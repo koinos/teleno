@@ -279,6 +279,100 @@ std::filesystem::path object_path( const std::filesystem::path& repository_dir, 
   return repository_dir / "objects" / "sha256" / sha256.substr( 0, 2 ) / sha256.substr( 2, 2 ) / sha256;
 }
 
+std::vector< std::filesystem::path > completed_snapshot_dirs( const std::filesystem::path& repository_dir )
+{
+  std::vector< std::filesystem::path > snapshots;
+  const auto snapshots_dir = repository_dir / "snapshots";
+  if( !std::filesystem::exists( snapshots_dir ) )
+    return snapshots;
+
+  for( const auto& entry: std::filesystem::directory_iterator( snapshots_dir ) )
+  {
+    if( !entry.is_directory() )
+      continue;
+    const auto name = entry.path().filename().string();
+    if( name.size() >= 8 && name.substr( name.size() - 8 ) == ".partial" )
+      continue;
+    if( std::filesystem::exists( entry.path() / "COMPLETE" ) )
+      snapshots.push_back( entry.path() );
+  }
+
+  std::sort( snapshots.begin(), snapshots.end() );
+  return snapshots;
+}
+
+void collect_snapshot_object_hashes( const std::filesystem::path& snapshot_dir,
+                                     std::set< std::string >& referenced_hashes )
+{
+  const auto files_path = snapshot_dir / "files.json";
+  if( !std::filesystem::is_regular_file( files_path ) )
+    return;
+
+  const auto files = nlohmann::json::parse( read_text_file( files_path ) );
+  for( const auto& file: files.at( "files" ) )
+    referenced_hashes.insert( file.at( "sha256" ).get< std::string >() );
+}
+
+void prune_empty_object_directories( const std::filesystem::path& objects_root )
+{
+  if( !std::filesystem::exists( objects_root ) )
+    return;
+
+  std::vector< std::filesystem::path > directories;
+  for( const auto& entry: std::filesystem::recursive_directory_iterator( objects_root ) )
+  {
+    if( entry.is_directory() )
+      directories.push_back( entry.path() );
+  }
+
+  std::sort( directories.rbegin(), directories.rend() );
+  for( const auto& directory: directories )
+  {
+    std::error_code ec;
+    std::filesystem::remove( directory, ec );
+  }
+}
+
+void prune_local_snapshot_repository( const std::filesystem::path& repository_dir,
+                                      uint64_t retention_count )
+{
+  if( retention_count == 0 )
+    return;
+
+  auto snapshots = completed_snapshot_dirs( repository_dir );
+  if( snapshots.size() <= retention_count )
+    return;
+
+  const auto remove_count = snapshots.size() - static_cast< std::size_t >( retention_count );
+  for( std::size_t i = 0; i < remove_count; ++i )
+  {
+    std::error_code ec;
+    std::filesystem::remove_all( snapshots[ i ], ec );
+  }
+
+  snapshots = completed_snapshot_dirs( repository_dir );
+  std::set< std::string > referenced_hashes;
+  for( const auto& snapshot: snapshots )
+    collect_snapshot_object_hashes( snapshot, referenced_hashes );
+
+  const auto objects_root = repository_dir / "objects" / "sha256";
+  if( std::filesystem::exists( objects_root ) )
+  {
+    for( const auto& entry: std::filesystem::recursive_directory_iterator( objects_root ) )
+    {
+      if( !entry.is_regular_file() )
+        continue;
+      const auto object_hash = entry.path().filename().string();
+      if( object_hash.size() == 64 && referenced_hashes.find( object_hash ) == referenced_hashes.end() )
+      {
+        std::error_code ec;
+        std::filesystem::remove( entry.path(), ec );
+      }
+    }
+  }
+  prune_empty_object_directories( objects_root );
+}
+
 void validate_restore_relative_path( const std::string& relative_path )
 {
   if( relative_path.empty() )
@@ -949,6 +1043,7 @@ LocalSnapshotResult LocalSnapshotRepository::store_checkpoint_snapshot( const Ch
     write_complete_marker( snapshot_tmp );
     std::filesystem::rename( snapshot_tmp, snapshot_dir );
     write_file_atomic( result.latest_path, latest_json( result ) );
+    prune_local_snapshot_repository( _repository_dir, cfg.backup.local.retention_count );
 
     return result;
   }

@@ -12,9 +12,11 @@
 #include <csignal>
 #include <cstdlib>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -74,9 +76,11 @@
 
 #include "block_production/block_producer.hpp"
 #include "backup/backup_admin_server.hpp"
+#include "backup/backup_scheduler.hpp"
 #include "backup/backup_service.hpp"
 #include "backup/checkpoint_manager.hpp"
 #include "backup/backup_plan.hpp"
+#include "backup/restore_activation_supervisor.hpp"
 #include "backup/sftp_uploader.hpp"
 #include "backup/snapshot_repository.hpp"
 #include "storage/chain_migration.hpp"
@@ -385,7 +389,7 @@ int main( int argc, char** argv )
       ( BACKUP_CREATE_LOCAL_OPTION,
         "Create a local object-store backup snapshot from unified BASEDIR/db, then exit without starting node services" )
       ( BACKUP_UPLOAD_LATEST_OPTION,
-        "Upload backup.local.directory latest snapshot to backup.remote.directory over OpenSSH SFTP, then exit" )
+        "Upload backup.local.directory latest snapshot to backup.remote.directory over the managed SFTP transport, then exit" )
       ( BACKUP_RESTORE_PREFLIGHT_OPTION,
         "Validate the latest local backup snapshot and target disk space before restore, then exit without opening RocksDB" )
       ( BACKUP_RESTORE_STAGE_OPTION,
@@ -393,7 +397,7 @@ int main( int argc, char** argv )
       ( BACKUP_RESTORE_ACTIVATE_OPTION,
         "Activate a staged local backup restore while the node is stopped, then exit without opening RocksDB" )
       ( BACKUP_RESTORE_FETCH_OPTION,
-        "Fetch latest remote backup metadata and missing objects over OpenSSH SFTP, then exit without opening RocksDB" )
+        "Fetch latest remote backup metadata and missing objects over the managed SFTP transport, then exit without opening RocksDB" )
       ( BACKUP_OUTPUT_OPTION, po::value< std::string >()->default_value( "" ),
         "Output directory for --backup-checkpoint, --backup-restore-stage, or staged dir for --backup-restore-activate" )
       ( BACKUP_JSON_OPTION,
@@ -582,6 +586,18 @@ int main( int argc, char** argv )
     LOG( info ) << "[node] " << node::node_name() << " v" << node::build_version() << " starting";
     LOG( info ) << "[node] basedir: " << basedir.string();
     LOG( info ) << "[node] config: " << config_path.string();
+
+    if( node::backup::has_pending_restore_activation_request( basedir ) )
+    {
+      const auto intent = node::backup::read_pending_restore_activation_request( basedir );
+      LOG( info ) << "[backup_restore] Pending restore activation found before DB open: "
+                  << intent->intent_path.string();
+      auto result = node::backup::activate_pending_restore_activation_request( basedir );
+      LOG( info ) << "[backup_restore] Activated pending restore before startup"
+                  << " backup_id=" << result.backup_id
+                  << " pre_restore_dir=" << result.pre_restore_dir.string()
+                  << " observer_first=" << ( result.start_as_observer_first ? "true" : "false" );
+    }
 
     // Log enabled features
     for( const auto& [name, enabled]: cfg.features )
@@ -1246,6 +1262,17 @@ int main( int argc, char** argv )
 
     std::unique_ptr< node::backup::BackupService > backup_service_runtime;
     std::unique_ptr< node::backup::BackupAdminServer > backup_admin_server;
+    std::unique_ptr< node::backup::BackupScheduler > backup_scheduler;
+    std::atomic< bool > restore_activation_shutdown_requested{ false };
+    if( cfg.backup.admin.enabled || cfg.backup.schedule.enabled )
+    {
+      backup_service_runtime = std::make_unique< node::backup::BackupService >(
+        cfg,
+        basedir,
+        config_path,
+        storage_db );
+    }
+
     if( cfg.backup.admin.enabled )
     {
       auto [admin_host, admin_port] = parse_jsonrpc_listen( cfg.backup.admin.listen );
@@ -1255,11 +1282,6 @@ int main( int argc, char** argv )
 
       const auto admin_token = read_backup_admin_token_file( cfg.backup.admin.token_file );
 
-      backup_service_runtime = std::make_unique< node::backup::BackupService >(
-        cfg,
-        basedir,
-        config_path,
-        storage_db );
       backup_admin_server = std::make_unique< node::backup::BackupAdminServer >(
         backup_service_runtime.get(),
         admin_host,
@@ -1274,12 +1296,35 @@ int main( int argc, char** argv )
       );
     }
 
+    if( cfg.backup.schedule.enabled )
+    {
+      backup_scheduler = std::make_unique< node::backup::BackupScheduler >(
+        backup_service_runtime.get(),
+        cfg,
+        [&controller]() {
+          return controller.get_head_info().head_topology().height();
+        } );
+    }
+
     // ── Signal handling ──
+    auto request_runtime_stop = [&]( const std::string& reason ) {
+      if( restore_activation_shutdown_requested.exchange( true ) )
+        return;
+
+      LOG( info ) << "[backup_restore] Runtime restore activation requested: " << reason;
+      if( backup_scheduler )
+        backup_scheduler->stop();
+      registry.stop_all();
+      main_ioc.stop();
+    };
+
     boost::asio::signal_set signals( main_ioc, SIGINT, SIGTERM );
     signals.async_wait( [&]( const boost::system::error_code& ec, int sig ) {
       if( !ec )
       {
         LOG( info ) << "[node] Received signal " << sig << ", shutting down...";
+        if( backup_scheduler )
+          backup_scheduler->stop();
         registry.stop_all();
         main_ioc.stop();
       }
@@ -1307,6 +1352,36 @@ int main( int argc, char** argv )
     }
 
     LOG( info ) << "[node] " << node::node_name() << " ready";
+    if( backup_scheduler )
+      backup_scheduler->start();
+
+    boost::asio::steady_timer restore_activation_timer( main_ioc );
+    std::function< void( const boost::system::error_code& ) > restore_activation_tick;
+    restore_activation_tick = [&]( const boost::system::error_code& ec ) {
+      if( ec )
+        return;
+
+      try
+      {
+        if( node::backup::has_pending_restore_activation_request( basedir ) )
+        {
+          const auto intent = node::backup::read_pending_restore_activation_request( basedir );
+          request_runtime_stop( intent->intent_path.string() );
+          return;
+        }
+      }
+      catch( const std::exception& e )
+      {
+        LOG( warning ) << "[backup_restore] Failed while checking restore activation intent: " << e.what();
+        request_runtime_stop( "invalid restore activation intent" );
+        return;
+      }
+
+      restore_activation_timer.expires_after( std::chrono::seconds( 2 ) );
+      restore_activation_timer.async_wait( restore_activation_tick );
+    };
+    restore_activation_timer.expires_after( std::chrono::seconds( 2 ) );
+    restore_activation_timer.async_wait( restore_activation_tick );
 
     // ── Periodic metrics (every 60s) ──
     boost::asio::steady_timer metrics_timer( main_ioc );
@@ -1364,6 +1439,25 @@ int main( int argc, char** argv )
 
     // ── Run main event loop ──
     main_ioc.run();
+
+    if( backup_scheduler )
+      backup_scheduler->stop();
+
+    if( restore_activation_shutdown_requested
+        || node::backup::has_pending_restore_activation_request( basedir ) )
+    {
+      registry.stop_all();
+      backup_admin_server.reset();
+      backup_service_runtime.reset();
+      storage_db.close();
+
+      auto result = node::backup::activate_pending_restore_activation_request( basedir );
+      LOG( info ) << "[backup_restore] Activated pending restore after graceful runtime stop"
+                  << " backup_id=" << result.backup_id
+                  << " pre_restore_dir=" << result.pre_restore_dir.string()
+                  << " observer_first=" << ( result.start_as_observer_first ? "true" : "false" );
+      LOG( info ) << "[backup_restore] Restore activation complete; restart the node to begin observer-first recovery";
+    }
 
     LOG( info ) << "[node] " << node::node_name() << " shutdown complete";
     return EXIT_SUCCESS;

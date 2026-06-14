@@ -1,4 +1,5 @@
 #include "backup/checkpoint_manager.hpp"
+#include "backup/restore_activation_supervisor.hpp"
 #include "backup/snapshot_repository.hpp"
 
 #include <cassert>
@@ -179,6 +180,75 @@ int main()
     assert( !missing_preflight.ready_to_restore );
 
     manager.close();
+    std::filesystem::remove_all( root );
+  }
+
+  {
+    auto root = unique_temp_dir( "teleno-backup-retention" );
+    auto basedir = root / "basedir";
+    auto config_path = basedir / "config.yml";
+    write_file( config_path, "backup:\n  enabled: true\n" );
+    write_file( basedir / "chain" / "genesis_data.json", "{\"genesis\":true}\n" );
+    write_file( basedir / "jsonrpc" / "descriptors" / "koinos_descriptors.pb", "descriptor-bytes" );
+
+    auto cfg = snapshot_config( root );
+    cfg.backup.local.retention_count = 1;
+
+    storage::RocksDBManager manager;
+    manager.open( basedir, cfg );
+    manager.write_metadata( "backup.retention.test", "first" );
+    auto first = create_snapshot( root, manager, cfg, basedir, config_path, "checkpoint-retention-1" );
+
+    manager.write_metadata( "backup.retention.test", "second" );
+    auto second = create_snapshot( root, manager, cfg, basedir, config_path, "checkpoint-retention-2" );
+
+    assert( first.backup_id != second.backup_id );
+    assert( !std::filesystem::exists( first.snapshot_dir ) );
+    assert( std::filesystem::exists( second.snapshot_dir / "COMPLETE" ) );
+    assert( read_file( second.latest_path ).find( second.backup_id ) != std::string::npos );
+
+    uint64_t completed_snapshots = 0;
+    for( const auto& entry: std::filesystem::directory_iterator( root / "repo" / "snapshots" ) )
+    {
+      if( entry.is_directory() && std::filesystem::exists( entry.path() / "COMPLETE" ) )
+        ++completed_snapshots;
+    }
+    assert( completed_snapshots == 1 );
+
+    manager.close();
+    std::filesystem::remove_all( root );
+  }
+
+  {
+    auto root = unique_temp_dir( "teleno-backup-activation-intent" );
+    auto basedir = root / "basedir";
+    auto staging = root / "staging";
+    write_file( basedir / "db" / "CURRENT", "old-db" );
+    write_file( staging / "db" / "CURRENT", "new-db" );
+    write_file( staging / "RESTORE_STAGE_COMPLETE", "ok\n" );
+    write_file( staging / ".teleno-restore-stage.json", "{ \"backup_id\": \"intent-test\" }\n" );
+
+    const auto intent_path = restore_activation_intent_path( basedir );
+    write_file( intent_path,
+                "{\n"
+                "  \"format\": \"teleno-native-restore-activation-request\",\n"
+                "  \"version\": 1,\n"
+                "  \"target_basedir\": \"" + basedir.string() + "\",\n"
+                "  \"staging_dir\": \"" + staging.string() + "\",\n"
+                "  \"requires_node_stop\": true\n"
+                "}\n" );
+
+    auto intent = read_pending_restore_activation_request( basedir );
+    assert( intent );
+    assert( intent->staging_dir == staging );
+    assert( restore_activation_intent_to_json( *intent ).find( "\"requires_node_stop\": true" ) != std::string::npos );
+
+    auto activation = activate_pending_restore_activation_request( basedir );
+    assert( activation.backup_id == "intent-test" );
+    assert( !std::filesystem::exists( intent_path ) );
+    assert( read_file( basedir / "db" / "CURRENT" ) == "new-db" );
+    assert( read_file( activation.pre_restore_dir / "db" / "CURRENT" ) == "old-db" );
+
     std::filesystem::remove_all( root );
   }
 
