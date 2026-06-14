@@ -21,6 +21,27 @@ std::filesystem::path staging_dir_from_request_body( const std::string& body )
   return request.value( "staging_dir", std::string{} );
 }
 
+bool is_route_or_child( const std::string& target, const std::string& route )
+{
+  return target == route || target.rfind( route + "/", 0 ) == 0;
+}
+
+std::string child_route_id( const std::string& target, const std::string& route )
+{
+  const auto prefix = route + "/";
+  if( target.rfind( prefix, 0 ) != 0 )
+    return {};
+  return target.substr( prefix.size() );
+}
+
+std::string bad_request_response( const std::string& error )
+{
+  nlohmann::json response;
+  response[ "ok" ] = false;
+  response[ "error" ] = error;
+  return response.dump();
+}
+
 } // anonymous namespace
 
 BackupAdminServer::BackupAdminServer( BackupService* backup_service,
@@ -135,9 +156,20 @@ bool BackupAdminServer::request_authorized( const http::request< http::string_bo
   return std::string( authorization ) == expected;
 }
 
-std::string BackupAdminServer::status_response() const
+std::string BackupAdminServer::status_response( const BackupOperationStatus& status ) const
 {
-  return backup_operation_status_to_json( _backup_service->status() );
+  return backup_operation_status_to_json( status );
+}
+
+std::string BackupAdminServer::operation_not_found_response( const std::string& operation_id,
+                                                             const BackupOperationStatus& status ) const
+{
+  nlohmann::json response;
+  response[ "ok" ] = false;
+  response[ "error" ] = "operation not found";
+  response[ "operation_id" ] = operation_id;
+  response[ "status" ] = nlohmann::json::parse( backup_operation_status_to_json( status ) );
+  return response.dump();
 }
 
 std::string BackupAdminServer::create_response()
@@ -149,9 +181,8 @@ std::string BackupAdminServer::create_response()
   return response.dump();
 }
 
-std::string BackupAdminServer::cancel_response()
+std::string BackupAdminServer::cancel_response( const BackupOperationStatus& status )
 {
-  auto status = _backup_service->cancel_current_operation();
   nlohmann::json response;
   response[ "ok" ] = true;
   response[ "status" ] = nlohmann::json::parse( backup_operation_status_to_json( status ) );
@@ -206,10 +237,30 @@ void BackupAdminServer::handle_session( tcp::socket socket )
 
     try
     {
-      if( req.method() == http::verb::get && target == "/admin/backup/status" )
+      if( req.method() == http::verb::get
+          && is_route_or_child( target, "/admin/backup/status" ) )
       {
-        res.result( http::status::ok );
-        res.body() = status_response();
+        const auto operation_id = child_route_id( target, "/admin/backup/status" );
+        const auto has_operation_id = target != "/admin/backup/status";
+        if( has_operation_id && operation_id.empty() )
+        {
+          res.result( http::status::bad_request );
+          res.body() = bad_request_response( "operation id is required" );
+        }
+        else
+        {
+          const auto status = _backup_service->status();
+          if( has_operation_id && status.operation_id != operation_id )
+          {
+            res.result( http::status::not_found );
+            res.body() = operation_not_found_response( operation_id, status );
+          }
+          else
+          {
+            res.result( http::status::ok );
+            res.body() = status_response( status );
+          }
+        }
       }
       else if( req.method() == http::verb::post && target == "/admin/backup/create" )
       {
@@ -217,11 +268,30 @@ void BackupAdminServer::handle_session( tcp::socket socket )
         res.body() = create_response();
       }
       else if( req.method() == http::verb::post
-               && ( target == "/admin/backup/cancel"
-                    || target.rfind( "/admin/backup/cancel/", 0 ) == 0 ) )
+               && is_route_or_child( target, "/admin/backup/cancel" ) )
       {
-        res.result( http::status::accepted );
-        res.body() = cancel_response();
+        const auto operation_id = child_route_id( target, "/admin/backup/cancel" );
+        const auto has_operation_id = target != "/admin/backup/cancel";
+        if( has_operation_id && operation_id.empty() )
+        {
+          res.result( http::status::bad_request );
+          res.body() = bad_request_response( "operation id is required" );
+        }
+        else
+        {
+          auto status = _backup_service->status();
+          if( has_operation_id && status.operation_id != operation_id )
+          {
+            res.result( http::status::not_found );
+            res.body() = operation_not_found_response( operation_id, status );
+          }
+          else
+          {
+            status = _backup_service->cancel_current_operation();
+            res.result( http::status::accepted );
+            res.body() = cancel_response( status );
+          }
+        }
       }
       else if( req.method() == http::verb::post && target == "/admin/backup/restore/stage" )
       {

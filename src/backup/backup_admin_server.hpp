@@ -41,9 +41,11 @@ private:
   void handle_session( tcp::socket socket );
   bool is_admin_target( const std::string& target ) const;
   bool request_authorized( const http::request< http::string_body >& req ) const;
-  std::string status_response() const;
+  std::string status_response( const BackupOperationStatus& status ) const;
+  std::string operation_not_found_response( const std::string& operation_id,
+                                            const BackupOperationStatus& status ) const;
   std::string create_response();
-  std::string cancel_response();
+  std::string cancel_response( const BackupOperationStatus& status );
   std::string restore_stage_response( const std::string& body );
   std::string restore_activate_response( const std::string& body );
 

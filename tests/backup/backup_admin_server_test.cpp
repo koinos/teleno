@@ -148,15 +148,53 @@ int main()
     auto created_json = nlohmann::json::parse( created.body );
     assert( created_json.at( "ok" ) == true );
     assert( created_json.at( "status" ).at( "state" ) == "running" );
+    const auto operation_id = created_json.at( "status" ).at( "operation_id" ).get< std::string >();
+    assert( !operation_id.empty() );
 
     auto status_json = wait_for_terminal_backup_status( port, "admin-test-token" );
     assert( status_json.at( "state" ) == "succeeded" );
     assert( status_json.at( "has_snapshot" ) == true );
 
+    auto status_by_id = http_request(
+      port, http::verb::get, "/admin/backup/status/" + operation_id, "admin-test-token" );
+    assert( status_by_id.status == http::status::ok );
+    auto status_by_id_json = nlohmann::json::parse( status_by_id.body );
+    assert( status_by_id_json.at( "operation_id" ) == operation_id );
+    assert( status_by_id_json.at( "state" ) == "succeeded" );
+
+    auto missing_status = http_request(
+      port, http::verb::get, "/admin/backup/status/missing-operation", "admin-test-token" );
+    assert( missing_status.status == http::status::not_found );
+    auto missing_status_json = nlohmann::json::parse( missing_status.body );
+    assert( missing_status_json.at( "ok" ) == false );
+    assert( missing_status_json.at( "operation_id" ) == "missing-operation" );
+    assert( missing_status_json.at( "status" ).at( "operation_id" ) == operation_id );
+
+    auto empty_status_id = http_request(
+      port, http::verb::get, "/admin/backup/status/", "admin-test-token" );
+    assert( empty_status_id.status == http::status::bad_request );
+
     auto cancel = http_request( port, http::verb::post, "/admin/backup/cancel", "admin-test-token" );
     assert( cancel.status == http::status::accepted );
     auto cancel_json = nlohmann::json::parse( cancel.body );
     assert( cancel_json.at( "status" ).at( "state" ) == "succeeded" );
+
+    auto cancel_by_id = http_request(
+      port, http::verb::post, "/admin/backup/cancel/" + operation_id, "admin-test-token" );
+    assert( cancel_by_id.status == http::status::accepted );
+    auto cancel_by_id_json = nlohmann::json::parse( cancel_by_id.body );
+    assert( cancel_by_id_json.at( "status" ).at( "operation_id" ) == operation_id );
+
+    auto missing_cancel = http_request(
+      port, http::verb::post, "/admin/backup/cancel/missing-operation", "admin-test-token" );
+    assert( missing_cancel.status == http::status::not_found );
+    auto missing_cancel_json = nlohmann::json::parse( missing_cancel.body );
+    assert( missing_cancel_json.at( "ok" ) == false );
+    assert( missing_cancel_json.at( "operation_id" ) == "missing-operation" );
+
+    auto empty_cancel_id = http_request(
+      port, http::verb::post, "/admin/backup/cancel/", "admin-test-token" );
+    assert( empty_cancel_id.status == http::status::bad_request );
 
     auto stage = http_request( port, http::verb::post, "/admin/backup/restore/stage", "admin-test-token" );
     assert( stage.status == http::status::ok );
