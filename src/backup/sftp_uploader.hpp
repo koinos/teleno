@@ -109,6 +109,14 @@ SftpUploadResult upload_latest_snapshot_with_managed_sftp( const std::filesystem
                                                            const BackupSshConfig& ssh,
                                                            const BackupRemoteConfig& remote,
                                                            const SftpTransferOptions& options = {} );
+BackupSnapshotListResult list_remote_backup_snapshots_with_sftp( const std::filesystem::path& repository_dir,
+                                                                 const BackupSshConfig& ssh,
+                                                                 const BackupRemoteConfig& remote );
+BackupSnapshotListResult list_remote_backup_snapshots_with_managed_sftp(
+  const std::filesystem::path& repository_dir,
+  const BackupSshConfig& ssh,
+  const BackupRemoteConfig& remote,
+  const SftpTransferOptions& options = {} );
 SftpRestoreFetchResult fetch_latest_restore_snapshot_with_sftp( const std::filesystem::path& repository_dir,
                                                                 const std::filesystem::path& target_basedir,
                                                                 const BackupSshConfig& ssh,
@@ -118,6 +126,17 @@ SftpRestoreFetchResult fetch_latest_restore_snapshot_with_managed_sftp( const st
                                                                         const BackupSshConfig& ssh,
                                                                         const BackupRemoteConfig& remote,
                                                                         const SftpTransferOptions& options = {} );
+SftpRestoreFetchResult fetch_restore_snapshot_with_sftp( const std::filesystem::path& repository_dir,
+                                                         const std::filesystem::path& target_basedir,
+                                                         const BackupSshConfig& ssh,
+                                                         const BackupRemoteConfig& remote,
+                                                         const std::string& backup_id );
+SftpRestoreFetchResult fetch_restore_snapshot_with_managed_sftp( const std::filesystem::path& repository_dir,
+                                                                 const std::filesystem::path& target_basedir,
+                                                                 const BackupSshConfig& ssh,
+                                                                 const BackupRemoteConfig& remote,
+                                                                 const std::string& backup_id,
+                                                                 const SftpTransferOptions& options = {} );
 
 std::string sftp_upload_plan_to_text( const SftpUploadPlan& plan );
 std::string sftp_upload_result_to_text( const SftpUploadResult& result );

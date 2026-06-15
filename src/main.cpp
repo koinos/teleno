@@ -127,6 +127,7 @@
 #define BACKUP_CREATE_LOCAL_OPTION "backup-create-local"
 #define BACKUP_UPLOAD_LATEST_OPTION "backup-upload-latest"
 #define BACKUP_LIST_OPTION "backup-list"
+#define BACKUP_LIST_REMOTE_OPTION "backup-list-remote"
 #define BACKUP_RESTORE_OPTION "backup-restore"
 #define BACKUP_RESTORE_PREFLIGHT_OPTION "backup-restore-preflight"
 #define BACKUP_RESTORE_STAGE_OPTION "backup-restore-stage"
@@ -497,8 +498,10 @@ int main( int argc, char** argv )
         "Upload backup.local.directory latest snapshot to backup.remote.directory over native libssh SFTP, then exit" )
       ( BACKUP_LIST_OPTION,
         "List completed snapshots in backup.local.directory, then exit without opening RocksDB" )
+      ( BACKUP_LIST_REMOTE_OPTION,
+        "Fetch and list completed snapshots from backup.remote.directory over native libssh SFTP, caching metadata locally" )
       ( BACKUP_RESTORE_OPTION,
-        "Restore the configured latest native backup: fetch remote data when enabled, preflight, stage, activate, then exit" )
+        "Restore the configured native backup: fetch remote data when enabled, preflight, stage, activate, then exit" )
       ( BACKUP_RESTORE_PREFLIGHT_OPTION,
         "Validate the latest local backup snapshot and target disk space before restore, then exit without opening RocksDB" )
       ( BACKUP_RESTORE_STAGE_OPTION,
@@ -506,11 +509,11 @@ int main( int argc, char** argv )
       ( BACKUP_RESTORE_ACTIVATE_OPTION,
         "Activate a staged local backup restore while the node is stopped, then exit without opening RocksDB" )
       ( BACKUP_RESTORE_FETCH_OPTION,
-        "Fetch latest remote backup metadata and missing objects over native libssh SFTP, then exit without opening RocksDB" )
+        "Fetch selected or latest remote backup metadata and missing objects over native libssh SFTP, then exit without opening RocksDB" )
       ( BACKUP_OUTPUT_OPTION, po::value< std::string >()->default_value( "" ),
         "Output directory for --backup-checkpoint, staging directory for --backup-restore/--backup-restore-stage, or staged dir for --backup-restore-activate" )
       ( BACKUP_ID_OPTION, po::value< std::string >()->default_value( "" ),
-        "Backup ID to use with local --backup-restore, --backup-restore-preflight, or --backup-restore-stage; omit or use latest by default" )
+        "Backup ID to use with backup list/fetch/restore/preflight/stage commands; omit or use latest by default" )
       ( BACKUP_JSON_OPTION,
         "Print backup command output as JSON when used with backup command modes" )
       ( ALL_OPTION,
@@ -572,6 +575,7 @@ int main( int argc, char** argv )
         && !vm.count( BACKUP_CREATE_LOCAL_OPTION )
         && !vm.count( BACKUP_UPLOAD_LATEST_OPTION )
         && !vm.count( BACKUP_LIST_OPTION )
+        && !vm.count( BACKUP_LIST_REMOTE_OPTION )
         && !vm.count( BACKUP_RESTORE_OPTION )
         && !vm.count( BACKUP_RESTORE_PREFLIGHT_OPTION )
         && !vm.count( BACKUP_RESTORE_STAGE_OPTION )
@@ -597,6 +601,31 @@ int main( int argc, char** argv )
         throw std::runtime_error( "--backup-list requires backup.local.directory" );
 
       auto result = node::backup::list_local_backup_snapshots( cfg.backup.local.directory );
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << node::backup::backup_snapshot_list_result_to_json( result );
+      else
+        std::cout << node::backup::backup_snapshot_list_result_to_text( result );
+      return EXIT_SUCCESS;
+    }
+
+    if( vm.count( BACKUP_LIST_REMOTE_OPTION ) )
+    {
+      if( !cfg.backup.local.enabled )
+        throw std::runtime_error(
+          "--backup-list-remote requires backup.local.enabled=true because remote metadata is cached locally" );
+      if( cfg.backup.local.directory.empty() )
+        throw std::runtime_error( "--backup-list-remote requires backup.local.directory" );
+      if( !cfg.backup.remote.enabled )
+        throw std::runtime_error( "--backup-list-remote requires backup.remote.enabled=true" );
+      if( cfg.backup.remote.directory.empty() )
+        throw std::runtime_error( "--backup-list-remote requires backup.remote.directory" );
+      if( !cfg.backup.ssh.enabled )
+        throw std::runtime_error( "--backup-list-remote requires backup.ssh.enabled=true" );
+
+      auto result = node::backup::list_remote_backup_snapshots_with_sftp(
+        cfg.backup.local.directory,
+        cfg.backup.ssh,
+        cfg.backup.remote );
       if( vm.count( BACKUP_JSON_OPTION ) )
         std::cout << node::backup::backup_snapshot_list_result_to_json( result );
       else
@@ -643,8 +672,6 @@ int main( int argc, char** argv )
         throw std::runtime_error( "--backup-restore requires backup.local.directory" );
       if( cfg.backup.remote.enabled )
       {
-        if( !backup_id.empty() && backup_id != "latest" )
-          throw std::runtime_error( "--backup-id with remote restore is not implemented yet; fetch remote latest first, then restore by local backup ID" );
         if( cfg.backup.remote.directory.empty() )
           throw std::runtime_error( "--backup-restore remote fetch requires backup.remote.directory" );
         if( !cfg.backup.ssh.enabled )
@@ -656,11 +683,12 @@ int main( int argc, char** argv )
 
       if( cfg.backup.remote.enabled )
       {
-        result.remote_fetch = node::backup::fetch_latest_restore_snapshot_with_managed_sftp(
+        result.remote_fetch = node::backup::fetch_restore_snapshot_with_managed_sftp(
           cfg.backup.local.directory,
           basedir,
           cfg.backup.ssh,
-          cfg.backup.remote );
+          cfg.backup.remote,
+          backup_id );
         result.preflight = result.remote_fetch->preflight;
         if( !result.remote_fetch->ready_to_stage )
         {
@@ -784,11 +812,13 @@ int main( int argc, char** argv )
       if( !cfg.backup.ssh.enabled )
         throw std::runtime_error( "--backup-restore-fetch requires backup.ssh.enabled=true" );
 
-      auto result = node::backup::fetch_latest_restore_snapshot_with_sftp(
+      const auto backup_id = vm[ BACKUP_ID_OPTION ].as< std::string >();
+      auto result = node::backup::fetch_restore_snapshot_with_sftp(
         cfg.backup.local.directory,
         basedir,
         cfg.backup.ssh,
-        cfg.backup.remote );
+        cfg.backup.remote,
+        backup_id );
       if( vm.count( BACKUP_JSON_OPTION ) )
         std::cout << node::backup::sftp_restore_fetch_result_to_json( result );
       else
