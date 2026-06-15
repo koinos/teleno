@@ -154,6 +154,47 @@ int main()
     auto status_json = wait_for_terminal_backup_status( port, "admin-test-token" );
     assert( status_json.at( "state" ) == "succeeded" );
     assert( status_json.at( "has_snapshot" ) == true );
+    assert( status_json.at( "operation_kind" ) == "local-snapshot" );
+    const auto backup_id = status_json.at( "snapshot" ).at( "backup_id" ).get< std::string >();
+    assert( !backup_id.empty() );
+
+    auto config = http_request( port, http::verb::get, "/admin/backup/config", "admin-test-token" );
+    assert( config.status == http::status::ok );
+    auto config_json = nlohmann::json::parse( config.body );
+    assert( config_json.at( "ok" ) == true );
+    assert( config_json.at( "config" ).at( "backup" ).at( "local" ).at( "enabled" ) == true );
+    assert( config_json.at( "config" ).at( "backup" ).at( "ssh" ).at( "password_file_configured" ) == false );
+
+    auto local_list = http_request(
+      port, http::verb::get, "/admin/backup/snapshots/local", "admin-test-token" );
+    assert( local_list.status == http::status::ok );
+    auto local_list_json = nlohmann::json::parse( local_list.body );
+    assert( local_list_json.at( "ok" ) == true );
+    assert( local_list_json.at( "source" ) == "local" );
+    assert( local_list_json.at( "snapshots" ).at( "snapshot_count" ) == 1 );
+    assert( local_list_json.at( "snapshots" ).at( "latest_backup_id" ) == backup_id );
+
+    auto remote_list = http_request(
+      port, http::verb::get, "/admin/backup/snapshots/remote", "admin-test-token" );
+    assert( remote_list.status == http::status::bad_request );
+    auto remote_list_json = nlohmann::json::parse( remote_list.body );
+    assert( remote_list_json.at( "ok" ) == false );
+
+    auto upload_latest = http_request(
+      port, http::verb::post, "/admin/backup/upload-latest", "admin-test-token" );
+    assert( upload_latest.status == http::status::bad_request );
+
+    auto preflight = http_request(
+      port,
+      http::verb::post,
+      "/admin/backup/restore/preflight",
+      "admin-test-token",
+      std::string( "{\"backup_id\":\"" ) + backup_id + "\"}" );
+    assert( preflight.status == http::status::ok );
+    auto preflight_json = nlohmann::json::parse( preflight.body );
+    assert( preflight_json.at( "ok" ) == true );
+    assert( preflight_json.at( "preflight" ).at( "backup_id" ) == backup_id );
+    assert( preflight_json.at( "preflight" ).at( "ready_to_restore" ) == true );
 
     auto status_by_id = http_request(
       port, http::verb::get, "/admin/backup/status/" + operation_id, "admin-test-token" );
@@ -196,7 +237,12 @@ int main()
       port, http::verb::post, "/admin/backup/cancel/", "admin-test-token" );
     assert( empty_cancel_id.status == http::status::bad_request );
 
-    auto stage = http_request( port, http::verb::post, "/admin/backup/restore/stage", "admin-test-token" );
+    auto stage = http_request(
+      port,
+      http::verb::post,
+      "/admin/backup/restore/stage",
+      "admin-test-token",
+      std::string( "{\"backup_id\":\"" ) + backup_id + "\"}" );
     assert( stage.status == http::status::ok );
     auto stage_json = nlohmann::json::parse( stage.body );
     assert( stage_json.at( "ok" ) == true );
@@ -214,6 +260,36 @@ int main()
     assert( std::filesystem::exists(
       std::filesystem::path( activation_request.at( "intent_path" ).get< std::string >() ) ) );
     assert( std::filesystem::exists( basedir / "db" ) );
+
+    auto invalid_json = http_request(
+      port, http::verb::post, "/admin/backup/delete", "admin-test-token", "not-json" );
+    assert( invalid_json.status == http::status::bad_request );
+
+    auto delete_dry_run = http_request(
+      port,
+      http::verb::post,
+      "/admin/backup/delete",
+      "admin-test-token",
+      std::string( "{\"scope\":\"local\",\"backup_id\":\"" ) + backup_id + "\"}" );
+    assert( delete_dry_run.status == http::status::accepted );
+    auto delete_dry_run_status = wait_for_terminal_backup_status( port, "admin-test-token" );
+    assert( delete_dry_run_status.at( "operation_kind" ) == "delete" );
+    assert( delete_dry_run_status.at( "delete_result_count" ) == 1 );
+    assert( delete_dry_run_status.at( "delete_results" ).at( 0 ).at( "dry_run" ) == true );
+    assert( delete_dry_run_status.at( "delete_results" ).at( 0 ).at( "snapshot_found" ) == true );
+    assert( std::filesystem::exists( cfg.backup.local.directory + "/snapshots/" + backup_id ) );
+
+    auto delete_confirmed = http_request(
+      port,
+      http::verb::post,
+      "/admin/backup/delete",
+      "admin-test-token",
+      std::string( "{\"scope\":\"local\",\"backup_id\":\"" ) + backup_id + "\",\"confirm\":\"" + backup_id + "\"}" );
+    assert( delete_confirmed.status == http::status::accepted );
+    auto delete_confirmed_status = wait_for_terminal_backup_status( port, "admin-test-token" );
+    assert( delete_confirmed_status.at( "delete_results" ).at( 0 ).at( "dry_run" ) == false );
+    assert( delete_confirmed_status.at( "delete_results" ).at( 0 ).at( "deleted_snapshot" ) == true );
+    assert( !std::filesystem::exists( cfg.backup.local.directory + "/snapshots/" + backup_id ) );
 
     server.stop();
     manager.close();

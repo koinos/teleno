@@ -64,6 +64,10 @@ int main()
                 "  \"snapshot_dir\": \"" + backup_id + "\"\n"
                 "}\n" );
     write_file( repo / "objects" / "sha256" / "ab" / "cd" / "abcd1234", "object-a" );
+    write_file( repo / "objects" / ".DS_Store", "finder-root" );
+    write_file( repo / "objects" / "sha256" / ".DS_Store", "finder-sha" );
+    write_file( repo / "objects" / "sha256" / "ab" / ".DS_Store", "finder-prefix" );
+    write_file( repo / "objects" / "sha256" / "ab" / "cd" / "._abcd1234", "finder-resource-fork" );
     write_file( repo / "snapshots" / backup_id / "files.json", "{\"files\":[]}\n" );
     write_file( repo / "snapshots" / backup_id / "manifest.json", "{\"manifest\":true}\n" );
     write_file( repo / "snapshots" / backup_id / "COMPLETE", "complete\n" );
@@ -74,8 +78,14 @@ int main()
     assert( plan.file_count == 5 );
     assert( plan.total_bytes > 0 );
     assert( !plan.batch_commands.empty() );
-    assert( plan.batch_commands.front().find( "cd \"/srv/teleno-backups/testnet/teleno-dev\"" ) != std::string::npos );
+    assert( has_command_containing( plan, "mkdir \"/srv\"" ) );
+    assert( has_command_containing( plan, "mkdir \"/srv/teleno-backups\"" ) );
+    assert( has_command_containing( plan, "mkdir \"/srv/teleno-backups/testnet\"" ) );
+    assert( has_command_containing( plan, "mkdir \"/srv/teleno-backups/testnet/teleno-dev\"" ) );
+    assert( has_command_containing( plan, "cd \"/srv/teleno-backups/testnet/teleno-dev\"" ) );
     assert( has_command_containing( plan, "objects/sha256/ab/cd/abcd1234" ) );
+    assert( !has_command_containing( plan, ".DS_Store" ) );
+    assert( !has_command_containing( plan, "._abcd1234" ) );
     assert( has_command_containing( plan, "snapshots/" + backup_id + ".partial" ) );
     assert( has_command_containing( plan, "rename \"snapshots/" + backup_id + ".partial\"" ) );
     assert( has_command_containing( plan, "latest.json.partial" ) );

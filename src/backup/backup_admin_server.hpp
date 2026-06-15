@@ -44,7 +44,13 @@ private:
   std::string status_response( const BackupOperationStatus& status ) const;
   std::string operation_not_found_response( const std::string& operation_id,
                                             const BackupOperationStatus& status ) const;
-  std::string create_response();
+  std::string config_response();
+  std::string list_response( bool remote );
+  std::string create_response( const std::string& body );
+  std::string upload_latest_response();
+  std::string delete_response( const std::string& body );
+  std::string restore_fetch_response( const std::string& body );
+  std::string restore_preflight_response( const std::string& body );
   std::string cancel_response( const BackupOperationStatus& status );
   std::string restore_stage_response( const std::string& body );
   std::string restore_activate_response( const std::string& body );

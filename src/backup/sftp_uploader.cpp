@@ -238,8 +238,47 @@ void add_remote_parent_mkdirs( std::vector< std::string >& commands,
     current /= part;
     if( current.empty() )
       continue;
-    push_unique_command( commands, "-mkdir " + sftp_quote( current.generic_string() ) );
+    push_unique_command( commands, "mkdir " + sftp_quote( current.generic_string() ) );
   }
+}
+
+void add_remote_directory_mkdirs( std::vector< std::string >& commands,
+                                  const std::string& remote_directory )
+{
+  std::filesystem::path current;
+  const std::filesystem::path directory( remote_directory );
+  for( const auto& part: directory )
+  {
+    const auto value = part.generic_string();
+    if( value.empty() || value == "." )
+      continue;
+    if( value == "/" )
+    {
+      current = part;
+      continue;
+    }
+
+    current /= part;
+    const auto path = current.generic_string();
+    if( path.empty() || path == "/" )
+      continue;
+    push_unique_command( commands, "mkdir " + sftp_quote( path ) );
+  }
+}
+
+bool is_filesystem_metadata_artifact( const std::filesystem::path& path )
+{
+  const auto filename = path.filename().string();
+  return filename == ".DS_Store"
+         || filename == "Thumbs.db"
+         || filename == "Desktop.ini"
+         || filename.rfind( "._", 0 ) == 0;
+}
+
+bool is_remote_content_object_path( const std::string& path )
+{
+  return path.find( "/objects/sha256/" ) != std::string::npos
+         || path.rfind( "objects/sha256/", 0 ) == 0;
 }
 
 void add_put( SftpUploadPlan& plan,
@@ -333,6 +372,16 @@ struct RemoteDirectoryEntry
   std::string name;
   bool directory = false;
   bool regular_file = false;
+};
+
+struct RemoteSnapshotMetadata
+{
+  std::string backup_id;
+  std::string snapshot_dir_name;
+  bool latest = false;
+  uint64_t metadata_file_count = 0;
+  uint64_t metadata_bytes = 0;
+  std::map< std::string, uint64_t > objects;
 };
 
 ParsedSftpCommand parse_sftp_command( const std::string& command )
@@ -498,6 +547,11 @@ public:
         require_arg_count( command, 1 );
         remove_file( remote_path( command.args[ 0 ] ) );
       }
+      else if( command.op == "rmdir" )
+      {
+        require_arg_count( command, 1 );
+        remove_directory( remote_path( command.args[ 0 ] ), false );
+      }
       else if( command.op == "rename" )
       {
         require_arg_count( command, 2 );
@@ -577,6 +631,33 @@ public:
   void download( const std::string& remote_file, const std::filesystem::path& local_file )
   {
     download_file( remote_path( remote_file ), local_file );
+  }
+
+  void upload( const std::filesystem::path& local_file, const std::string& remote_file )
+  {
+    upload_file( local_file, remote_path( remote_file ) );
+  }
+
+  void rename( const std::string& source, const std::string& destination )
+  {
+    rename_path( remote_path( source ), remote_path( destination ) );
+  }
+
+  bool remove_file_if_exists( const std::string& path )
+  {
+    const auto full_path = remote_path( path );
+    if( !remote_exists( full_path ) )
+      return false;
+    remove_file( full_path );
+    return true;
+  }
+
+  bool remove_directory_if_exists( const std::string& path, bool ignore_not_empty )
+  {
+    const auto full_path = remote_path( path );
+    if( !remote_exists( full_path ) )
+      return false;
+    return remove_directory( full_path, ignore_not_empty );
   }
 
 private:
@@ -736,9 +817,15 @@ private:
 
   void make_directory( const std::string& path )
   {
+    if( remote_exists( path ) )
+      return;
     if( sftp_mkdir( _sftp, path.c_str(), 0755 ) != SSH_OK )
+    {
+      if( remote_exists( path ) )
+        return;
       throw std::runtime_error( "failed to create remote directory " + path
                                 + ": " + sftp_error_message( _session, _sftp ) );
+    }
   }
 
   void rename_path( const std::string& source, const std::string& destination )
@@ -760,6 +847,21 @@ private:
                                 + ": " + sftp_error_message( _session, _sftp ) );
   }
 
+  bool remove_directory( const std::string& path, bool ignore_not_empty )
+  {
+    if( sftp_rmdir( _sftp, path.c_str() ) == SSH_OK )
+      return true;
+
+    const auto error = sftp_get_error( _sftp );
+    if( error == SSH_FX_NO_SUCH_FILE )
+      return false;
+    if( ignore_not_empty )
+      return false;
+
+    throw std::runtime_error( "failed to remove remote directory " + path
+                              + ": " + sftp_error_message( _session, _sftp ) );
+  }
+
   bool remote_exists( const std::string& path )
   {
     auto attributes = sftp_lstat( _sftp, path.c_str() );
@@ -776,11 +878,42 @@ private:
                               + sftp_error_message( _session, _sftp ) );
   }
 
+  std::optional< uint64_t > remote_regular_file_size( const std::string& path )
+  {
+    auto attributes = sftp_lstat( _sftp, path.c_str() );
+    if( attributes )
+    {
+      const auto is_regular = attributes->type == SSH_FILEXFER_TYPE_REGULAR
+                              || S_ISREG( attributes->permissions );
+      const auto size = static_cast< uint64_t >( attributes->size );
+      sftp_attributes_free( attributes );
+      return is_regular ? std::optional< uint64_t >( size ) : std::nullopt;
+    }
+
+    const auto error = sftp_get_error( _sftp );
+    if( error == SSH_FX_NO_SUCH_FILE )
+      return std::nullopt;
+    throw std::runtime_error( "failed to stat remote path " + path + ": "
+                              + sftp_error_message( _session, _sftp ) );
+  }
+
   void upload_file( const std::filesystem::path& local_file, const std::string& remote_file )
   {
     std::ifstream input( local_file, std::ios::binary );
     if( !input )
       throw std::runtime_error( "failed to open local SFTP upload source: " + local_file.string() );
+
+    if( is_remote_content_object_path( remote_file ) )
+    {
+      std::error_code ec;
+      const auto local_size = std::filesystem::file_size( local_file, ec );
+      if( !ec )
+      {
+        const auto remote_size = remote_regular_file_size( remote_file );
+        if( remote_size && *remote_size == local_size )
+          return;
+      }
+    }
 
     auto remote = sftp_open( _sftp,
                              remote_file.c_str(),
@@ -866,11 +999,30 @@ private:
 };
 
 void execute_native_sftp_commands( const std::vector< std::string >& commands,
-                                   const BackupSshConfig& ssh )
+                                   const BackupSshConfig& ssh,
+                                   const SftpTransferOptions& options,
+                                   const std::string& phase,
+                                   const std::string& backup_id,
+                                   uint64_t attempt,
+                                   uint64_t file_count,
+                                   uint64_t total_bytes )
 {
   NativeSftpClient client( ssh );
+  uint64_t completed_commands = 0;
   for( const auto& command: commands )
+  {
+    throw_if_transfer_cancelled( options );
     client.execute( parse_sftp_command( command ) );
+    ++completed_commands;
+    emit_progress( options,
+                   phase,
+                   backup_id,
+                   completed_commands,
+                   commands.size(),
+                   attempt,
+                   file_count,
+                   total_bytes );
+  }
 }
 
 void run_native_sftp_commands_with_retries( const std::vector< std::string >& commands,
@@ -899,7 +1051,14 @@ void run_native_sftp_commands_with_retries( const std::vector< std::string >& co
 
     try
     {
-      execute_native_sftp_commands( commands, ssh );
+      execute_native_sftp_commands( commands,
+                                    ssh,
+                                    options,
+                                    phase,
+                                    backup_id,
+                                    attempt,
+                                    file_count,
+                                    total_bytes );
       return;
     }
     catch( const std::exception& )
@@ -983,6 +1142,114 @@ void copy_file_atomic( const std::filesystem::path& source, const std::filesyste
   std::filesystem::remove( partial, ec );
   std::filesystem::copy_file( source, partial, std::filesystem::copy_options::overwrite_existing );
   std::filesystem::rename( partial, destination );
+}
+
+std::map< std::string, uint64_t > read_snapshot_object_sizes_from_file( const std::filesystem::path& files_path )
+{
+  std::map< std::string, uint64_t > objects;
+  const auto files = nlohmann::json::parse( read_file( files_path ) );
+  for( const auto& file: files.at( "files" ) )
+  {
+    const auto sha256 = file.at( "sha256" ).get< std::string >();
+    if( sha256.size() != 64 )
+      throw std::runtime_error( "invalid SHA-256 in remote backup files manifest: " + sha256 );
+    objects.emplace( sha256, file.value( "size_bytes", 0ULL ) );
+  }
+  return objects;
+}
+
+std::string latest_json_for_remote_backup_id( const std::string& backup_id )
+{
+  validate_backup_id_fragment( backup_id );
+  std::ostringstream out;
+  out << "{\n";
+  out << "  \"format\": \"teleno-native-latest-snapshot\",\n";
+  out << "  \"version\": 1,\n";
+  out << "  \"backup_id\": \"" << json_escape( backup_id ) << "\",\n";
+  out << "  \"snapshot_dir\": \"" << json_escape( backup_id ) << "\",\n";
+  out << "  \"manifest\": \"snapshots/" << json_escape( backup_id ) << "/manifest.json\",\n";
+  out << "  \"files\": \"snapshots/" << json_escape( backup_id ) << "/files.json\"\n";
+  out << "}\n";
+  return out.str();
+}
+
+std::vector< RemoteSnapshotMetadata > download_remote_snapshot_metadata(
+  NativeSftpClient& client,
+  const std::filesystem::path& metadata_root,
+  const BackupRemoteConfig& remote,
+  const SftpTransferOptions& options,
+  std::string& latest_backup_id )
+{
+  std::vector< RemoteSnapshotMetadata > snapshots;
+  latest_backup_id.clear();
+
+  const auto remote_latest = remote_join( remote.directory, "latest.json" );
+  if( client.exists( remote_latest ) )
+  {
+    const auto latest_tmp = metadata_root / "latest.json";
+    client.download( remote_latest, latest_tmp );
+    const auto latest = nlohmann::json::parse( read_file( latest_tmp ) );
+    latest_backup_id = latest.at( "backup_id" ).get< std::string >();
+    validate_backup_id_fragment( latest_backup_id );
+  }
+
+  const auto remote_snapshots_dir = remote_join( remote.directory, "snapshots" );
+  const auto entries = client.list_directory( remote_snapshots_dir );
+  uint64_t index = 0;
+  for( const auto& entry: entries )
+  {
+    ++index;
+    throw_if_transfer_cancelled( options );
+    if( !entry.directory )
+      continue;
+    if( entry.name.size() >= 8 && entry.name.substr( entry.name.size() - 8 ) == ".partial" )
+      continue;
+    validate_backup_id_fragment( entry.name );
+
+    const auto snapshot_rel = remote_join( "snapshots", entry.name );
+    if( !client.exists( remote_join( remote.directory, remote_join( snapshot_rel, "COMPLETE" ) ) ) )
+      continue;
+
+    emit_progress( options,
+                   "delete-remote-metadata",
+                   entry.name,
+                   index,
+                   entries.size(),
+                   1,
+                   3,
+                   0 );
+
+    const auto snapshot_tmp = metadata_root / "snapshots" / entry.name;
+    std::filesystem::create_directories( snapshot_tmp );
+    const auto manifest_tmp = snapshot_tmp / "manifest.json";
+    const auto files_tmp = snapshot_tmp / "files.json";
+    const auto complete_tmp = snapshot_tmp / "COMPLETE";
+
+    client.download( remote_join( remote.directory, remote_join( snapshot_rel, "manifest.json" ) ),
+                     manifest_tmp );
+    client.download( remote_join( remote.directory, remote_join( snapshot_rel, "files.json" ) ),
+                     files_tmp );
+    client.download( remote_join( remote.directory, remote_join( snapshot_rel, "COMPLETE" ) ),
+                     complete_tmp );
+
+    RemoteSnapshotMetadata snapshot;
+    snapshot.snapshot_dir_name = entry.name;
+    const auto manifest = nlohmann::json::parse( read_file( manifest_tmp ) );
+    snapshot.backup_id = manifest.value( "backup_id", entry.name );
+    validate_backup_id_fragment( snapshot.backup_id );
+    snapshot.latest = !latest_backup_id.empty() && snapshot.backup_id == latest_backup_id;
+    snapshot.objects = read_snapshot_object_sizes_from_file( files_tmp );
+    snapshot.metadata_file_count = 3;
+    snapshot.metadata_bytes = std::filesystem::file_size( manifest_tmp )
+                              + std::filesystem::file_size( files_tmp )
+                              + std::filesystem::file_size( complete_tmp );
+    snapshots.push_back( std::move( snapshot ) );
+  }
+
+  std::sort( snapshots.begin(), snapshots.end(), []( const auto& lhs, const auto& rhs ) {
+    return lhs.backup_id < rhs.backup_id;
+  } );
+  return snapshots;
 }
 
 void cache_downloaded_snapshot_metadata( const std::filesystem::path& repository_dir,
@@ -1145,6 +1412,8 @@ BackupSnapshotListResult list_remote_backup_snapshots_once( const std::filesyste
   try
   {
     NativeSftpClient client( ssh );
+    std::set< std::string > remote_backup_ids;
+    std::string remote_latest_backup_id;
 
     const auto remote_latest = remote_join( remote.directory, "latest.json" );
     if( client.exists( remote_latest ) )
@@ -1154,6 +1423,7 @@ BackupSnapshotListResult list_remote_backup_snapshots_once( const std::filesyste
       const auto latest = nlohmann::json::parse( read_file( latest_tmp ) );
       const auto latest_backup_id = latest.at( "backup_id" ).get< std::string >();
       validate_backup_id_fragment( latest_backup_id );
+      remote_latest_backup_id = latest_backup_id;
       copy_file_atomic( latest_tmp, repository_dir / "latest.json" );
     }
 
@@ -1196,11 +1466,15 @@ BackupSnapshotListResult list_remote_backup_snapshots_once( const std::filesyste
                        files_tmp );
       client.download( remote_join( remote.directory, remote_join( snapshot_rel, "COMPLETE" ) ),
                        complete_tmp );
+      const auto manifest = nlohmann::json::parse( read_file( manifest_tmp ) );
+      const auto backup_id = manifest.value( "backup_id", entry.name );
+      validate_backup_id_fragment( backup_id );
       cache_downloaded_snapshot_metadata( repository_dir,
                                           entry.name,
                                           manifest_tmp,
                                           files_tmp,
                                           complete_tmp );
+      remote_backup_ids.insert( backup_id );
       ++snapshot_count;
     }
 
@@ -1214,6 +1488,16 @@ BackupSnapshotListResult list_remote_backup_snapshots_once( const std::filesyste
                    0 );
 
     auto result = list_local_backup_snapshots( repository_dir );
+    std::vector< BackupSnapshotSummary > remote_snapshots;
+    for( auto& snapshot: result.snapshots )
+    {
+      if( remote_backup_ids.find( snapshot.backup_id ) == remote_backup_ids.end() )
+        continue;
+      snapshot.latest = !remote_latest_backup_id.empty() && snapshot.backup_id == remote_latest_backup_id;
+      remote_snapshots.push_back( std::move( snapshot ) );
+    }
+    result.latest_backup_id = remote_latest_backup_id;
+    result.snapshots = std::move( remote_snapshots );
     std::error_code cleanup_ec;
     std::filesystem::remove_all( metadata_root, cleanup_ec );
     return result;
@@ -1245,6 +1529,7 @@ SftpUploadPlan build_sftp_upload_plan( const std::filesystem::path& repository_d
   plan.repository_dir = repository_dir;
   plan.backup_id = backup_id;
   plan.remote_directory = remote_directory;
+  add_remote_directory_mkdirs( plan.batch_commands, remote_directory );
   plan.batch_commands.push_back( "cd " + sftp_quote( remote_directory ) );
 
   const auto objects_root = repository_dir / "objects";
@@ -1254,6 +1539,8 @@ SftpUploadPlan build_sftp_upload_plan( const std::filesystem::path& repository_d
     {
       if( !entry.is_regular_file() )
         continue;
+      if( is_filesystem_metadata_artifact( entry.path() ) )
+        continue;
       auto relative = std::filesystem::relative( entry.path(), repository_dir );
       add_put( plan, entry.path(), relative.generic_string() );
     }
@@ -1261,8 +1548,8 @@ SftpUploadPlan build_sftp_upload_plan( const std::filesystem::path& repository_d
 
   const auto remote_partial_snapshot = "snapshots/" + backup_id + ".partial";
   const auto remote_final_snapshot = "snapshots/" + backup_id;
-  push_unique_command( plan.batch_commands, "-mkdir " + sftp_quote( "snapshots" ) );
-  push_unique_command( plan.batch_commands, "-mkdir " + sftp_quote( remote_partial_snapshot ) );
+  push_unique_command( plan.batch_commands, "mkdir " + sftp_quote( "snapshots" ) );
+  push_unique_command( plan.batch_commands, "mkdir " + sftp_quote( remote_partial_snapshot ) );
   add_put( plan, snapshot_dir / "files.json", remote_join( remote_partial_snapshot, "files.json" ) );
   add_put( plan, snapshot_dir / "manifest.json", remote_join( remote_partial_snapshot, "manifest.json" ) );
   add_put( plan, snapshot_dir / "COMPLETE", remote_join( remote_partial_snapshot, "COMPLETE" ) );
@@ -1426,6 +1713,165 @@ BackupSnapshotListResult list_remote_backup_snapshots_with_managed_sftp(
   }
 
   throw std::runtime_error( "remote backup snapshot listing did not complete" );
+}
+
+BackupDeleteResult delete_remote_backup_snapshot_with_managed_sftp( const std::filesystem::path& repository_dir,
+                                                                    const BackupSshConfig& ssh,
+                                                                    const BackupRemoteConfig& remote,
+                                                                    const std::string& backup_id,
+                                                                    bool dry_run,
+                                                                    const SftpTransferOptions& options )
+{
+  if( repository_dir.empty() )
+    throw std::runtime_error( "local snapshot repository directory is required for remote backup deletion metadata" );
+  if( remote.directory.empty() )
+    throw std::runtime_error( "remote backup directory is required for backup deletion" );
+  if( backup_id.empty() || backup_id == "latest" )
+    throw std::runtime_error( "remote backup deletion requires an exact backup ID; 'latest' is not accepted" );
+  validate_backup_id_fragment( backup_id );
+
+  const auto metadata_root = repository_dir / ".remote-delete-metadata"
+                             / std::to_string( std::chrono::duration_cast< std::chrono::milliseconds >(
+                               std::chrono::system_clock::now().time_since_epoch() ).count() );
+  std::filesystem::create_directories( metadata_root );
+
+  try
+  {
+    NativeSftpClient client( ssh );
+    std::string latest_backup_id;
+    auto snapshots = download_remote_snapshot_metadata( client,
+                                                        metadata_root,
+                                                        remote,
+                                                        options,
+                                                        latest_backup_id );
+
+    auto target_it = std::find_if( snapshots.begin(), snapshots.end(), [&]( const auto& snapshot ) {
+      return snapshot.backup_id == backup_id;
+    } );
+    if( target_it == snapshots.end() )
+      throw std::runtime_error( "remote backup snapshot not found: " + backup_id );
+
+    BackupDeleteResult result;
+    result.source = "remote_sftp";
+    result.backup_id = backup_id;
+    result.repository_dir = repository_dir;
+    result.remote_directory = remote.directory;
+    result.transport = "native-libssh";
+    result.dry_run = dry_run;
+    result.snapshot_found = true;
+    result.previous_latest_backup_id = latest_backup_id;
+    result.deleted_latest = latest_backup_id == backup_id;
+    result.snapshot_metadata_file_count = target_it->metadata_file_count;
+    result.snapshot_metadata_bytes = target_it->metadata_bytes;
+
+    std::set< std::string > remaining_object_hashes;
+    for( const auto& snapshot: snapshots )
+    {
+      if( snapshot.backup_id == backup_id )
+        continue;
+      for( const auto& [sha256, _]: snapshot.objects )
+      {
+        (void)_;
+        remaining_object_hashes.insert( sha256 );
+      }
+      if( result.deleted_latest && ( result.new_latest_backup_id.empty()
+                                     || snapshot.backup_id > result.new_latest_backup_id ) )
+        result.new_latest_backup_id = snapshot.backup_id;
+    }
+    if( !result.deleted_latest )
+      result.new_latest_backup_id = latest_backup_id;
+
+    std::map< std::string, uint64_t > reclaimable_objects;
+    for( const auto& [sha256, size_bytes]: target_it->objects )
+    {
+      if( remaining_object_hashes.find( sha256 ) != remaining_object_hashes.end() )
+        continue;
+      reclaimable_objects.emplace( sha256, size_bytes );
+      ++result.reclaimable_object_count;
+      result.reclaimable_object_bytes += size_bytes;
+    }
+
+    if( dry_run )
+    {
+      std::error_code cleanup_ec;
+      std::filesystem::remove_all( metadata_root, cleanup_ec );
+      return result;
+    }
+
+    const auto remote_snapshot_dir = remote_join(
+      remote.directory,
+      remote_join( "snapshots", target_it->snapshot_dir_name ) );
+    const auto snapshot_entries = client.list_directory( remote_snapshot_dir );
+    for( const auto& entry: snapshot_entries )
+    {
+      if( entry.directory )
+        throw std::runtime_error( "remote backup snapshot contains unexpected directory: "
+                                  + remote_join( remote_snapshot_dir, entry.name ) );
+      client.remove_file_if_exists( remote_join( remote_snapshot_dir, entry.name ) );
+    }
+    result.deleted_snapshot = client.remove_directory_if_exists( remote_snapshot_dir, false );
+
+    for( const auto& [sha256, size_bytes]: reclaimable_objects )
+    {
+      const auto relative_object = "objects/sha256/" + sha256.substr( 0, 2 ) + "/"
+                                 + sha256.substr( 2, 2 ) + "/" + sha256;
+      if( client.remove_file_if_exists( remote_join( remote.directory, relative_object ) ) )
+      {
+        ++result.deleted_object_count;
+        result.deleted_object_bytes += size_bytes;
+      }
+
+      client.remove_directory_if_exists(
+        remote_join( remote.directory,
+                     "objects/sha256/" + sha256.substr( 0, 2 ) + "/" + sha256.substr( 2, 2 ) ),
+        true );
+      client.remove_directory_if_exists(
+        remote_join( remote.directory, "objects/sha256/" + sha256.substr( 0, 2 ) ),
+        true );
+    }
+
+    if( result.deleted_latest )
+    {
+      const auto remote_latest = remote_join( remote.directory, "latest.json" );
+      const auto remote_latest_partial = remote_join( remote.directory, "latest.json.partial" );
+      if( result.new_latest_backup_id.empty() )
+      {
+        client.remove_file_if_exists( remote_latest );
+      }
+      else
+      {
+        const auto latest_tmp = metadata_root / "latest.json";
+        std::ofstream out( latest_tmp, std::ios::binary | std::ios::trunc );
+        if( !out )
+          throw std::runtime_error( "failed to write temporary remote latest metadata: " + latest_tmp.string() );
+        out << latest_json_for_remote_backup_id( result.new_latest_backup_id );
+        out.close();
+        client.remove_file_if_exists( remote_latest_partial );
+        client.upload( latest_tmp, remote_latest_partial );
+        client.remove_file_if_exists( remote_latest );
+        client.rename( remote_latest_partial, remote_latest );
+      }
+    }
+
+    emit_progress( options,
+                   "delete-remote-complete",
+                   backup_id,
+                   1,
+                   1,
+                   1,
+                   result.snapshot_metadata_file_count + result.deleted_object_count,
+                   result.snapshot_metadata_bytes + result.deleted_object_bytes );
+
+    std::error_code cleanup_ec;
+    std::filesystem::remove_all( metadata_root, cleanup_ec );
+    return result;
+  }
+  catch( ... )
+  {
+    std::error_code ec;
+    std::filesystem::remove_all( metadata_root, ec );
+    throw;
+  }
 }
 
 SftpRestoreFetchResult fetch_latest_restore_snapshot_with_sftp( const std::filesystem::path& repository_dir,

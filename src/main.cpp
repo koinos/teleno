@@ -128,6 +128,9 @@
 #define BACKUP_UPLOAD_LATEST_OPTION "backup-upload-latest"
 #define BACKUP_LIST_OPTION "backup-list"
 #define BACKUP_LIST_REMOTE_OPTION "backup-list-remote"
+#define BACKUP_DELETE_OPTION "backup-delete"
+#define BACKUP_SCOPE_OPTION "backup-scope"
+#define BACKUP_DELETE_CONFIRM_OPTION "backup-delete-confirm"
 #define BACKUP_RESTORE_OPTION "backup-restore"
 #define BACKUP_RESTORE_PREFLIGHT_OPTION "backup-restore-preflight"
 #define BACKUP_RESTORE_STAGE_OPTION "backup-restore-stage"
@@ -195,6 +198,69 @@ std::pair< std::string, uint16_t > parse_jsonrpc_listen( const std::string& list
   }
 
   return { "0.0.0.0", static_cast< uint16_t >( std::stoi( listen ) ) };
+}
+
+std::string backup_snapshot_list_cli_text(
+  const node::backup::BackupSnapshotListResult& result,
+  const std::string& source,
+  const std::optional< std::filesystem::path >& remote_directory = std::nullopt )
+{
+  const auto body = node::backup::backup_snapshot_list_result_to_text( result );
+  const auto header_end = body.find( '\n' );
+
+  std::ostringstream out;
+  out << "Native backup snapshots\n";
+  out << "source: " << source << "\n";
+  if( remote_directory )
+    out << "remote_directory: " << remote_directory->string() << "\n";
+  if( header_end == std::string::npos )
+    return out.str();
+  out << body.substr( header_end + 1 );
+  return out.str();
+}
+
+std::string backup_snapshot_list_cli_json(
+  const node::backup::BackupSnapshotListResult& result,
+  const std::string& source,
+  const std::optional< std::filesystem::path >& remote_directory = std::nullopt )
+{
+  auto json = nlohmann::ordered_json::parse(
+    node::backup::backup_snapshot_list_result_to_json( result ) );
+  json[ "source" ] = source;
+  if( remote_directory )
+    json[ "remote_directory" ] = remote_directory->string();
+  return json.dump( 2 ) + "\n";
+}
+
+std::string backup_delete_results_cli_text(
+  const std::string& scope,
+  const std::vector< node::backup::BackupDeleteResult >& results )
+{
+  std::ostringstream out;
+  out << "Native backup delete results\n";
+  out << "scope: " << scope << "\n";
+  out << "result_count: " << results.size() << "\n";
+  for( std::size_t i = 0; i < results.size(); ++i )
+  {
+    if( i )
+      out << "\n";
+    out << node::backup::backup_delete_result_to_text( results[ i ] );
+  }
+  return out.str();
+}
+
+std::string backup_delete_results_cli_json(
+  const std::string& scope,
+  const std::vector< node::backup::BackupDeleteResult >& results )
+{
+  nlohmann::ordered_json json;
+  json[ "scope" ] = scope;
+  json[ "result_count" ] = results.size();
+  json[ "results" ] = nlohmann::ordered_json::array();
+  for( const auto& result: results )
+    json[ "results" ].push_back(
+      nlohmann::ordered_json::parse( node::backup::backup_delete_result_to_json( result ) ) );
+  return json.dump( 2 ) + "\n";
 }
 
 std::string join_strings( const std::vector< std::string >& values, const std::string& separator )
@@ -297,6 +363,27 @@ std::string configured_backup_result_to_json(
   else
     result[ "remote_upload" ] = nullptr;
   return result.dump( 2 ) + "\n";
+}
+
+node::backup::SftpTransferOptions cli_sftp_transfer_options( bool emit_json_progress )
+{
+  node::backup::SftpTransferOptions options;
+  if( !emit_json_progress )
+    return options;
+
+  options.progress = []( const node::backup::SftpTransferProgress& progress ) {
+    nlohmann::json event;
+    event[ "event" ] = "backup-progress";
+    event[ "phase" ] = progress.phase;
+    event[ "backup_id" ] = progress.backup_id;
+    event[ "completed_batches" ] = progress.completed_batches;
+    event[ "total_batches" ] = progress.total_batches;
+    event[ "attempt" ] = progress.attempt;
+    event[ "file_count" ] = progress.file_count;
+    event[ "total_bytes" ] = progress.total_bytes;
+    std::cerr << event.dump() << std::endl;
+  };
+  return options;
 }
 
 std::string shell_quote( const std::filesystem::path& path )
@@ -500,6 +587,12 @@ int main( int argc, char** argv )
         "List completed snapshots in backup.local.directory, then exit without opening RocksDB" )
       ( BACKUP_LIST_REMOTE_OPTION,
         "Fetch and list completed snapshots from backup.remote.directory over native libssh SFTP, caching metadata locally" )
+      ( BACKUP_DELETE_OPTION,
+        "Delete the selected native backup snapshot. Dry-run by default; requires --backup-delete-confirm=<backup-id> to mutate" )
+      ( BACKUP_SCOPE_OPTION, po::value< std::string >()->default_value( "local" ),
+        "Backup delete scope: local, remote, or both" )
+      ( BACKUP_DELETE_CONFIRM_OPTION, po::value< std::string >()->default_value( "" ),
+        "Exact backup ID confirmation required to execute --backup-delete; omit for dry-run" )
       ( BACKUP_RESTORE_OPTION,
         "Restore the configured native backup: fetch remote data when enabled, preflight, stage, activate, then exit" )
       ( BACKUP_RESTORE_PREFLIGHT_OPTION,
@@ -576,6 +669,7 @@ int main( int argc, char** argv )
         && !vm.count( BACKUP_UPLOAD_LATEST_OPTION )
         && !vm.count( BACKUP_LIST_OPTION )
         && !vm.count( BACKUP_LIST_REMOTE_OPTION )
+        && !vm.count( BACKUP_DELETE_OPTION )
         && !vm.count( BACKUP_RESTORE_OPTION )
         && !vm.count( BACKUP_RESTORE_PREFLIGHT_OPTION )
         && !vm.count( BACKUP_RESTORE_STAGE_OPTION )
@@ -602,9 +696,9 @@ int main( int argc, char** argv )
 
       auto result = node::backup::list_local_backup_snapshots( cfg.backup.local.directory );
       if( vm.count( BACKUP_JSON_OPTION ) )
-        std::cout << node::backup::backup_snapshot_list_result_to_json( result );
+        std::cout << backup_snapshot_list_cli_json( result, "local" );
       else
-        std::cout << node::backup::backup_snapshot_list_result_to_text( result );
+        std::cout << backup_snapshot_list_cli_text( result, "local" );
       return EXIT_SUCCESS;
     }
 
@@ -622,14 +716,81 @@ int main( int argc, char** argv )
       if( !cfg.backup.ssh.enabled )
         throw std::runtime_error( "--backup-list-remote requires backup.ssh.enabled=true" );
 
-      auto result = node::backup::list_remote_backup_snapshots_with_sftp(
+      auto result = node::backup::list_remote_backup_snapshots_with_managed_sftp(
         cfg.backup.local.directory,
         cfg.backup.ssh,
         cfg.backup.remote );
       if( vm.count( BACKUP_JSON_OPTION ) )
-        std::cout << node::backup::backup_snapshot_list_result_to_json( result );
+        std::cout << backup_snapshot_list_cli_json( result, "remote_sftp", cfg.backup.remote.directory );
       else
-        std::cout << node::backup::backup_snapshot_list_result_to_text( result );
+        std::cout << backup_snapshot_list_cli_text( result, "remote_sftp", cfg.backup.remote.directory );
+      return EXIT_SUCCESS;
+    }
+
+    if( vm.count( BACKUP_DELETE_OPTION ) )
+    {
+      const auto backup_id = vm[ BACKUP_ID_OPTION ].as< std::string >();
+      if( backup_id.empty() || backup_id == "latest" )
+        throw std::runtime_error( "--backup-delete requires an exact --backup-id; 'latest' is not accepted" );
+
+      const auto scope = vm[ BACKUP_SCOPE_OPTION ].as< std::string >();
+      if( scope != "local" && scope != "remote" && scope != "both" )
+        throw std::runtime_error( "--backup-scope must be local, remote, or both" );
+
+      const auto confirm = vm[ BACKUP_DELETE_CONFIRM_OPTION ].as< std::string >();
+      if( !confirm.empty() && confirm != backup_id )
+        throw std::runtime_error( "--backup-delete-confirm must exactly match --backup-id" );
+      const bool dry_run = confirm != backup_id;
+
+      std::vector< node::backup::BackupDeleteResult > results;
+      const auto delete_local = [&]() {
+        if( !cfg.backup.local.enabled )
+          throw std::runtime_error( "--backup-delete local scope requires backup.local.enabled=true" );
+        if( cfg.backup.local.directory.empty() )
+          throw std::runtime_error( "--backup-delete local scope requires backup.local.directory" );
+        results.push_back( node::backup::delete_local_backup_snapshot(
+          cfg.backup.local.directory,
+          backup_id,
+          dry_run ) );
+      };
+
+      const auto delete_remote = [&]() {
+        if( !cfg.backup.local.enabled )
+          throw std::runtime_error(
+            "--backup-delete remote scope requires backup.local.enabled=true for temporary metadata" );
+        if( cfg.backup.local.directory.empty() )
+          throw std::runtime_error( "--backup-delete remote scope requires backup.local.directory" );
+        if( !cfg.backup.remote.enabled )
+          throw std::runtime_error( "--backup-delete remote scope requires backup.remote.enabled=true" );
+        if( cfg.backup.remote.directory.empty() )
+          throw std::runtime_error( "--backup-delete remote scope requires backup.remote.directory" );
+        if( !cfg.backup.ssh.enabled )
+          throw std::runtime_error( "--backup-delete remote scope requires backup.ssh.enabled=true" );
+        results.push_back( node::backup::delete_remote_backup_snapshot_with_managed_sftp(
+          cfg.backup.local.directory,
+          cfg.backup.ssh,
+          cfg.backup.remote,
+          backup_id,
+          dry_run ) );
+      };
+
+      if( scope == "both" && !dry_run )
+      {
+        delete_remote();
+        delete_local();
+      }
+      else
+      {
+        if( scope == "local" || scope == "both" )
+          delete_local();
+        if( scope == "remote" || scope == "both" )
+          delete_remote();
+      }
+
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << backup_delete_results_cli_json( scope, results );
+      else
+        std::cout << backup_delete_results_cli_text( scope, results );
       return EXIT_SUCCESS;
     }
 
@@ -651,10 +812,11 @@ int main( int argc, char** argv )
       if( !cfg.backup.ssh.enabled )
         throw std::runtime_error( "--backup-upload-latest requires backup.ssh.enabled=true" );
 
-      auto result = node::backup::upload_latest_snapshot_with_sftp(
+      auto result = node::backup::upload_latest_snapshot_with_managed_sftp(
         cfg.backup.local.directory,
         cfg.backup.ssh,
-        cfg.backup.remote );
+        cfg.backup.remote,
+        cli_sftp_transfer_options( vm.count( BACKUP_JSON_OPTION ) > 0 ) );
       if( vm.count( BACKUP_JSON_OPTION ) )
         std::cout << node::backup::sftp_upload_result_to_json( result );
       else
@@ -688,7 +850,8 @@ int main( int argc, char** argv )
           basedir,
           cfg.backup.ssh,
           cfg.backup.remote,
-          backup_id );
+          backup_id,
+          cli_sftp_transfer_options( vm.count( BACKUP_JSON_OPTION ) > 0 ) );
         result.preflight = result.remote_fetch->preflight;
         if( !result.remote_fetch->ready_to_stage )
         {
@@ -813,12 +976,13 @@ int main( int argc, char** argv )
         throw std::runtime_error( "--backup-restore-fetch requires backup.ssh.enabled=true" );
 
       const auto backup_id = vm[ BACKUP_ID_OPTION ].as< std::string >();
-      auto result = node::backup::fetch_restore_snapshot_with_sftp(
+      auto result = node::backup::fetch_restore_snapshot_with_managed_sftp(
         cfg.backup.local.directory,
         basedir,
         cfg.backup.ssh,
         cfg.backup.remote,
-        backup_id );
+        backup_id,
+        cli_sftp_transfer_options( vm.count( BACKUP_JSON_OPTION ) > 0 ) );
       if( vm.count( BACKUP_JSON_OPTION ) )
         std::cout << node::backup::sftp_restore_fetch_result_to_json( result );
       else
@@ -985,8 +1149,15 @@ int main( int argc, char** argv )
           throw std::runtime_error( "--backup-create remote upload requires backup.remote.directory" );
       }
 
-      node::backup::BackupService backup_service( cfg, basedir, config_path, storage_db );
-      auto snapshot_result = backup_service.create_local_snapshot();
+      node::backup::LocalSnapshotResult snapshot_result;
+      {
+        node::backup::BackupService backup_service( cfg, basedir, config_path, storage_db );
+        snapshot_result = backup_service.create_local_snapshot();
+      }
+
+      // Remote upload works from the immutable local object repository. Keep the
+      // RocksDB lock only while the checkpoint/local snapshot is being created.
+      storage_db.close();
 
       std::optional< node::backup::SftpUploadResult > remote_upload;
       if( cfg.backup.remote.enabled )
@@ -994,7 +1165,8 @@ int main( int argc, char** argv )
         remote_upload = node::backup::upload_latest_snapshot_with_managed_sftp(
           cfg.backup.local.directory,
           cfg.backup.ssh,
-          cfg.backup.remote );
+          cfg.backup.remote,
+          cli_sftp_transfer_options( vm.count( BACKUP_JSON_OPTION ) > 0 ) );
       }
 
       if( vm.count( BACKUP_JSON_OPTION ) )
@@ -1016,8 +1188,12 @@ int main( int argc, char** argv )
           std::cout << node::backup::backup_dry_run_plan_to_text( plan );
         return EXIT_FAILURE;
       }
-      node::backup::BackupService backup_service( cfg, basedir, config_path, storage_db );
-      auto snapshot_result = backup_service.create_local_snapshot();
+      node::backup::LocalSnapshotResult snapshot_result;
+      {
+        node::backup::BackupService backup_service( cfg, basedir, config_path, storage_db );
+        snapshot_result = backup_service.create_local_snapshot();
+      }
+      storage_db.close();
       if( vm.count( BACKUP_JSON_OPTION ) )
         std::cout << node::backup::local_snapshot_result_to_json( snapshot_result );
       else

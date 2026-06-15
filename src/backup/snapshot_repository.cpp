@@ -313,6 +313,73 @@ void collect_snapshot_object_hashes( const std::filesystem::path& snapshot_dir,
     referenced_hashes.insert( file.at( "sha256" ).get< std::string >() );
 }
 
+std::map< std::string, uint64_t > read_snapshot_object_sizes( const std::filesystem::path& snapshot_dir )
+{
+  std::map< std::string, uint64_t > objects;
+  const auto files_path = snapshot_dir / "files.json";
+  if( !std::filesystem::is_regular_file( files_path ) )
+    return objects;
+
+  const auto files = nlohmann::json::parse( read_text_file( files_path ) );
+  for( const auto& file: files.at( "files" ) )
+  {
+    const auto sha256 = file.at( "sha256" ).get< std::string >();
+    if( sha256.size() != 64 )
+      throw std::runtime_error( "invalid SHA-256 in backup files manifest: " + sha256 );
+    objects.emplace( sha256, file.value( "size_bytes", 0ULL ) );
+  }
+  return objects;
+}
+
+std::pair< uint64_t, uint64_t > directory_file_stats( const std::filesystem::path& directory )
+{
+  uint64_t file_count = 0;
+  uint64_t bytes = 0;
+  if( !std::filesystem::exists( directory ) )
+    return { file_count, bytes };
+
+  for( const auto& entry: std::filesystem::recursive_directory_iterator( directory ) )
+  {
+    if( !entry.is_regular_file() )
+      continue;
+    ++file_count;
+    std::error_code ec;
+    const auto size = entry.file_size( ec );
+    if( !ec )
+      bytes += size;
+  }
+  return { file_count, bytes };
+}
+
+std::string latest_json_for_backup_id( const std::string& backup_id )
+{
+  std::ostringstream out;
+  out << "{\n";
+  out << "  \"format\": \"teleno-native-latest-snapshot\",\n";
+  out << "  \"version\": 1,\n";
+  out << "  \"backup_id\": \"" << json_escape( backup_id ) << "\",\n";
+  out << "  \"snapshot_dir\": \"" << json_escape( backup_id ) << "\",\n";
+  out << "  \"manifest\": \"snapshots/" << json_escape( backup_id ) << "/manifest.json\",\n";
+  out << "  \"files\": \"snapshots/" << json_escape( backup_id ) << "/files.json\"\n";
+  out << "}\n";
+  return out.str();
+}
+
+std::string newest_completed_backup_id( const std::filesystem::path& repository_dir,
+                                        const std::string& excluded_backup_id )
+{
+  std::string newest;
+  for( const auto& snapshot_dir: completed_snapshot_dirs( repository_dir ) )
+  {
+    const auto backup_id = snapshot_dir.filename().string();
+    if( backup_id == excluded_backup_id )
+      continue;
+    if( newest.empty() || backup_id > newest )
+      newest = backup_id;
+  }
+  return newest;
+}
+
 void prune_empty_object_directories( const std::filesystem::path& objects_root )
 {
   if( !std::filesystem::exists( objects_root ) )
@@ -392,20 +459,32 @@ void copy_or_link_object( const std::filesystem::path& source, const std::filesy
 {
   std::filesystem::create_directories( destination.parent_path() );
   if( std::filesystem::exists( destination ) )
-    return;
+  {
+    const auto existing_hash = sha256_file( destination );
+    if( existing_hash == destination.filename().string() )
+      return;
+
+    std::error_code remove_ec;
+    std::filesystem::remove( destination, remove_ec );
+    if( remove_ec )
+      throw std::runtime_error( "failed to replace corrupt backup object " + destination.string()
+                                + ": " + remove_ec.message() );
+  }
 
   const auto tmp = destination.parent_path() / ( destination.filename().string() + ".tmp" );
   std::error_code ec;
   std::filesystem::remove( tmp, ec );
   ec.clear();
-  std::filesystem::create_hard_link( source, tmp, ec );
+  std::filesystem::copy_file( source, tmp, std::filesystem::copy_options::overwrite_existing, ec );
   if( ec )
+    throw std::runtime_error( "failed to copy backup object " + source.string()
+                              + " to " + tmp.string() + ": " + ec.message() );
+
+  const auto copied_hash = sha256_file( tmp );
+  if( copied_hash != destination.filename().string() )
   {
-    ec.clear();
-    std::filesystem::copy_file( source, tmp, std::filesystem::copy_options::overwrite_existing, ec );
-    if( ec )
-      throw std::runtime_error( "failed to copy backup object " + source.string()
-                                + " to " + tmp.string() + ": " + ec.message() );
+    std::filesystem::remove( tmp, ec );
+    throw std::runtime_error( "backup object checksum changed while copying " + source.string() );
   }
 
   std::filesystem::rename( tmp, destination );
@@ -914,8 +993,16 @@ RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& re
       const auto sha256 = file.at( "sha256" ).get< std::string >();
       const auto size = file.value( "size_bytes", 0ULL );
       const auto source = object_path( repository_dir, sha256 );
+      const auto optional_restored_config = relative_path == "config.yml";
       if( !std::filesystem::is_regular_file( source ) )
+      {
+        if( optional_restored_config )
+        {
+          result.skipped_optional_runtime_files.push_back( relative_path );
+          continue;
+        }
         throw std::runtime_error( "restore object is missing: " + source.string() );
+      }
 
       const auto destination = partial_dir / std::filesystem::path( relative_path );
       std::filesystem::create_directories( destination.parent_path() );
@@ -923,7 +1010,15 @@ RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& re
 
       const auto restored_sha256 = sha256_file( destination );
       if( restored_sha256 != sha256 )
+      {
+        if( optional_restored_config )
+        {
+          std::filesystem::remove( destination );
+          result.skipped_optional_runtime_files.push_back( relative_path );
+          continue;
+        }
         throw std::runtime_error( "restore checksum mismatch for " + relative_path );
+      }
 
       ++result.restored_file_count;
       result.restored_bytes += size;
@@ -939,7 +1034,15 @@ RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& re
     metadata << "  \"staging_dir\": \"" << json_escape( staging_dir.string() ) << "\",\n";
     metadata << "  \"restored_file_count\": " << result.restored_file_count << ",\n";
     metadata << "  \"restored_bytes\": " << result.restored_bytes << ",\n";
-    metadata << "  \"start_as_observer_first\": " << json_bool( result.preflight.start_as_observer_first ) << "\n";
+    metadata << "  \"start_as_observer_first\": " << json_bool( result.preflight.start_as_observer_first ) << ",\n";
+    metadata << "  \"skipped_optional_runtime_files\": [";
+    for( std::size_t i = 0; i < result.skipped_optional_runtime_files.size(); ++i )
+    {
+      if( i > 0 )
+        metadata << ", ";
+      metadata << "\"" << json_escape( result.skipped_optional_runtime_files[ i ] ) << "\"";
+    }
+    metadata << "]\n";
     metadata << "}\n";
     write_file_atomic( partial_dir / ".teleno-restore-stage.json", metadata.str() );
     write_file_atomic( partial_dir / "RESTORE_STAGE_COMPLETE", "complete\n" );
@@ -970,6 +1073,114 @@ BackupSnapshotListResult list_local_backup_snapshots( const std::filesystem::pat
   std::sort( result.snapshots.begin(), result.snapshots.end(), []( const auto& lhs, const auto& rhs ) {
     return lhs.backup_id < rhs.backup_id;
   } );
+  return result;
+}
+
+BackupDeleteResult delete_local_backup_snapshot( const std::filesystem::path& repository_dir,
+                                                 const std::string& backup_id,
+                                                 bool dry_run )
+{
+  if( repository_dir.empty() )
+    throw std::runtime_error( "local backup repository directory is required for backup deletion" );
+  if( backup_id == "latest" )
+    throw std::runtime_error( "backup deletion requires an exact backup ID; 'latest' is not accepted" );
+  validate_backup_id_path_component( backup_id );
+
+  const auto snapshot_dir = resolve_snapshot_dir( repository_dir, backup_id );
+  if( !std::filesystem::exists( snapshot_dir / "COMPLETE" ) )
+    throw std::runtime_error( "backup snapshot is not complete: " + backup_id );
+
+  BackupDeleteResult result;
+  result.source = "local";
+  result.backup_id = backup_id;
+  result.repository_dir = repository_dir;
+  result.dry_run = dry_run;
+  result.snapshot_found = true;
+  result.previous_latest_backup_id = read_latest_backup_id( repository_dir );
+  result.deleted_latest = result.previous_latest_backup_id == backup_id;
+  result.new_latest_backup_id = result.deleted_latest
+    ? newest_completed_backup_id( repository_dir, backup_id )
+    : result.previous_latest_backup_id;
+
+  const auto metadata_stats = directory_file_stats( snapshot_dir );
+  result.snapshot_metadata_file_count = metadata_stats.first;
+  result.snapshot_metadata_bytes = metadata_stats.second;
+
+  const auto deleted_snapshot_objects = read_snapshot_object_sizes( snapshot_dir );
+  std::set< std::string > remaining_object_hashes;
+  for( const auto& remaining_snapshot_dir: completed_snapshot_dirs( repository_dir ) )
+  {
+    if( remaining_snapshot_dir.filename().string() == backup_id )
+      continue;
+    collect_snapshot_object_hashes( remaining_snapshot_dir, remaining_object_hashes );
+  }
+
+  for( const auto& [sha256, size_bytes]: deleted_snapshot_objects )
+  {
+    if( remaining_object_hashes.find( sha256 ) != remaining_object_hashes.end() )
+      continue;
+    const auto path = object_path( repository_dir, sha256 );
+    if( !std::filesystem::is_regular_file( path ) )
+      continue;
+    ++result.reclaimable_object_count;
+    std::error_code ec;
+    const auto actual_size = std::filesystem::file_size( path, ec );
+    result.reclaimable_object_bytes += ec ? size_bytes : actual_size;
+  }
+
+  if( dry_run )
+    return result;
+
+  std::error_code ec;
+  std::filesystem::remove_all( snapshot_dir, ec );
+  if( ec )
+    throw std::runtime_error( "failed to remove local backup snapshot " + snapshot_dir.string()
+                              + ": " + ec.message() );
+  result.deleted_snapshot = true;
+
+  for( const auto& [sha256, size_bytes]: deleted_snapshot_objects )
+  {
+    if( remaining_object_hashes.find( sha256 ) != remaining_object_hashes.end() )
+      continue;
+    const auto path = object_path( repository_dir, sha256 );
+    if( !std::filesystem::is_regular_file( path ) )
+      continue;
+    uint64_t removed_size = size_bytes;
+    std::error_code size_ec;
+    const auto actual_size = std::filesystem::file_size( path, size_ec );
+    if( !size_ec )
+      removed_size = actual_size;
+
+    std::error_code remove_ec;
+    if( std::filesystem::remove( path, remove_ec ) )
+    {
+      ++result.deleted_object_count;
+      result.deleted_object_bytes += removed_size;
+    }
+    else if( remove_ec )
+    {
+      throw std::runtime_error( "failed to remove unreferenced backup object " + path.string()
+                                + ": " + remove_ec.message() );
+    }
+  }
+  prune_empty_object_directories( repository_dir / "objects" / "sha256" );
+
+  const auto latest_path = repository_dir / "latest.json";
+  if( result.deleted_latest )
+  {
+    if( result.new_latest_backup_id.empty() )
+    {
+      std::error_code remove_latest_ec;
+      std::filesystem::remove( latest_path, remove_latest_ec );
+      if( remove_latest_ec )
+        throw std::runtime_error( "failed to remove local latest.json: " + remove_latest_ec.message() );
+    }
+    else
+    {
+      write_file_atomic( latest_path, latest_json_for_backup_id( result.new_latest_backup_id ) );
+    }
+  }
+
   return result;
 }
 
@@ -1293,6 +1504,57 @@ std::string backup_snapshot_list_result_to_json( const BackupSnapshotListResult&
   return out.str();
 }
 
+std::string backup_delete_result_to_text( const BackupDeleteResult& result )
+{
+  std::ostringstream out;
+  out << "Native backup delete\n";
+  out << "source: " << result.source << "\n";
+  out << "backup_id: " << result.backup_id << "\n";
+  out << "dry_run: " << json_bool( result.dry_run ) << "\n";
+  out << "repository_dir: " << result.repository_dir.string() << "\n";
+  if( !result.remote_directory.empty() )
+    out << "remote_directory: " << result.remote_directory << "\n";
+  if( !result.transport.empty() )
+    out << "transport: " << result.transport << "\n";
+  out << "snapshot_found: " << json_bool( result.snapshot_found ) << "\n";
+  out << "deleted_snapshot: " << json_bool( result.deleted_snapshot ) << "\n";
+  out << "deleted_latest: " << json_bool( result.deleted_latest ) << "\n";
+  out << "previous_latest_backup_id: " << result.previous_latest_backup_id << "\n";
+  out << "new_latest_backup_id: " << result.new_latest_backup_id << "\n";
+  out << "snapshot_metadata_file_count: " << result.snapshot_metadata_file_count << "\n";
+  out << "snapshot_metadata_bytes: " << result.snapshot_metadata_bytes << "\n";
+  out << "reclaimable_object_count: " << result.reclaimable_object_count << "\n";
+  out << "reclaimable_object_bytes: " << result.reclaimable_object_bytes << "\n";
+  out << "deleted_object_count: " << result.deleted_object_count << "\n";
+  out << "deleted_object_bytes: " << result.deleted_object_bytes << "\n";
+  return out.str();
+}
+
+std::string backup_delete_result_to_json( const BackupDeleteResult& result )
+{
+  std::ostringstream out;
+  out << "{\n";
+  out << "  \"source\": \"" << json_escape( result.source ) << "\",\n";
+  out << "  \"backup_id\": \"" << json_escape( result.backup_id ) << "\",\n";
+  out << "  \"dry_run\": " << json_bool( result.dry_run ) << ",\n";
+  out << "  \"repository_dir\": \"" << json_escape( result.repository_dir.string() ) << "\",\n";
+  out << "  \"remote_directory\": \"" << json_escape( result.remote_directory ) << "\",\n";
+  out << "  \"transport\": \"" << json_escape( result.transport ) << "\",\n";
+  out << "  \"snapshot_found\": " << json_bool( result.snapshot_found ) << ",\n";
+  out << "  \"deleted_snapshot\": " << json_bool( result.deleted_snapshot ) << ",\n";
+  out << "  \"deleted_latest\": " << json_bool( result.deleted_latest ) << ",\n";
+  out << "  \"previous_latest_backup_id\": \"" << json_escape( result.previous_latest_backup_id ) << "\",\n";
+  out << "  \"new_latest_backup_id\": \"" << json_escape( result.new_latest_backup_id ) << "\",\n";
+  out << "  \"snapshot_metadata_file_count\": " << result.snapshot_metadata_file_count << ",\n";
+  out << "  \"snapshot_metadata_bytes\": " << result.snapshot_metadata_bytes << ",\n";
+  out << "  \"reclaimable_object_count\": " << result.reclaimable_object_count << ",\n";
+  out << "  \"reclaimable_object_bytes\": " << result.reclaimable_object_bytes << ",\n";
+  out << "  \"deleted_object_count\": " << result.deleted_object_count << ",\n";
+  out << "  \"deleted_object_bytes\": " << result.deleted_object_bytes << "\n";
+  out << "}\n";
+  return out.str();
+}
+
 std::string restore_preflight_result_to_text( const RestorePreflightResult& result )
 {
   std::ostringstream out;
@@ -1363,6 +1625,9 @@ std::string restore_stage_result_to_text( const RestoreStageResult& result )
   out << "metadata: " << result.metadata_path.string() << "\n";
   out << "restored_file_count: " << result.restored_file_count << "\n";
   out << "restored_bytes: " << result.restored_bytes << "\n";
+  out << "skipped_optional_runtime_file_count: " << result.skipped_optional_runtime_files.size() << "\n";
+  for( const auto& path: result.skipped_optional_runtime_files )
+    out << "skipped_optional_runtime_file: " << path << "\n";
   out << "start_as_observer_first: " << json_bool( result.preflight.start_as_observer_first ) << "\n";
   return out.str();
 }
@@ -1378,7 +1643,15 @@ std::string restore_stage_result_to_json( const RestoreStageResult& result )
   out << "  \"metadata\": \"" << json_escape( result.metadata_path.string() ) << "\",\n";
   out << "  \"restored_file_count\": " << result.restored_file_count << ",\n";
   out << "  \"restored_bytes\": " << result.restored_bytes << ",\n";
-  out << "  \"start_as_observer_first\": " << json_bool( result.preflight.start_as_observer_first ) << "\n";
+  out << "  \"start_as_observer_first\": " << json_bool( result.preflight.start_as_observer_first ) << ",\n";
+  out << "  \"skipped_optional_runtime_files\": [";
+  for( std::size_t i = 0; i < result.skipped_optional_runtime_files.size(); ++i )
+  {
+    if( i > 0 )
+      out << ", ";
+    out << "\"" << json_escape( result.skipped_optional_runtime_files[ i ] ) << "\"";
+  }
+  out << "]\n";
   out << "}\n";
   return out.str();
 }

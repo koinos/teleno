@@ -83,6 +83,77 @@ BackupOperationStatus BackupService::status() const
   return _status;
 }
 
+std::string BackupService::config_summary_json() const
+{
+  std::ostringstream out;
+  out << "{\n";
+  out << "  \"basedir\": \"" << json_escape( _basedir.string() ) << "\",\n";
+  out << "  \"config_path\": \"" << json_escape( _config_path.string() ) << "\",\n";
+  out << "  \"backup\": {\n";
+  out << "    \"enabled\": " << ( _cfg.backup.enabled ? "true" : "false" ) << ",\n";
+  out << "    \"node_id\": \"" << json_escape( _cfg.backup.node_id ) << "\",\n";
+  out << "    \"workspace\": \"" << json_escape( _cfg.backup.workspace ) << "\",\n";
+  out << "    \"local\": {\n";
+  out << "      \"enabled\": " << ( _cfg.backup.local.enabled ? "true" : "false" ) << ",\n";
+  out << "      \"directory\": \"" << json_escape( _cfg.backup.local.directory ) << "\",\n";
+  out << "      \"retention_count\": " << _cfg.backup.local.retention_count << "\n";
+  out << "    },\n";
+  out << "    \"remote\": {\n";
+  out << "      \"enabled\": " << ( _cfg.backup.remote.enabled ? "true" : "false" ) << ",\n";
+  out << "      \"directory\": \"" << json_escape( _cfg.backup.remote.directory ) << "\",\n";
+  out << "      \"retention_count\": " << _cfg.backup.remote.retention_count << ",\n";
+  out << "      \"retention_days\": " << _cfg.backup.remote.retention_days << ",\n";
+  out << "      \"upload_temp_suffix\": \"" << json_escape( _cfg.backup.remote.upload_temp_suffix ) << "\"\n";
+  out << "    },\n";
+  out << "    \"ssh\": {\n";
+  out << "      \"enabled\": " << ( _cfg.backup.ssh.enabled ? "true" : "false" ) << ",\n";
+  out << "      \"transport\": \"" << json_escape( _cfg.backup.ssh.transport ) << "\",\n";
+  out << "      \"host\": \"" << json_escape( _cfg.backup.ssh.host ) << "\",\n";
+  out << "      \"port\": " << _cfg.backup.ssh.port << ",\n";
+  out << "      \"user\": \"" << json_escape( _cfg.backup.ssh.user ) << "\",\n";
+  out << "      \"auth\": \"" << json_escape( _cfg.backup.ssh.auth ) << "\",\n";
+  out << "      \"password_file_configured\": " << ( _cfg.backup.ssh.password_file.empty() ? "false" : "true" ) << ",\n";
+  out << "      \"private_key_file\": \"" << json_escape( _cfg.backup.ssh.private_key_file ) << "\",\n";
+  out << "      \"passphrase_file_configured\": " << ( _cfg.backup.ssh.passphrase_file.empty() ? "false" : "true" ) << ",\n";
+  out << "      \"known_hosts_file\": \"" << json_escape( _cfg.backup.ssh.known_hosts_file ) << "\",\n";
+  out << "      \"strict_host_key_checking\": " << ( _cfg.backup.ssh.strict_host_key_checking ? "true" : "false" ) << ",\n";
+  out << "      \"connect_timeout_seconds\": " << _cfg.backup.ssh.connect_timeout_seconds << "\n";
+  out << "    },\n";
+  out << "    \"admin\": {\n";
+  out << "      \"enabled\": " << ( _cfg.backup.admin.enabled ? "true" : "false" ) << ",\n";
+  out << "      \"listen\": \"" << json_escape( _cfg.backup.admin.listen ) << "\",\n";
+  out << "      \"token_file_configured\": " << ( _cfg.backup.admin.token_file.empty() ? "false" : "true" ) << ",\n";
+  out << "      \"jobs\": " << _cfg.backup.admin.jobs << "\n";
+  out << "    }\n";
+  out << "  }\n";
+  out << "}\n";
+  return out.str();
+}
+
+BackupSnapshotListResult BackupService::list_local_snapshots() const
+{
+  validate_local_repository_request( "local backup list" );
+  return list_local_backup_snapshots( _cfg.backup.local.directory );
+}
+
+BackupSnapshotListResult BackupService::list_remote_snapshots()
+{
+  validate_remote_repository_request( "remote backup list" );
+  return list_remote_backup_snapshots_with_managed_sftp(
+    _cfg.backup.local.directory,
+    _cfg.backup.ssh,
+    _cfg.backup.remote );
+}
+
+RestorePreflightResult BackupService::restore_preflight( const std::string& backup_id ) const
+{
+  validate_local_repository_request( "restore preflight" );
+  return build_local_restore_preflight(
+    _cfg.backup.local.directory,
+    _basedir,
+    backup_id == "latest" ? std::string{} : backup_id );
+}
+
 void BackupService::validate_local_snapshot_request() const
 {
   if( !_cfg.backup.enabled )
@@ -102,12 +173,39 @@ void BackupService::validate_local_snapshot_request() const
                               + ( chain_layout.empty() ? std::string( "unknown" ) : chain_layout ) );
 }
 
+void BackupService::validate_local_repository_request( const std::string& operation_name ) const
+{
+  if( !_cfg.backup.local.enabled )
+    throw std::invalid_argument( operation_name + " requires backup.local.enabled=true" );
+  if( _cfg.backup.local.directory.empty() )
+    throw std::invalid_argument( operation_name + " requires backup.local.directory" );
+}
+
+void BackupService::validate_remote_repository_request( const std::string& operation_name ) const
+{
+  validate_local_repository_request( operation_name );
+  if( !_cfg.backup.remote.enabled )
+    throw std::invalid_argument( operation_name + " requires backup.remote.enabled=true" );
+  if( _cfg.backup.remote.directory.empty() )
+    throw std::invalid_argument( operation_name + " requires backup.remote.directory" );
+  if( !_cfg.backup.ssh.enabled )
+    throw std::invalid_argument( operation_name + " requires backup.ssh.enabled=true" );
+}
+
 std::string BackupService::next_operation_id() const
 {
-  return "runtime-local-snapshot-" + std::to_string( now_milliseconds() );
+  return next_operation_id( "local-snapshot" );
+}
+
+std::string BackupService::next_operation_id( const std::string& kind ) const
+{
+  return "runtime-" + kind + "-" + std::to_string( now_milliseconds() );
 }
 
 void BackupService::begin_operation( const std::string& operation_id,
+                                     const std::string& operation_kind,
+                                     const std::string& phase,
+                                     const std::string& message,
                                      const std::filesystem::path& checkpoint_dir )
 {
   std::lock_guard< std::mutex > lock( _mutex );
@@ -116,10 +214,50 @@ void BackupService::begin_operation( const std::string& operation_id,
   _running = true;
   _status = BackupOperationStatus{};
   _status.operation_id = operation_id;
+  _status.operation_kind = operation_kind;
   _status.state = BackupOperationState::running;
-  _status.message = "creating local backup snapshot";
+  _status.phase = phase;
+  _status.message = message;
   _status.checkpoint_dir = checkpoint_dir;
   _status.started_at_ms = now_milliseconds();
+}
+
+void BackupService::update_operation_progress( const std::string& phase,
+                                               const std::string& message,
+                                               const SftpTransferProgress* progress )
+{
+  std::lock_guard< std::mutex > lock( _mutex );
+  _status.phase = phase;
+  _status.message = message;
+  if( progress )
+  {
+    _status.completed_batches = progress->completed_batches;
+    _status.total_batches = progress->total_batches;
+    _status.attempt = progress->attempt;
+    _status.progress_file_count = progress->file_count;
+    _status.progress_total_bytes = progress->total_bytes;
+  }
+}
+
+void BackupService::finish_operation_success( const std::string& message )
+{
+  std::lock_guard< std::mutex > lock( _mutex );
+  _status.state = BackupOperationState::succeeded;
+  _status.phase = "complete";
+  _status.message = message;
+  _status.finished_at_ms = now_milliseconds();
+  _status.cancel_requested = false;
+  _running = false;
+}
+
+void BackupService::finish_operation_failure( const std::string& message )
+{
+  std::lock_guard< std::mutex > lock( _mutex );
+  _status.state = BackupOperationState::failed;
+  _status.phase = "error";
+  _status.message = message;
+  _status.finished_at_ms = now_milliseconds();
+  _running = false;
 }
 
 void BackupService::throw_if_cancel_requested() const
@@ -129,48 +267,45 @@ void BackupService::throw_if_cancel_requested() const
     throw std::runtime_error( "backup operation cancelled" );
 }
 
+LocalSnapshotResult BackupService::create_local_snapshot_body( const std::filesystem::path& checkpoint_dir )
+{
+  throw_if_cancel_requested();
+  update_operation_progress( "checkpoint", "creating hot RocksDB checkpoint" );
+
+  CheckpointManager checkpoint_manager( _basedir, _storage_db );
+  auto checkpoint = checkpoint_manager.create_checkpoint( checkpoint_dir );
+
+  throw_if_cancel_requested();
+  update_operation_progress( "snapshot", "storing local backup snapshot" );
+
+  LocalSnapshotRepository repository( _cfg.backup.local.directory );
+  return repository.store_checkpoint_snapshot( checkpoint, _cfg, _basedir, _config_path );
+}
+
 LocalSnapshotResult BackupService::execute_local_snapshot_operation( const std::string& operation_id,
                                                                      const std::filesystem::path& checkpoint_dir,
                                                                      bool rethrow_on_failure )
 {
   try
   {
-    throw_if_cancel_requested();
-
-    CheckpointManager checkpoint_manager( _basedir, _storage_db );
-    auto checkpoint = checkpoint_manager.create_checkpoint( checkpoint_dir );
-
-    throw_if_cancel_requested();
-
-    LocalSnapshotRepository repository( _cfg.backup.local.directory );
-    auto snapshot = repository.store_checkpoint_snapshot( checkpoint, _cfg, _basedir, _config_path );
+    auto snapshot = create_local_snapshot_body( checkpoint_dir );
 
     std::error_code cleanup_ec;
     std::filesystem::remove_all( checkpoint_dir, cleanup_ec );
 
     {
       std::lock_guard< std::mutex > lock( _mutex );
-      _status.state = BackupOperationState::succeeded;
-      _status.message = "local backup snapshot created";
-      _status.finished_at_ms = now_milliseconds();
-      _status.cancel_requested = false;
       _status.has_snapshot = true;
       _status.snapshot = snapshot;
-      _running = false;
     }
+    finish_operation_success( "local backup snapshot created" );
     return snapshot;
   }
   catch( const std::exception& e )
   {
     std::error_code cleanup_ec;
     std::filesystem::remove_all( checkpoint_dir, cleanup_ec );
-    {
-      std::lock_guard< std::mutex > lock( _mutex );
-      _status.state = BackupOperationState::failed;
-      _status.message = e.what();
-      _status.finished_at_ms = now_milliseconds();
-      _running = false;
-    }
+    finish_operation_failure( e.what() );
     if( rethrow_on_failure )
       throw;
   }
@@ -178,13 +313,7 @@ LocalSnapshotResult BackupService::execute_local_snapshot_operation( const std::
   {
     std::error_code cleanup_ec;
     std::filesystem::remove_all( checkpoint_dir, cleanup_ec );
-    {
-      std::lock_guard< std::mutex > lock( _mutex );
-      _status.state = BackupOperationState::failed;
-      _status.message = "unknown backup failure";
-      _status.finished_at_ms = now_milliseconds();
-      _running = false;
-    }
+    finish_operation_failure( "unknown backup failure" );
     if( rethrow_on_failure )
       throw;
   }
@@ -214,20 +343,221 @@ LocalSnapshotResult BackupService::create_local_snapshot()
   const auto checkpoint_dir = std::filesystem::path( _cfg.backup.workspace )
                               / ".teleno-checkpoints"
                               / operation_id;
-  begin_operation( operation_id, checkpoint_dir );
+  begin_operation( operation_id,
+                   "local-snapshot",
+                   "prepare",
+                   "creating local backup snapshot",
+                   checkpoint_dir );
   return execute_local_snapshot_operation( operation_id, checkpoint_dir, true );
 }
 
-BackupOperationStatus BackupService::start_local_snapshot_async()
+void BackupService::execute_configured_backup_operation( const std::string&,
+                                                         const std::filesystem::path& checkpoint_dir,
+                                                         bool upload_remote )
+{
+  try
+  {
+    auto snapshot = create_local_snapshot_body( checkpoint_dir );
+    std::error_code cleanup_ec;
+    std::filesystem::remove_all( checkpoint_dir, cleanup_ec );
+
+    {
+      std::lock_guard< std::mutex > lock( _mutex );
+      _status.has_snapshot = true;
+      _status.snapshot = snapshot;
+    }
+
+    if( upload_remote )
+    {
+      throw_if_cancel_requested();
+      update_operation_progress( "upload", "uploading latest native backup to remote SFTP" );
+      auto upload = upload_latest_snapshot_with_managed_sftp(
+        _cfg.backup.local.directory,
+        _cfg.backup.ssh,
+        _cfg.backup.remote,
+        operation_sftp_transfer_options() );
+      {
+        std::lock_guard< std::mutex > lock( _mutex );
+        _status.has_remote_upload = true;
+        _status.remote_upload = upload;
+      }
+      finish_operation_success( "local backup snapshot created and uploaded to remote SFTP" );
+    }
+    else
+    {
+      finish_operation_success( "local backup snapshot created" );
+    }
+  }
+  catch( const std::exception& e )
+  {
+    std::error_code cleanup_ec;
+    std::filesystem::remove_all( checkpoint_dir, cleanup_ec );
+    finish_operation_failure( e.what() );
+  }
+  catch( ... )
+  {
+    std::error_code cleanup_ec;
+    std::filesystem::remove_all( checkpoint_dir, cleanup_ec );
+    finish_operation_failure( "unknown backup failure" );
+  }
+}
+
+void BackupService::execute_upload_latest_operation()
+{
+  try
+  {
+    throw_if_cancel_requested();
+    update_operation_progress( "upload", "uploading latest native backup to remote SFTP" );
+    auto upload = upload_latest_snapshot_with_managed_sftp(
+      _cfg.backup.local.directory,
+      _cfg.backup.ssh,
+      _cfg.backup.remote,
+      operation_sftp_transfer_options() );
+    {
+      std::lock_guard< std::mutex > lock( _mutex );
+      _status.has_remote_upload = true;
+      _status.remote_upload = upload;
+    }
+    finish_operation_success( "latest native backup uploaded to remote SFTP" );
+  }
+  catch( const std::exception& e )
+  {
+    finish_operation_failure( e.what() );
+  }
+  catch( ... )
+  {
+    finish_operation_failure( "unknown remote upload failure" );
+  }
+}
+
+void BackupService::execute_delete_operation( const std::string& scope,
+                                              const std::string& backup_id,
+                                              bool dry_run )
+{
+  try
+  {
+    std::vector< BackupDeleteResult > results;
+    const auto delete_local = [&]() {
+      throw_if_cancel_requested();
+      update_operation_progress(
+        "delete-local",
+        dry_run ? "checking local backup delete impact" : "deleting local backup snapshot" );
+      results.push_back( delete_local_backup_snapshot(
+        _cfg.backup.local.directory,
+        backup_id,
+        dry_run ) );
+    };
+    const auto delete_remote = [&]() {
+      throw_if_cancel_requested();
+      update_operation_progress(
+        "delete-remote",
+        dry_run ? "checking remote backup delete impact" : "deleting remote backup snapshot" );
+      results.push_back( delete_remote_backup_snapshot_with_managed_sftp(
+        _cfg.backup.local.directory,
+        _cfg.backup.ssh,
+        _cfg.backup.remote,
+        backup_id,
+        dry_run,
+        operation_sftp_transfer_options() ) );
+    };
+
+    if( scope == "both" && !dry_run )
+    {
+      delete_remote();
+      delete_local();
+    }
+    else
+    {
+      if( scope == "local" || scope == "both" )
+        delete_local();
+      if( scope == "remote" || scope == "both" )
+        delete_remote();
+    }
+
+    {
+      std::lock_guard< std::mutex > lock( _mutex );
+      _status.delete_results = results;
+    }
+    finish_operation_success( dry_run ? "native backup delete dry-run complete" : "native backup delete complete" );
+  }
+  catch( const std::exception& e )
+  {
+    finish_operation_failure( e.what() );
+  }
+  catch( ... )
+  {
+    finish_operation_failure( "unknown native backup delete failure" );
+  }
+}
+
+void BackupService::execute_restore_fetch_operation( const std::string& backup_id )
+{
+  try
+  {
+    throw_if_cancel_requested();
+    update_operation_progress( "restore-fetch", "fetching remote backup restore data" );
+    auto fetch = fetch_restore_snapshot_with_managed_sftp(
+      _cfg.backup.local.directory,
+      _basedir,
+      _cfg.backup.ssh,
+      _cfg.backup.remote,
+      backup_id,
+      operation_sftp_transfer_options() );
+    {
+      std::lock_guard< std::mutex > lock( _mutex );
+      _status.has_restore_fetch = true;
+      _status.restore_fetch = fetch;
+      _status.has_restore_preflight = true;
+      _status.restore_preflight = fetch.preflight;
+    }
+    finish_operation_success( fetch.ready_to_stage
+                                ? "remote backup restore data fetched and ready to stage"
+                                : "remote backup restore data fetched but not ready to stage" );
+  }
+  catch( const std::exception& e )
+  {
+    finish_operation_failure( e.what() );
+  }
+  catch( ... )
+  {
+    finish_operation_failure( "unknown remote restore fetch failure" );
+  }
+}
+
+SftpTransferOptions BackupService::operation_sftp_transfer_options()
+{
+  SftpTransferOptions options;
+  options.cancel_requested = [this]() {
+    std::lock_guard< std::mutex > lock( _mutex );
+    return _status.cancel_requested;
+  };
+  options.progress = [this]( const SftpTransferProgress& progress ) {
+    update_operation_progress(
+      progress.phase,
+      progress.phase.empty() ? std::string( "remote SFTP transfer in progress" )
+                             : std::string( "remote SFTP transfer phase: " ) + progress.phase,
+      &progress );
+  };
+  return options;
+}
+
+BackupOperationStatus BackupService::start_configured_backup_async( bool upload_remote )
 {
   join_finished_worker();
   validate_local_snapshot_request();
+  if( upload_remote )
+    validate_remote_repository_request( "configured backup create" );
 
-  const auto operation_id = next_operation_id();
+  const auto operation_id = next_operation_id( upload_remote ? "configured-backup" : "local-snapshot" );
   const auto checkpoint_dir = std::filesystem::path( _cfg.backup.workspace )
                               / ".teleno-checkpoints"
                               / operation_id;
-  begin_operation( operation_id, checkpoint_dir );
+  begin_operation( operation_id,
+                   upload_remote ? "configured-backup" : "local-snapshot",
+                   "prepare",
+                   upload_remote ? "creating local backup snapshot before remote upload"
+                                 : "creating local backup snapshot",
+                   checkpoint_dir );
 
   {
     std::lock_guard< std::mutex > lock( _mutex );
@@ -236,19 +566,141 @@ BackupOperationStatus BackupService::start_local_snapshot_async()
 
   try
   {
-    _worker = std::thread( [this, operation_id, checkpoint_dir]() {
-      (void)execute_local_snapshot_operation( operation_id, checkpoint_dir, false );
+    _worker = std::thread( [this, operation_id, checkpoint_dir, upload_remote]() {
+      execute_configured_backup_operation( operation_id, checkpoint_dir, upload_remote );
       std::lock_guard< std::mutex > lock( _mutex );
       _worker_active = false;
     } );
   }
   catch( const std::exception& e )
   {
+    finish_operation_failure( e.what() );
     std::lock_guard< std::mutex > lock( _mutex );
-    _status.state = BackupOperationState::failed;
-    _status.message = e.what();
-    _status.finished_at_ms = now_milliseconds();
-    _running = false;
+    _worker_active = false;
+    throw;
+  }
+
+  return status();
+}
+
+BackupOperationStatus BackupService::start_local_snapshot_async()
+{
+  return start_configured_backup_async( false );
+}
+
+BackupOperationStatus BackupService::start_upload_latest_async()
+{
+  join_finished_worker();
+  validate_remote_repository_request( "remote upload latest" );
+
+  const auto operation_id = next_operation_id( "upload-latest" );
+  begin_operation( operation_id,
+                   "upload-latest",
+                   "prepare",
+                   "preparing latest native backup upload",
+                   {} );
+  {
+    std::lock_guard< std::mutex > lock( _mutex );
+    _worker_active = true;
+  }
+
+  try
+  {
+    _worker = std::thread( [this]() {
+      execute_upload_latest_operation();
+      std::lock_guard< std::mutex > lock( _mutex );
+      _worker_active = false;
+    } );
+  }
+  catch( const std::exception& e )
+  {
+    finish_operation_failure( e.what() );
+    std::lock_guard< std::mutex > lock( _mutex );
+    _worker_active = false;
+    throw;
+  }
+
+  return status();
+}
+
+BackupOperationStatus BackupService::start_delete_async( const std::string& scope,
+                                                         const std::string& backup_id,
+                                                         const std::string& confirm )
+{
+  join_finished_worker();
+  if( backup_id.empty() || backup_id == "latest" )
+    throw std::invalid_argument( "backup delete requires an exact backup_id; 'latest' is not accepted" );
+  if( scope != "local" && scope != "remote" && scope != "both" )
+    throw std::invalid_argument( "backup delete scope must be local, remote, or both" );
+  if( !confirm.empty() && confirm != backup_id )
+    throw std::invalid_argument( "backup delete confirm must exactly match backup_id" );
+  if( scope == "local" || scope == "both" )
+    validate_local_repository_request( "local backup delete" );
+  if( scope == "remote" || scope == "both" )
+    validate_remote_repository_request( "remote backup delete" );
+
+  const bool dry_run = confirm != backup_id;
+  const auto operation_id = next_operation_id( "delete" );
+  begin_operation( operation_id,
+                   "delete",
+                   "prepare",
+                   dry_run ? "preparing native backup delete dry-run"
+                           : "preparing native backup delete",
+                   {} );
+
+  {
+    std::lock_guard< std::mutex > lock( _mutex );
+    _worker_active = true;
+  }
+
+  try
+  {
+    _worker = std::thread( [this, scope, backup_id, dry_run]() {
+      execute_delete_operation( scope, backup_id, dry_run );
+      std::lock_guard< std::mutex > lock( _mutex );
+      _worker_active = false;
+    } );
+  }
+  catch( const std::exception& e )
+  {
+    finish_operation_failure( e.what() );
+    std::lock_guard< std::mutex > lock( _mutex );
+    _worker_active = false;
+    throw;
+  }
+
+  return status();
+}
+
+BackupOperationStatus BackupService::start_restore_fetch_async( const std::string& backup_id )
+{
+  join_finished_worker();
+  validate_remote_repository_request( "remote restore fetch" );
+
+  const auto operation_id = next_operation_id( "restore-fetch" );
+  begin_operation( operation_id,
+                   "restore-fetch",
+                   "prepare",
+                   "preparing remote backup restore fetch",
+                   {} );
+
+  {
+    std::lock_guard< std::mutex > lock( _mutex );
+    _worker_active = true;
+  }
+
+  try
+  {
+    _worker = std::thread( [this, backup_id]() {
+      execute_restore_fetch_operation( backup_id );
+      std::lock_guard< std::mutex > lock( _mutex );
+      _worker_active = false;
+    } );
+  }
+  catch( const std::exception& e )
+  {
+    finish_operation_failure( e.what() );
+    std::lock_guard< std::mutex > lock( _mutex );
     _worker_active = false;
     throw;
   }
@@ -280,7 +732,8 @@ void BackupService::wait_for_current_operation()
     worker.join();
 }
 
-RestoreStageResult BackupService::stage_restore_snapshot( const std::filesystem::path& requested_staging_dir )
+RestoreStageResult BackupService::stage_restore_snapshot( const std::string& backup_id,
+                                                          const std::filesystem::path& requested_staging_dir )
 {
   {
     std::lock_guard< std::mutex > lock( _mutex );
@@ -293,10 +746,15 @@ RestoreStageResult BackupService::stage_restore_snapshot( const std::filesystem:
   if( _cfg.backup.local.directory.empty() )
     throw std::runtime_error( "backup.local.directory is required for local restore staging" );
 
-  return stage_local_restore_snapshot( _cfg.backup.local.directory, _basedir, requested_staging_dir );
+  return stage_local_restore_snapshot(
+    _cfg.backup.local.directory,
+    _basedir,
+    backup_id == "latest" ? std::string{} : backup_id,
+    requested_staging_dir );
 }
 
-RestoreActivationRequest BackupService::request_restore_activation( const std::filesystem::path& requested_staging_dir )
+RestoreActivationRequest BackupService::request_restore_activation( const std::string& backup_id,
+                                                                    const std::filesystem::path& requested_staging_dir )
 {
   {
     std::lock_guard< std::mutex > lock( _mutex );
@@ -311,7 +769,10 @@ RestoreActivationRequest BackupService::request_restore_activation( const std::f
       throw std::runtime_error( "backup.local.enabled must be true when restore activation staging_dir is omitted" );
     if( _cfg.backup.local.directory.empty() )
       throw std::runtime_error( "backup.local.directory is required when restore activation staging_dir is omitted" );
-    auto preflight = build_local_restore_preflight( _cfg.backup.local.directory, _basedir );
+    auto preflight = build_local_restore_preflight(
+      _cfg.backup.local.directory,
+      _basedir,
+      backup_id == "latest" ? std::string{} : backup_id );
     staging_dir = _basedir / ".teleno-restore-staging" / preflight.backup_id;
   }
 
@@ -362,18 +823,26 @@ std::string backup_operation_status_to_text( const BackupOperationStatus& status
   std::ostringstream out;
   out << "Backup operation status\n";
   out << "operation_id: " << status.operation_id << "\n";
+  out << "operation_kind: " << status.operation_kind << "\n";
   out << "state: " << backup_operation_state_name( status.state ) << "\n";
+  out << "phase: " << status.phase << "\n";
   out << "message: " << status.message << "\n";
   out << "checkpoint_dir: " << status.checkpoint_dir.string() << "\n";
   out << "started_at_ms: " << status.started_at_ms << "\n";
   out << "finished_at_ms: " << status.finished_at_ms << "\n";
   out << "cancel_requested: " << ( status.cancel_requested ? "true" : "false" ) << "\n";
+  out << "completed_batches: " << status.completed_batches << "\n";
+  out << "total_batches: " << status.total_batches << "\n";
+  out << "attempt: " << status.attempt << "\n";
   out << "has_snapshot: " << ( status.has_snapshot ? "true" : "false" ) << "\n";
   if( status.has_snapshot )
   {
     out << "backup_id: " << status.snapshot.backup_id << "\n";
     out << "snapshot_dir: " << status.snapshot.snapshot_dir.string() << "\n";
   }
+  out << "has_remote_upload: " << ( status.has_remote_upload ? "true" : "false" ) << "\n";
+  out << "has_restore_fetch: " << ( status.has_restore_fetch ? "true" : "false" ) << "\n";
+  out << "delete_result_count: " << status.delete_results.size() << "\n";
   return out.str();
 }
 
@@ -382,23 +851,70 @@ std::string backup_operation_status_to_json( const BackupOperationStatus& status
   std::ostringstream out;
   out << "{\n";
   out << "  \"operation_id\": \"" << json_escape( status.operation_id ) << "\",\n";
+  out << "  \"operation_kind\": \"" << json_escape( status.operation_kind ) << "\",\n";
   out << "  \"state\": \"" << backup_operation_state_name( status.state ) << "\",\n";
+  out << "  \"phase\": \"" << json_escape( status.phase ) << "\",\n";
   out << "  \"message\": \"" << json_escape( status.message ) << "\",\n";
   out << "  \"checkpoint_dir\": \"" << json_escape( status.checkpoint_dir.string() ) << "\",\n";
   out << "  \"started_at_ms\": " << status.started_at_ms << ",\n";
   out << "  \"finished_at_ms\": " << status.finished_at_ms << ",\n";
   out << "  \"cancel_requested\": " << ( status.cancel_requested ? "true" : "false" ) << ",\n";
-  out << "  \"has_snapshot\": " << ( status.has_snapshot ? "true" : "false" );
+  out << "  \"progress\": {\n";
+  out << "    \"completed_batches\": " << status.completed_batches << ",\n";
+  out << "    \"total_batches\": " << status.total_batches << ",\n";
+  out << "    \"attempt\": " << status.attempt << ",\n";
+  out << "    \"file_count\": " << status.progress_file_count << ",\n";
+  out << "    \"total_bytes\": " << status.progress_total_bytes << "\n";
+  out << "  },\n";
+  out << "  \"has_snapshot\": " << ( status.has_snapshot ? "true" : "false" ) << ",\n";
+  out << "  \"has_remote_upload\": " << ( status.has_remote_upload ? "true" : "false" ) << ",\n";
+  out << "  \"has_restore_fetch\": " << ( status.has_restore_fetch ? "true" : "false" ) << ",\n";
+  out << "  \"has_restore_preflight\": " << ( status.has_restore_preflight ? "true" : "false" ) << ",\n";
+  out << "  \"has_restore_stage\": " << ( status.has_restore_stage ? "true" : "false" ) << ",\n";
+  out << "  \"has_activation_request\": " << ( status.has_activation_request ? "true" : "false" ) << ",\n";
+  out << "  \"delete_result_count\": " << status.delete_results.size();
   if( status.has_snapshot )
   {
     out << ",\n";
-    out << "  \"snapshot\": {\n";
-    out << "    \"backup_id\": \"" << json_escape( status.snapshot.backup_id ) << "\",\n";
-    out << "    \"snapshot_dir\": \"" << json_escape( status.snapshot.snapshot_dir.string() ) << "\",\n";
-    out << "    \"file_count\": " << status.snapshot.file_count << ",\n";
-    out << "    \"object_count\": " << status.snapshot.object_count << ",\n";
-    out << "    \"total_bytes\": " << status.snapshot.total_bytes << "\n";
-    out << "  }\n";
+    out << "  \"snapshot\": " << local_snapshot_result_to_json( status.snapshot );
+  }
+  if( status.has_remote_upload )
+  {
+    out << ",\n";
+    out << "  \"remote_upload\": " << sftp_upload_result_to_json( status.remote_upload );
+  }
+  if( status.has_restore_fetch )
+  {
+    out << ",\n";
+    out << "  \"restore_fetch\": " << sftp_restore_fetch_result_to_json( status.restore_fetch );
+  }
+  if( status.has_restore_preflight )
+  {
+    out << ",\n";
+    out << "  \"restore_preflight\": " << restore_preflight_result_to_json( status.restore_preflight );
+  }
+  if( status.has_restore_stage )
+  {
+    out << ",\n";
+    out << "  \"restore_stage\": " << restore_stage_result_to_json( status.restore_stage );
+  }
+  if( status.has_activation_request )
+  {
+    out << ",\n";
+    out << "  \"activation_request\": " << restore_activation_request_to_json( status.activation_request );
+  }
+  if( !status.delete_results.empty() )
+  {
+    out << ",\n";
+    out << "  \"delete_results\": [\n";
+    for( std::size_t i = 0; i < status.delete_results.size(); ++i )
+    {
+      out << backup_delete_result_to_json( status.delete_results[ i ] );
+      if( i + 1 != status.delete_results.size() )
+        out << ",";
+      out << "\n";
+    }
+    out << "  ]\n";
   }
   else
   {

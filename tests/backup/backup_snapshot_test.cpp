@@ -8,6 +8,8 @@
 #include <fstream>
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 using namespace koinos::node;
 using namespace koinos::node::backup;
 
@@ -34,6 +36,23 @@ std::string read_file( const std::filesystem::path& path )
   std::ifstream input( path, std::ios::binary );
   return std::string( ( std::istreambuf_iterator< char >( input ) ),
                       std::istreambuf_iterator< char >() );
+}
+
+std::string snapshot_file_sha256( const std::filesystem::path& files_path, const std::string& relative_path )
+{
+  const auto files = nlohmann::json::parse( read_file( files_path ) );
+  for( const auto& file: files.at( "files" ) )
+  {
+    if( file.at( "path" ).get< std::string >() == relative_path )
+      return file.at( "sha256" ).get< std::string >();
+  }
+  assert( false && "snapshot file not found" );
+  return {};
+}
+
+std::filesystem::path snapshot_object_path( const std::filesystem::path& repository_dir, const std::string& sha256 )
+{
+  return repository_dir / "objects" / "sha256" / sha256.substr( 0, 2 ) / sha256.substr( 2, 2 ) / sha256;
 }
 
 NodeConfig snapshot_config( const std::filesystem::path& root )
@@ -99,6 +118,14 @@ int main()
     assert( read_file( first.manifest_path ).find( "\"format\": \"teleno-native-rocksdb-snapshot\"" ) != std::string::npos );
     assert( read_file( first.files_path ).find( "\"path\": \"config.yml\"" ) != std::string::npos );
     assert( read_file( first.latest_path ).find( first.backup_id ) != std::string::npos );
+    const auto first_config_sha = snapshot_file_sha256( first.files_path, "config.yml" );
+    const auto first_config_object = snapshot_object_path( cfg.backup.local.directory, first_config_sha );
+    assert( std::filesystem::exists( first_config_object ) );
+    assert( read_file( first_config_object ) == "backup:\n  enabled: true\n" );
+    assert( !std::filesystem::equivalent( first_config_object, config_path ) );
+
+    write_file( config_path, "backup:\n  enabled: true\n  changed: true\n" );
+    assert( read_file( first_config_object ) == "backup:\n  enabled: true\n" );
 
     auto second = create_snapshot( root, manager, cfg, basedir, config_path, "checkpoint-2" );
     assert( std::filesystem::exists( second.snapshot_dir / "COMPLETE" ) );
@@ -138,6 +165,18 @@ int main()
     auto selected_preflight = build_local_restore_preflight( cfg.backup.local.directory, restore_target, first.backup_id );
     assert( selected_preflight.backup_id == first.backup_id );
     assert( selected_preflight.ready_to_restore );
+
+    write_file( first_config_object, "corrupt old config object\n" );
+    auto selected_stage = stage_local_restore_snapshot(
+      cfg.backup.local.directory,
+      restore_target,
+      first.backup_id,
+      root / "selected-first-stage" );
+    assert( selected_stage.preflight.backup_id == first.backup_id );
+    assert( selected_stage.skipped_optional_runtime_files.size() == 1 );
+    assert( selected_stage.skipped_optional_runtime_files[ 0 ] == "config.yml" );
+    assert( !std::filesystem::exists( selected_stage.staging_dir / "config.yml" ) );
+    assert( restore_stage_result_to_json( selected_stage ).find( "\"skipped_optional_runtime_files\": [\"config.yml\"]" ) != std::string::npos );
 
     auto stage = stage_local_restore_snapshot( cfg.backup.local.directory, restore_target );
     assert( stage.preflight.backup_id == second.backup_id );
@@ -230,6 +269,97 @@ int main()
     assert( completed_snapshots == 1 );
 
     manager.close();
+    std::filesystem::remove_all( root );
+  }
+
+  {
+    auto root = unique_temp_dir( "teleno-backup-delete" );
+    auto repo = root / "repo";
+    const std::string old_id = "20260615T100000Z-ms-1-files-2";
+    const std::string new_id = "20260615T110000Z-ms-2-files-2";
+    const std::string old_only_hash( 64, 'a' );
+    const std::string new_only_hash( 64, 'b' );
+    const std::string shared_hash( 64, 'c' );
+
+    const auto manifest = []( const std::string& backup_id, uint64_t total_bytes ) {
+      return "{\n"
+             "  \"format\": \"teleno-native-rocksdb-snapshot\",\n"
+             "  \"backup_id\": \"" + backup_id + "\",\n"
+             "  \"created_at\": \"20260615T100000Z\",\n"
+             "  \"node\": { \"version\": \"test\" },\n"
+             "  \"source\": { \"node_id\": \"delete-test\", \"storage_layout\": \"unified\" },\n"
+             "  \"snapshot\": { \"file_count\": 2, \"object_count\": 2, \"total_bytes\": " + std::to_string( total_bytes ) + " },\n"
+             "  \"sizes\": { \"restored_database_bytes\": " + std::to_string( total_bytes ) + ", \"runtime_files_bytes\": 0, \"object_download_bytes\": " + std::to_string( total_bytes ) + ", \"archive_bytes\": 0 },\n"
+             "  \"restore\": { \"start_as_observer_first\": true }\n"
+             "}\n";
+    };
+    const auto files = []( const std::string& backup_id,
+                           const std::string& first_hash,
+                           uint64_t first_size,
+                           const std::string& second_hash,
+                           uint64_t second_size ) {
+      return "{\n"
+             "  \"format\": \"teleno-native-snapshot-files\",\n"
+             "  \"backup_id\": \"" + backup_id + "\",\n"
+             "  \"files\": [\n"
+             "    { \"path\": \"db/one.sst\", \"sha256\": \"" + first_hash + "\", \"size_bytes\": " + std::to_string( first_size ) + " },\n"
+             "    { \"path\": \"db/two.sst\", \"sha256\": \"" + second_hash + "\", \"size_bytes\": " + std::to_string( second_size ) + " }\n"
+             "  ]\n"
+             "}\n";
+    };
+
+    write_file( repo / "snapshots" / old_id / "manifest.json", manifest( old_id, 15 ) );
+    write_file( repo / "snapshots" / old_id / "files.json", files( old_id, old_only_hash, 10, shared_hash, 5 ) );
+    write_file( repo / "snapshots" / old_id / "COMPLETE", "complete\n" );
+    write_file( repo / "snapshots" / new_id / "manifest.json", manifest( new_id, 25 ) );
+    write_file( repo / "snapshots" / new_id / "files.json", files( new_id, new_only_hash, 20, shared_hash, 5 ) );
+    write_file( repo / "snapshots" / new_id / "COMPLETE", "complete\n" );
+    write_file( repo / "latest.json",
+                "{ \"backup_id\": \"" + new_id + "\", \"snapshot_dir\": \"" + new_id + "\" }\n" );
+    write_file( repo / "objects" / "sha256" / "aa" / "aa" / old_only_hash, "old-object" );
+    write_file( repo / "objects" / "sha256" / "bb" / "bb" / new_only_hash, "new-object-payload" );
+    write_file( repo / "objects" / "sha256" / "cc" / "cc" / shared_hash, "shared" );
+
+    auto dry_run = delete_local_backup_snapshot( repo, old_id, true );
+    assert( dry_run.dry_run );
+    assert( dry_run.snapshot_found );
+    assert( !dry_run.deleted_snapshot );
+    assert( !dry_run.deleted_latest );
+    assert( dry_run.previous_latest_backup_id == new_id );
+    assert( dry_run.new_latest_backup_id == new_id );
+    assert( dry_run.reclaimable_object_count == 1 );
+    assert( dry_run.reclaimable_object_bytes == 10 );
+    assert( std::filesystem::exists( repo / "snapshots" / old_id / "COMPLETE" ) );
+    assert( backup_delete_result_to_text( dry_run ).find( "dry_run: true" ) != std::string::npos );
+    assert( backup_delete_result_to_json( dry_run ).find( "\"source\": \"local\"" ) != std::string::npos );
+
+    auto deleted_old = delete_local_backup_snapshot( repo, old_id, false );
+    assert( deleted_old.deleted_snapshot );
+    assert( deleted_old.deleted_object_count == 1 );
+    assert( !std::filesystem::exists( repo / "snapshots" / old_id ) );
+    assert( !std::filesystem::exists( repo / "objects" / "sha256" / "aa" / "aa" / old_only_hash ) );
+    assert( std::filesystem::exists( repo / "objects" / "sha256" / "cc" / "cc" / shared_hash ) );
+    assert( read_file( repo / "latest.json" ).find( new_id ) != std::string::npos );
+
+    auto deleted_latest = delete_local_backup_snapshot( repo, new_id, false );
+    assert( deleted_latest.deleted_snapshot );
+    assert( deleted_latest.deleted_latest );
+    assert( deleted_latest.new_latest_backup_id.empty() );
+    assert( !std::filesystem::exists( repo / "latest.json" ) );
+    assert( !std::filesystem::exists( repo / "objects" / "sha256" / "bb" / "bb" / new_only_hash ) );
+    assert( !std::filesystem::exists( repo / "objects" / "sha256" / "cc" / "cc" / shared_hash ) );
+
+    bool rejected_latest_alias = false;
+    try
+    {
+      (void)delete_local_backup_snapshot( repo, "latest", true );
+    }
+    catch( const std::runtime_error& e )
+    {
+      rejected_latest_alias = std::string( e.what() ).find( "latest" ) != std::string::npos;
+    }
+    assert( rejected_latest_alias );
+
     std::filesystem::remove_all( root );
   }
 

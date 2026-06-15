@@ -64,6 +64,7 @@ struct RestoreStageResult
   std::filesystem::path metadata_path;
   uint64_t restored_file_count = 0;
   uint64_t restored_bytes = 0;
+  std::vector< std::string > skipped_optional_runtime_files;
 };
 
 struct RestoreActivatedPath
@@ -127,6 +128,27 @@ struct BackupSnapshotListResult
   std::vector< BackupSnapshotSummary > snapshots;
 };
 
+struct BackupDeleteResult
+{
+  std::string source;
+  std::string backup_id;
+  std::filesystem::path repository_dir;
+  std::string remote_directory;
+  std::string transport;
+  bool dry_run = true;
+  bool snapshot_found = false;
+  bool deleted_snapshot = false;
+  bool deleted_latest = false;
+  std::string previous_latest_backup_id;
+  std::string new_latest_backup_id;
+  uint64_t snapshot_metadata_file_count = 0;
+  uint64_t snapshot_metadata_bytes = 0;
+  uint64_t reclaimable_object_count = 0;
+  uint64_t reclaimable_object_bytes = 0;
+  uint64_t deleted_object_count = 0;
+  uint64_t deleted_object_bytes = 0;
+};
+
 RestoreSpaceEstimate estimate_restore_space( uint64_t restored_database_bytes,
                                              uint64_t runtime_files_bytes,
                                              uint64_t object_download_bytes,
@@ -153,6 +175,9 @@ RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& re
 RestoreActivationResult activate_staged_restore_snapshot( const std::filesystem::path& staging_dir,
                                                           const std::filesystem::path& target_basedir );
 BackupSnapshotListResult list_local_backup_snapshots( const std::filesystem::path& repository_dir );
+BackupDeleteResult delete_local_backup_snapshot( const std::filesystem::path& repository_dir,
+                                                 const std::string& backup_id,
+                                                 bool dry_run );
 
 class LocalSnapshotRepository
 {
@@ -172,6 +197,8 @@ std::string local_snapshot_result_to_text( const LocalSnapshotResult& result );
 std::string local_snapshot_result_to_json( const LocalSnapshotResult& result );
 std::string backup_snapshot_list_result_to_text( const BackupSnapshotListResult& result );
 std::string backup_snapshot_list_result_to_json( const BackupSnapshotListResult& result );
+std::string backup_delete_result_to_text( const BackupDeleteResult& result );
+std::string backup_delete_result_to_json( const BackupDeleteResult& result );
 std::string restore_preflight_result_to_text( const RestorePreflightResult& result );
 std::string restore_preflight_result_to_json( const RestorePreflightResult& result );
 std::string restore_stage_result_to_text( const RestoreStageResult& result );

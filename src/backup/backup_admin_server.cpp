@@ -12,13 +12,62 @@
 namespace koinos::node::backup {
 namespace {
 
-std::filesystem::path staging_dir_from_request_body( const std::string& body )
+class RequestValidationError : public std::runtime_error
+{
+public:
+  explicit RequestValidationError( const std::string& message )
+    : std::runtime_error( message )
+  {}
+};
+
+nlohmann::json parse_request_body( const std::string& body )
 {
   if( body.empty() )
-    return {};
+    return nlohmann::json::object();
 
-  const auto request = nlohmann::json::parse( body );
-  return request.value( "staging_dir", std::string{} );
+  try
+  {
+    auto request = nlohmann::json::parse( body );
+    if( !request.is_object() )
+      throw RequestValidationError( "request body must be a JSON object" );
+    return request;
+  }
+  catch( const nlohmann::json::parse_error& e )
+  {
+    throw RequestValidationError( std::string( "invalid JSON request body: " ) + e.what() );
+  }
+}
+
+std::string optional_string_field( const nlohmann::json& request,
+                                   const std::string& field )
+{
+  if( !request.contains( field ) || request.at( field ).is_null() )
+    return {};
+  if( !request.at( field ).is_string() )
+    throw RequestValidationError( field + " must be a string" );
+  return request.at( field ).get< std::string >();
+}
+
+bool optional_bool_field( const nlohmann::json& request,
+                          const std::string& field,
+                          bool default_value )
+{
+  if( !request.contains( field ) || request.at( field ).is_null() )
+    return default_value;
+  if( !request.at( field ).is_boolean() )
+    throw RequestValidationError( field + " must be a boolean" );
+  return request.at( field ).get< bool >();
+}
+
+std::string backup_id_from_request( const nlohmann::json& request )
+{
+  auto backup_id = optional_string_field( request, "backup_id" );
+  return backup_id.empty() ? std::string( "latest" ) : backup_id;
+}
+
+std::filesystem::path staging_dir_from_request( const nlohmann::json& request )
+{
+  return optional_string_field( request, "staging_dir" );
 }
 
 bool is_route_or_child( const std::string& target, const std::string& route )
@@ -172,12 +221,80 @@ std::string BackupAdminServer::operation_not_found_response( const std::string& 
   return response.dump();
 }
 
-std::string BackupAdminServer::create_response()
+std::string BackupAdminServer::config_response()
 {
-  auto status = _backup_service->start_local_snapshot_async();
+  nlohmann::json response;
+  response[ "ok" ] = true;
+  response[ "config" ] = nlohmann::json::parse( _backup_service->config_summary_json() );
+  return response.dump();
+}
+
+std::string BackupAdminServer::list_response( bool remote )
+{
+  const auto result = remote
+    ? _backup_service->list_remote_snapshots()
+    : _backup_service->list_local_snapshots();
+  nlohmann::json response;
+  response[ "ok" ] = true;
+  response[ "source" ] = remote ? "remote_sftp" : "local";
+  response[ "snapshots" ] = nlohmann::json::parse( backup_snapshot_list_result_to_json( result ) );
+  return response.dump();
+}
+
+std::string BackupAdminServer::create_response( const std::string& body )
+{
+  const auto request = parse_request_body( body );
+  auto configured = nlohmann::json::parse( _backup_service->config_summary_json() );
+  const bool remote_default = configured[ "backup" ][ "remote" ].value( "enabled", false );
+  const bool upload_remote = optional_bool_field( request, "remote", remote_default );
+  auto status = _backup_service->start_configured_backup_async( upload_remote );
   nlohmann::json response;
   response[ "ok" ] = true;
   response[ "status" ] = nlohmann::json::parse( backup_operation_status_to_json( status ) );
+  return response.dump();
+}
+
+std::string BackupAdminServer::upload_latest_response()
+{
+  auto status = _backup_service->start_upload_latest_async();
+  nlohmann::json response;
+  response[ "ok" ] = true;
+  response[ "status" ] = nlohmann::json::parse( backup_operation_status_to_json( status ) );
+  return response.dump();
+}
+
+std::string BackupAdminServer::delete_response( const std::string& body )
+{
+  const auto request = parse_request_body( body );
+  const auto scope = optional_string_field( request, "scope" ).empty()
+    ? std::string( "local" )
+    : optional_string_field( request, "scope" );
+  const auto backup_id = optional_string_field( request, "backup_id" );
+  const auto confirm = optional_string_field( request, "confirm" );
+  auto status = _backup_service->start_delete_async( scope, backup_id, confirm );
+  nlohmann::json response;
+  response[ "ok" ] = true;
+  response[ "status" ] = nlohmann::json::parse( backup_operation_status_to_json( status ) );
+  return response.dump();
+}
+
+std::string BackupAdminServer::restore_fetch_response( const std::string& body )
+{
+  const auto request = parse_request_body( body );
+  auto status = _backup_service->start_restore_fetch_async( backup_id_from_request( request ) );
+  nlohmann::json response;
+  response[ "ok" ] = true;
+  response[ "status" ] = nlohmann::json::parse( backup_operation_status_to_json( status ) );
+  return response.dump();
+}
+
+std::string BackupAdminServer::restore_preflight_response( const std::string& body )
+{
+  const auto request = parse_request_body( body );
+  auto result = _backup_service->restore_preflight( backup_id_from_request( request ) );
+  nlohmann::json response;
+  response[ "ok" ] = true;
+  response[ "preflight" ] = nlohmann::json::parse( restore_preflight_result_to_json( result ) );
   return response.dump();
 }
 
@@ -191,7 +308,10 @@ std::string BackupAdminServer::cancel_response( const BackupOperationStatus& sta
 
 std::string BackupAdminServer::restore_stage_response( const std::string& body )
 {
-  auto result = _backup_service->stage_restore_snapshot( staging_dir_from_request_body( body ) );
+  const auto request = parse_request_body( body );
+  auto result = _backup_service->stage_restore_snapshot(
+    backup_id_from_request( request ),
+    staging_dir_from_request( request ) );
   nlohmann::json response;
   response[ "ok" ] = true;
   response[ "stage" ] = nlohmann::json::parse( restore_stage_result_to_json( result ) );
@@ -200,7 +320,10 @@ std::string BackupAdminServer::restore_stage_response( const std::string& body )
 
 std::string BackupAdminServer::restore_activate_response( const std::string& body )
 {
-  auto result = _backup_service->request_restore_activation( staging_dir_from_request_body( body ) );
+  const auto request = parse_request_body( body );
+  auto result = _backup_service->request_restore_activation(
+    backup_id_from_request( request ),
+    staging_dir_from_request( request ) );
   nlohmann::json response;
   response[ "ok" ] = true;
   response[ "activation_request" ] =
@@ -262,10 +385,35 @@ void BackupAdminServer::handle_session( tcp::socket socket )
           }
         }
       }
+      else if( req.method() == http::verb::get && target == "/admin/backup/config" )
+      {
+        res.result( http::status::ok );
+        res.body() = config_response();
+      }
+      else if( req.method() == http::verb::get && target == "/admin/backup/snapshots/local" )
+      {
+        res.result( http::status::ok );
+        res.body() = list_response( false );
+      }
+      else if( req.method() == http::verb::get && target == "/admin/backup/snapshots/remote" )
+      {
+        res.result( http::status::ok );
+        res.body() = list_response( true );
+      }
       else if( req.method() == http::verb::post && target == "/admin/backup/create" )
       {
         res.result( http::status::accepted );
-        res.body() = create_response();
+        res.body() = create_response( req.body() );
+      }
+      else if( req.method() == http::verb::post && target == "/admin/backup/upload-latest" )
+      {
+        res.result( http::status::accepted );
+        res.body() = upload_latest_response();
+      }
+      else if( req.method() == http::verb::post && target == "/admin/backup/delete" )
+      {
+        res.result( http::status::accepted );
+        res.body() = delete_response( req.body() );
       }
       else if( req.method() == http::verb::post
                && is_route_or_child( target, "/admin/backup/cancel" ) )
@@ -298,6 +446,16 @@ void BackupAdminServer::handle_session( tcp::socket socket )
         res.result( http::status::ok );
         res.body() = restore_stage_response( req.body() );
       }
+      else if( req.method() == http::verb::post && target == "/admin/backup/restore/fetch" )
+      {
+        res.result( http::status::accepted );
+        res.body() = restore_fetch_response( req.body() );
+      }
+      else if( req.method() == http::verb::post && target == "/admin/backup/restore/preflight" )
+      {
+        res.result( http::status::ok );
+        res.body() = restore_preflight_response( req.body() );
+      }
       else if( req.method() == http::verb::post && target == "/admin/backup/restore/activate" )
       {
         res.result( http::status::accepted );
@@ -314,6 +472,16 @@ void BackupAdminServer::handle_session( tcp::socket socket )
         res.body() = R"({"ok":false,"error":"not found"})";
       }
     }
+    catch( const RequestValidationError& e )
+    {
+      res.result( http::status::bad_request );
+      res.body() = bad_request_response( e.what() );
+    }
+    catch( const std::invalid_argument& e )
+    {
+      res.result( http::status::bad_request );
+      res.body() = bad_request_response( e.what() );
+    }
     catch( const std::exception& e )
     {
       res.result( http::status::internal_server_error );
@@ -322,6 +490,14 @@ void BackupAdminServer::handle_session( tcp::socket socket )
       error[ "error" ] = e.what();
       error[ "status" ] = nlohmann::json::parse( backup_operation_status_to_json( _backup_service->status() ) );
       res.body() = error.dump();
+    }
+
+    if( is_admin_target( target ) || target == "/health" || target == "/healthz" )
+    {
+      LOG( info ) << "[backup_admin] HTTP request"
+                  << " method=" << req.method_string()
+                  << " target=" << target
+                  << " status=" << static_cast< unsigned int >( res.result_int() );
     }
 
     res.prepare_payload();
