@@ -105,6 +105,16 @@ int main()
     assert( second.reused_object_count > 0 );
     assert( read_file( second.latest_path ).find( second.backup_id ) != std::string::npos );
 
+    auto list = list_local_backup_snapshots( cfg.backup.local.directory );
+    assert( list.latest_backup_id == second.backup_id );
+    assert( list.snapshots.size() == 2 );
+    assert( list.snapshots[ 0 ].backup_id == first.backup_id );
+    assert( !list.snapshots[ 0 ].latest );
+    assert( list.snapshots[ 1 ].backup_id == second.backup_id );
+    assert( list.snapshots[ 1 ].latest );
+    assert( backup_snapshot_list_result_to_text( list ).find( "Native backup snapshots" ) != std::string::npos );
+    assert( backup_snapshot_list_result_to_json( list ).find( "\"snapshot_count\": 2" ) != std::string::npos );
+
     auto restore_target = root / "restore-target";
     storage::RocksDBManager existing_target;
     existing_target.open( restore_target, cfg );
@@ -124,6 +134,10 @@ int main()
     assert( preflight.ready_to_restore );
     assert( restore_preflight_result_to_text( preflight ).find( "Backup restore preflight" ) != std::string::npos );
     assert( restore_preflight_result_to_json( preflight ).find( "\"ready_to_restore\": true" ) != std::string::npos );
+
+    auto selected_preflight = build_local_restore_preflight( cfg.backup.local.directory, restore_target, first.backup_id );
+    assert( selected_preflight.backup_id == first.backup_id );
+    assert( selected_preflight.ready_to_restore );
 
     auto stage = stage_local_restore_snapshot( cfg.backup.local.directory, restore_target );
     assert( stage.preflight.backup_id == second.backup_id );

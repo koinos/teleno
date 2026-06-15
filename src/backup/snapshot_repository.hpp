@@ -101,6 +101,32 @@ struct LocalSnapshotResult
   RestoreSpaceEstimate restore_space;
 };
 
+struct BackupSnapshotSummary
+{
+  std::string backup_id;
+  std::string created_at;
+  std::string node_version;
+  std::string node_id;
+  std::string storage_layout;
+  std::filesystem::path repository_dir;
+  std::filesystem::path snapshot_dir;
+  std::filesystem::path manifest_path;
+  std::filesystem::path files_path;
+  uint64_t file_count = 0;
+  uint64_t object_count = 0;
+  uint64_t total_bytes = 0;
+  RestoreSpaceEstimate restore_space;
+  bool snapshot_complete = false;
+  bool latest = false;
+};
+
+struct BackupSnapshotListResult
+{
+  std::filesystem::path repository_dir;
+  std::string latest_backup_id;
+  std::vector< BackupSnapshotSummary > snapshots;
+};
+
 RestoreSpaceEstimate estimate_restore_space( uint64_t restored_database_bytes,
                                              uint64_t runtime_files_bytes,
                                              uint64_t object_download_bytes,
@@ -114,11 +140,19 @@ RestoreSpaceCheck check_restore_space( const RestoreSpaceEstimate& estimate,
 
 RestorePreflightResult build_local_restore_preflight( const std::filesystem::path& repository_dir,
                                                       const std::filesystem::path& target_basedir );
+RestorePreflightResult build_local_restore_preflight( const std::filesystem::path& repository_dir,
+                                                      const std::filesystem::path& target_basedir,
+                                                      const std::string& backup_id );
 RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& repository_dir,
                                                  const std::filesystem::path& target_basedir,
                                                  const std::filesystem::path& requested_staging_dir = {} );
+RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& repository_dir,
+                                                 const std::filesystem::path& target_basedir,
+                                                 const std::string& backup_id,
+                                                 const std::filesystem::path& requested_staging_dir = {} );
 RestoreActivationResult activate_staged_restore_snapshot( const std::filesystem::path& staging_dir,
                                                           const std::filesystem::path& target_basedir );
+BackupSnapshotListResult list_local_backup_snapshots( const std::filesystem::path& repository_dir );
 
 class LocalSnapshotRepository
 {
@@ -136,6 +170,8 @@ private:
 
 std::string local_snapshot_result_to_text( const LocalSnapshotResult& result );
 std::string local_snapshot_result_to_json( const LocalSnapshotResult& result );
+std::string backup_snapshot_list_result_to_text( const BackupSnapshotListResult& result );
+std::string backup_snapshot_list_result_to_json( const BackupSnapshotListResult& result );
 std::string restore_preflight_result_to_text( const RestorePreflightResult& result );
 std::string restore_preflight_result_to_json( const RestorePreflightResult& result );
 std::string restore_stage_result_to_text( const RestoreStageResult& result );

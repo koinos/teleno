@@ -500,6 +500,83 @@ std::string latest_json( const LocalSnapshotResult& result )
   return out.str();
 }
 
+std::string read_latest_backup_id( const std::filesystem::path& repository_dir )
+{
+  const auto latest_path = repository_dir / "latest.json";
+  if( !std::filesystem::is_regular_file( latest_path ) )
+    return {};
+
+  const auto latest = nlohmann::json::parse( read_text_file( latest_path ) );
+  return latest.value( "backup_id", "" );
+}
+
+void validate_backup_id_path_component( const std::string& backup_id )
+{
+  if( backup_id.empty() )
+    throw std::runtime_error( "backup ID cannot be empty" );
+  std::filesystem::path id_path( backup_id );
+  if( id_path.is_absolute() || id_path.filename().string() != backup_id )
+    throw std::runtime_error( "backup ID must be a snapshot directory name, not a path: " + backup_id );
+  if( backup_id == "." || backup_id == ".."
+      || ( backup_id.size() >= 8 && backup_id.substr( backup_id.size() - 8 ) == ".partial" ) )
+    throw std::runtime_error( "invalid backup ID: " + backup_id );
+}
+
+std::filesystem::path resolve_snapshot_dir( const std::filesystem::path& repository_dir,
+                                            const std::string& backup_id )
+{
+  validate_backup_id_path_component( backup_id );
+  const auto snapshot_dir = repository_dir / "snapshots" / backup_id;
+  if( !std::filesystem::is_directory( snapshot_dir ) )
+    throw std::runtime_error( "backup snapshot not found: " + backup_id );
+  return snapshot_dir;
+}
+
+BackupSnapshotSummary read_snapshot_summary( const std::filesystem::path& repository_dir,
+                                             const std::filesystem::path& snapshot_dir,
+                                             const std::string& latest_backup_id )
+{
+  const auto manifest_path = snapshot_dir / "manifest.json";
+  const auto files_path = snapshot_dir / "files.json";
+  const auto manifest = nlohmann::json::parse( read_text_file( manifest_path ) );
+  const auto files = nlohmann::json::parse( read_text_file( files_path ) );
+  const auto sizes = manifest.value( "sizes", nlohmann::json::object() );
+  const auto snapshot = manifest.value( "snapshot", nlohmann::json::object() );
+  const auto source = manifest.value( "source", nlohmann::json::object() );
+  const auto node = manifest.value( "node", nlohmann::json::object() );
+
+  uint64_t inventory_file_count = 0;
+  for( const auto& _: files.at( "files" ) )
+  {
+    (void)_;
+    ++inventory_file_count;
+  }
+
+  BackupSnapshotSummary summary;
+  summary.repository_dir = repository_dir;
+  summary.snapshot_dir = snapshot_dir;
+  summary.manifest_path = manifest_path;
+  summary.files_path = files_path;
+  summary.backup_id = manifest.value( "backup_id", snapshot_dir.filename().string() );
+  summary.created_at = manifest.value( "created_at", "" );
+  summary.node_version = node.value( "version", "" );
+  summary.node_id = source.value( "node_id", "" );
+  summary.storage_layout = source.value( "storage_layout", "" );
+  summary.file_count = snapshot.value( "file_count", inventory_file_count );
+  summary.object_count = snapshot.value( "object_count", 0ULL );
+  summary.total_bytes = snapshot.value( "total_bytes", 0ULL );
+  summary.restore_space = estimate_restore_space(
+    sizes.value( "restored_database_bytes", 0ULL ),
+    sizes.value( "runtime_files_bytes", 0ULL ),
+    sizes.value( "object_download_bytes", 0ULL ),
+    sizes.value( "archive_bytes", 0ULL ),
+    false,
+    0 );
+  summary.snapshot_complete = std::filesystem::exists( snapshot_dir / "COMPLETE" );
+  summary.latest = !latest_backup_id.empty() && summary.backup_id == latest_backup_id;
+  return summary;
+}
+
 void write_file_atomic( const std::filesystem::path& path, const std::string& content )
 {
   std::filesystem::create_directories( path.parent_path() );
@@ -703,18 +780,38 @@ RestoreSpaceCheck check_restore_space( const RestoreSpaceEstimate& estimate,
 RestorePreflightResult build_local_restore_preflight( const std::filesystem::path& repository_dir,
                                                       const std::filesystem::path& target_basedir )
 {
+  return build_local_restore_preflight( repository_dir, target_basedir, {} );
+}
+
+RestorePreflightResult build_local_restore_preflight( const std::filesystem::path& repository_dir,
+                                                      const std::filesystem::path& target_basedir,
+                                                      const std::string& requested_backup_id )
+{
   if( repository_dir.empty() )
     throw std::runtime_error( "local backup repository directory is required for restore preflight" );
   if( target_basedir.empty() )
     throw std::runtime_error( "target basedir is required for restore preflight" );
 
-  const auto latest_path = repository_dir / "latest.json";
-  const auto latest = nlohmann::json::parse( read_text_file( latest_path ) );
-  const auto backup_id = latest.at( "backup_id" ).get< std::string >();
-  const auto snapshot_rel = latest.value( "snapshot_dir", backup_id );
-  const auto snapshot_dir = repository_dir / "snapshots" / snapshot_rel;
-  const auto manifest_path = repository_dir / latest.value( "manifest", "snapshots/" + snapshot_rel + "/manifest.json" );
-  const auto files_path = repository_dir / latest.value( "files", "snapshots/" + snapshot_rel + "/files.json" );
+  std::string backup_id = requested_backup_id;
+  std::filesystem::path snapshot_dir;
+  std::filesystem::path manifest_path;
+  std::filesystem::path files_path;
+  if( backup_id.empty() )
+  {
+    const auto latest_path = repository_dir / "latest.json";
+    const auto latest = nlohmann::json::parse( read_text_file( latest_path ) );
+    backup_id = latest.at( "backup_id" ).get< std::string >();
+    const auto snapshot_rel = latest.value( "snapshot_dir", backup_id );
+    snapshot_dir = repository_dir / "snapshots" / snapshot_rel;
+    manifest_path = repository_dir / latest.value( "manifest", "snapshots/" + snapshot_rel + "/manifest.json" );
+    files_path = repository_dir / latest.value( "files", "snapshots/" + snapshot_rel + "/files.json" );
+  }
+  else
+  {
+    snapshot_dir = resolve_snapshot_dir( repository_dir, backup_id );
+    manifest_path = snapshot_dir / "manifest.json";
+    files_path = snapshot_dir / "files.json";
+  }
 
   const auto manifest = nlohmann::json::parse( read_text_file( manifest_path ) );
   const auto files = nlohmann::json::parse( read_text_file( files_path ) );
@@ -771,7 +868,15 @@ RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& re
                                                  const std::filesystem::path& target_basedir,
                                                  const std::filesystem::path& requested_staging_dir )
 {
-  auto preflight = build_local_restore_preflight( repository_dir, target_basedir );
+  return stage_local_restore_snapshot( repository_dir, target_basedir, {}, requested_staging_dir );
+}
+
+RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& repository_dir,
+                                                 const std::filesystem::path& target_basedir,
+                                                 const std::string& backup_id,
+                                                 const std::filesystem::path& requested_staging_dir )
+{
+  auto preflight = build_local_restore_preflight( repository_dir, target_basedir, backup_id );
   if( !preflight.ready_to_restore )
     throw std::runtime_error( "backup restore preflight did not pass: " + preflight.space_check.message );
 
@@ -847,6 +952,25 @@ RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& re
     std::filesystem::remove_all( partial_dir, cleanup_ec );
     throw;
   }
+}
+
+BackupSnapshotListResult list_local_backup_snapshots( const std::filesystem::path& repository_dir )
+{
+  if( repository_dir.empty() )
+    throw std::runtime_error( "local backup repository directory is required for backup listing" );
+
+  BackupSnapshotListResult result;
+  result.repository_dir = repository_dir;
+  result.latest_backup_id = read_latest_backup_id( repository_dir );
+
+  auto snapshots = completed_snapshot_dirs( repository_dir );
+  for( const auto& snapshot_dir: snapshots )
+    result.snapshots.push_back( read_snapshot_summary( repository_dir, snapshot_dir, result.latest_backup_id ) );
+
+  std::sort( result.snapshots.begin(), result.snapshots.end(), []( const auto& lhs, const auto& rhs ) {
+    return lhs.backup_id < rhs.backup_id;
+  } );
+  return result;
 }
 
 RestoreActivationResult activate_staged_restore_snapshot( const std::filesystem::path& staging_dir,
@@ -1097,6 +1221,74 @@ std::string local_snapshot_result_to_json( const LocalSnapshotResult& result )
   out << "    \"minimum_target_free_bytes\": " << result.restore_space.minimum_target_free_bytes << ",\n";
   out << "    \"recommended_target_free_bytes\": " << result.restore_space.recommended_target_free_bytes << "\n";
   out << "  }\n";
+  out << "}\n";
+  return out.str();
+}
+
+std::string backup_snapshot_list_result_to_text( const BackupSnapshotListResult& result )
+{
+  std::ostringstream out;
+  out << "Native backup snapshots\n";
+  out << "repository_dir: " << result.repository_dir.string() << "\n";
+  out << "latest_backup_id: " << result.latest_backup_id << "\n";
+  out << "snapshot_count: " << result.snapshots.size() << "\n";
+  for( const auto& snapshot: result.snapshots )
+  {
+    out << "- backup_id: " << snapshot.backup_id << "\n";
+    out << "  created_at: " << snapshot.created_at << "\n";
+    out << "  latest: " << json_bool( snapshot.latest ) << "\n";
+    out << "  complete: " << json_bool( snapshot.snapshot_complete ) << "\n";
+    out << "  node_id: " << snapshot.node_id << "\n";
+    out << "  node_version: " << snapshot.node_version << "\n";
+    out << "  storage_layout: " << snapshot.storage_layout << "\n";
+    out << "  file_count: " << snapshot.file_count << "\n";
+    out << "  object_count: " << snapshot.object_count << "\n";
+    out << "  total_bytes: " << snapshot.total_bytes << "\n";
+    out << "  minimum_target_free_bytes: " << snapshot.restore_space.minimum_target_free_bytes << "\n";
+    out << "  recommended_target_free_bytes: " << snapshot.restore_space.recommended_target_free_bytes << "\n";
+  }
+  return out.str();
+}
+
+std::string backup_snapshot_list_result_to_json( const BackupSnapshotListResult& result )
+{
+  std::ostringstream out;
+  out << "{\n";
+  out << "  \"repository_dir\": \"" << json_escape( result.repository_dir.string() ) << "\",\n";
+  out << "  \"latest_backup_id\": \"" << json_escape( result.latest_backup_id ) << "\",\n";
+  out << "  \"snapshot_count\": " << result.snapshots.size() << ",\n";
+  out << "  \"snapshots\": [\n";
+  for( std::size_t i = 0; i < result.snapshots.size(); ++i )
+  {
+    const auto& snapshot = result.snapshots[ i ];
+    out << "    {\n";
+    out << "      \"backup_id\": \"" << json_escape( snapshot.backup_id ) << "\",\n";
+    out << "      \"created_at\": \"" << json_escape( snapshot.created_at ) << "\",\n";
+    out << "      \"latest\": " << json_bool( snapshot.latest ) << ",\n";
+    out << "      \"complete\": " << json_bool( snapshot.snapshot_complete ) << ",\n";
+    out << "      \"node_id\": \"" << json_escape( snapshot.node_id ) << "\",\n";
+    out << "      \"node_version\": \"" << json_escape( snapshot.node_version ) << "\",\n";
+    out << "      \"storage_layout\": \"" << json_escape( snapshot.storage_layout ) << "\",\n";
+    out << "      \"repository_dir\": \"" << json_escape( snapshot.repository_dir.string() ) << "\",\n";
+    out << "      \"snapshot_dir\": \"" << json_escape( snapshot.snapshot_dir.string() ) << "\",\n";
+    out << "      \"manifest\": \"" << json_escape( snapshot.manifest_path.string() ) << "\",\n";
+    out << "      \"files\": \"" << json_escape( snapshot.files_path.string() ) << "\",\n";
+    out << "      \"file_count\": " << snapshot.file_count << ",\n";
+    out << "      \"object_count\": " << snapshot.object_count << ",\n";
+    out << "      \"total_bytes\": " << snapshot.total_bytes << ",\n";
+    out << "      \"restore_space\": {\n";
+    out << "        \"restored_database_bytes\": " << snapshot.restore_space.restored_database_bytes << ",\n";
+    out << "        \"runtime_files_bytes\": " << snapshot.restore_space.runtime_files_bytes << ",\n";
+    out << "        \"object_download_bytes\": " << snapshot.restore_space.object_download_bytes << ",\n";
+    out << "        \"minimum_target_free_bytes\": " << snapshot.restore_space.minimum_target_free_bytes << ",\n";
+    out << "        \"recommended_target_free_bytes\": " << snapshot.restore_space.recommended_target_free_bytes << "\n";
+    out << "      }\n";
+    out << "    }";
+    if( i + 1 != result.snapshots.size() )
+      out << ",";
+    out << "\n";
+  }
+  out << "  ]\n";
   out << "}\n";
   return out.str();
 }
