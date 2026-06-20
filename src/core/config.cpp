@@ -405,6 +405,10 @@ NodeConfig load_config( const std::filesystem::path& config_path,
           yaml_get< uint64_t >( public_restore, "timeout-seconds", cfg.backup.public_restore.timeout_seconds );
         cfg.backup.public_restore.retries =
           yaml_get< uint64_t >( public_restore, "retries", cfg.backup.public_restore.retries );
+        cfg.backup.public_restore.signature_required =
+          yaml_get< bool >( public_restore, "signature-required", cfg.backup.public_restore.signature_required );
+        cfg.backup.public_restore.signature_public_key_file =
+          yaml_get< std::string >( public_restore, "signature-public-key-file", cfg.backup.public_restore.signature_public_key_file );
       }
 
       if( auto admin = yaml_child( b, "admin" ); admin.IsDefined() )

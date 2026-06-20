@@ -567,6 +567,9 @@ void write_observer_config_for_public_restore( const std::filesystem::path& conf
   out << "    require-https: " << ( cfg.backup.public_restore.require_https ? "true" : "false" ) << "\n";
   out << "    timeout-seconds: " << cfg.backup.public_restore.timeout_seconds << "\n";
   out << "    retries: " << cfg.backup.public_restore.retries << "\n";
+  out << "    signature-required: " << ( cfg.backup.public_restore.signature_required ? "true" : "false" ) << "\n";
+  if( !cfg.backup.public_restore.signature_public_key_file.empty() )
+    out << "    signature-public-key-file: " << cfg.backup.public_restore.signature_public_key_file << "\n";
 }
 
 } // anonymous namespace

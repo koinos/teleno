@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -22,6 +23,7 @@
 #include <nlohmann/json.hpp>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/pem.h>
 
 namespace koinos::node::backup {
 namespace {
@@ -144,6 +146,66 @@ std::string sha256_file( const std::filesystem::path& path )
     throw std::runtime_error( "failed to finalize SHA-256 for file: " + path.string() );
 
   return bytes_to_hex( digest, digest_size );
+}
+
+std::vector< unsigned char > hex_to_bytes( const std::string& value )
+{
+  if( value.size() % 2 != 0 )
+    throw std::runtime_error( "hex value has odd length" );
+  std::vector< unsigned char > out;
+  out.reserve( value.size() / 2 );
+  for( std::size_t i = 0; i < value.size(); i += 2 )
+  {
+    const auto byte = value.substr( i, 2 );
+    char* end = nullptr;
+    const auto parsed = std::strtoul( byte.c_str(), &end, 16 );
+    if( !end || *end != '\0' || parsed > 0xff )
+      throw std::runtime_error( "invalid hex byte: " + byte );
+    out.push_back( static_cast< unsigned char >( parsed ) );
+  }
+  return out;
+}
+
+std::string canonical_signature_payload( const nlohmann::json& payload )
+{
+  if( !payload.is_object() )
+    throw std::runtime_error( "public bootstrap signature payload must be a JSON object" );
+  return payload.dump();
+}
+
+void verify_ed25519_signature( const std::filesystem::path& public_key_file,
+                               const std::string& message,
+                               const std::string& signature_hex )
+{
+  if( public_key_file.empty() )
+    throw std::runtime_error( "public bootstrap signature verification requires signature-public-key-file" );
+  const auto public_key_pem = read_file( public_key_file );
+  BIO* raw_bio = BIO_new_mem_buf( public_key_pem.data(), static_cast< int >( public_key_pem.size() ) );
+  if( !raw_bio )
+    throw std::runtime_error( "failed to allocate public bootstrap key BIO" );
+  std::unique_ptr< BIO, decltype( &BIO_free ) > bio( raw_bio, BIO_free );
+
+  EVP_PKEY* raw_key = PEM_read_bio_PUBKEY( bio.get(), nullptr, nullptr, nullptr );
+  if( !raw_key )
+    throw std::runtime_error( "failed to parse public bootstrap Ed25519 public key: " + public_key_file.string() );
+  std::unique_ptr< EVP_PKEY, decltype( &EVP_PKEY_free ) > key( raw_key, EVP_PKEY_free );
+
+  EVP_MD_CTX* raw_ctx = EVP_MD_CTX_new();
+  if( !raw_ctx )
+    throw std::runtime_error( "failed to allocate public bootstrap signature context" );
+  std::unique_ptr< EVP_MD_CTX, decltype( &EVP_MD_CTX_free ) > ctx( raw_ctx, EVP_MD_CTX_free );
+
+  if( EVP_DigestVerifyInit( ctx.get(), nullptr, nullptr, nullptr, key.get() ) != 1 )
+    throw std::runtime_error( "failed to initialize public bootstrap Ed25519 verification" );
+
+  const auto signature = hex_to_bytes( signature_hex );
+  const auto ok = EVP_DigestVerify( ctx.get(),
+                                    signature.data(),
+                                    signature.size(),
+                                    reinterpret_cast< const unsigned char* >( message.data() ),
+                                    message.size() );
+  if( ok != 1 )
+    throw std::runtime_error( "public bootstrap signature verification failed" );
 }
 
 uint64_t available_space_bytes( std::filesystem::path path )
@@ -330,6 +392,11 @@ public:
     return _config.base_url;
   }
 
+  const BackupPublicRestoreConfig& config() const
+  {
+    return _config;
+  }
+
   uint64_t retry_count() const
   {
     return _retry_count;
@@ -361,6 +428,25 @@ public:
         ++_retry_count;
         std::this_thread::sleep_for( std::chrono::milliseconds( 250 * attempt ) );
       }
+    }
+  }
+
+  bool try_download_relative( const std::string& relative,
+                              const std::filesystem::path& destination,
+                              const PublicRestoreOptions& options )
+  {
+    try
+    {
+      download_relative( relative, destination, options );
+      return true;
+    }
+    catch( const std::exception& )
+    {
+      if( options.cancel_requested && options.cancel_requested() )
+        throw;
+      std::error_code ec;
+      std::filesystem::remove( destination, ec );
+      return false;
     }
   }
 
@@ -445,6 +531,7 @@ private:
   {
     const std::filesystem::path candidates[] = {
       "/etc/ssl/cert.pem",
+      "/etc/ssl/certs/ca-certificates.crt",
       "/opt/homebrew/etc/openssl@3/cert.pem",
       "/opt/homebrew/etc/ca-certificates/cert.pem",
       "/usr/local/etc/openssl@3/cert.pem",
@@ -530,10 +617,15 @@ struct PublicSnapshotMetadata
   std::string snapshot_dir_name;
   std::string manifest_rel;
   std::string files_rel;
+  std::string public_metadata_rel;
+  std::string signature_rel;
   std::filesystem::path manifest_tmp;
   std::filesystem::path files_tmp;
+  std::filesystem::path public_metadata_tmp;
+  std::filesystem::path signature_tmp;
   std::filesystem::path complete_tmp;
   bool latest = false;
+  bool signature_verified = false;
 };
 
 void cache_downloaded_snapshot_metadata( const std::filesystem::path& repository_dir,
@@ -576,6 +668,83 @@ std::string latest_json_for_backup_id( const std::string& backup_id )
   return out.str();
 }
 
+void verify_public_bootstrap_signature( PublicSnapshotMetadata& metadata,
+                                        PublicBackupClient& client,
+                                        const std::filesystem::path& latest_tmp,
+                                        uint64_t& metadata_file_count,
+                                        const PublicRestoreOptions& options )
+{
+  const auto& cfg = client.config();
+  const bool should_attempt_signature = cfg.signature_required || !cfg.signature_public_key_file.empty();
+  if( !should_attempt_signature )
+    return;
+
+  if( metadata.public_metadata_rel.empty() )
+    metadata.public_metadata_rel = "snapshots/" + metadata.snapshot_dir_name + "/public-bootstrap.json";
+  if( metadata.signature_rel.empty() )
+    metadata.signature_rel = "snapshots/" + metadata.snapshot_dir_name + "/public-bootstrap-signature.json";
+  validate_relative_path( metadata.public_metadata_rel );
+  validate_relative_path( metadata.signature_rel );
+
+  metadata.public_metadata_tmp = metadata.manifest_tmp.parent_path() / "public-bootstrap.json";
+  metadata.signature_tmp = metadata.manifest_tmp.parent_path() / "public-bootstrap-signature.json";
+
+  const auto public_metadata_ok = cfg.signature_required
+    ? ( client.download_relative( metadata.public_metadata_rel, metadata.public_metadata_tmp, options ), true )
+    : client.try_download_relative( metadata.public_metadata_rel, metadata.public_metadata_tmp, options );
+  if( !public_metadata_ok )
+    return;
+  ++metadata_file_count;
+
+  const auto signature_ok = cfg.signature_required
+    ? ( client.download_relative( metadata.signature_rel, metadata.signature_tmp, options ), true )
+    : client.try_download_relative( metadata.signature_rel, metadata.signature_tmp, options );
+  if( !signature_ok )
+    return;
+  ++metadata_file_count;
+
+  const auto envelope = nlohmann::json::parse( read_file( metadata.signature_tmp ) );
+  if( envelope.value( "format", std::string{} ) != "teleno-public-bootstrap-signature" )
+    throw std::runtime_error( "public bootstrap signature has unexpected format" );
+  if( envelope.value( "version", 0 ) != 1 )
+    throw std::runtime_error( "public bootstrap signature has unsupported version" );
+  if( envelope.value( "algorithm", std::string{} ) != "ed25519" )
+    throw std::runtime_error( "public bootstrap signature must use ed25519" );
+  const auto payload = envelope.at( "payload" );
+  const auto signature_hex = envelope.at( "signature_hex" ).get< std::string >();
+  verify_ed25519_signature( cfg.signature_public_key_file,
+                            canonical_signature_payload( payload ),
+                            signature_hex );
+
+  if( payload.value( "backup_id", std::string{} ) != metadata.backup_id )
+    throw std::runtime_error( "public bootstrap signature backup_id mismatch" );
+  if( !cfg.network.empty() && payload.value( "network", std::string{} ) != cfg.network )
+    throw std::runtime_error( "public bootstrap signature network mismatch" );
+  if( !latest_tmp.empty()
+      && payload.value( "latest_sha256", std::string{} ) != sha256_file( latest_tmp ) )
+    throw std::runtime_error( "public bootstrap signature latest.json hash mismatch" );
+  if( payload.value( "manifest_sha256", std::string{} ) != sha256_file( metadata.manifest_tmp ) )
+    throw std::runtime_error( "public bootstrap signature manifest hash mismatch" );
+  if( payload.value( "files_sha256", std::string{} ) != sha256_file( metadata.files_tmp ) )
+    throw std::runtime_error( "public bootstrap signature files hash mismatch" );
+  if( payload.value( "public_metadata_sha256", std::string{} ) != sha256_file( metadata.public_metadata_tmp ) )
+    throw std::runtime_error( "public bootstrap signature metadata hash mismatch" );
+
+  const auto manifest = nlohmann::json::parse( read_file( metadata.manifest_tmp ) );
+  const auto snapshot = manifest.at( "snapshot" );
+  if( payload.value( "object_count", 0ULL ) != snapshot.value( "object_count", 0ULL ) )
+    throw std::runtime_error( "public bootstrap signature object_count mismatch" );
+  if( payload.value( "total_bytes", 0ULL ) != snapshot.value( "total_bytes", 0ULL ) )
+    throw std::runtime_error( "public bootstrap signature total_bytes mismatch" );
+
+  const auto public_metadata = nlohmann::json::parse( read_file( metadata.public_metadata_tmp ) );
+  if( public_metadata.value( "backup_id", std::string{} ) != metadata.backup_id )
+    throw std::runtime_error( "public bootstrap metadata backup_id mismatch" );
+  if( public_metadata.value( "network", std::string{} ) != payload.value( "network", std::string{} ) )
+    throw std::runtime_error( "public bootstrap metadata network mismatch" );
+  metadata.signature_verified = true;
+}
+
 PublicSnapshotMetadata fetch_public_metadata( const std::filesystem::path& repository_dir,
                                               PublicBackupClient& client,
                                               const std::string& requested_backup_id,
@@ -607,6 +776,10 @@ PublicSnapshotMetadata fetch_public_metadata( const std::filesystem::path& repos
       metadata.snapshot_dir_name = latest.value( "snapshot_dir", metadata.backup_id );
       metadata.manifest_rel = latest.value( "manifest", "snapshots/" + metadata.snapshot_dir_name + "/manifest.json" );
       metadata.files_rel = latest.value( "files", "snapshots/" + metadata.snapshot_dir_name + "/files.json" );
+      metadata.public_metadata_rel =
+        latest.value( "public_metadata", "snapshots/" + metadata.snapshot_dir_name + "/public-bootstrap.json" );
+      metadata.signature_rel =
+        latest.value( "signature", "snapshots/" + metadata.snapshot_dir_name + "/public-bootstrap-signature.json" );
       metadata.latest = true;
     }
     else
@@ -616,6 +789,8 @@ PublicSnapshotMetadata fetch_public_metadata( const std::filesystem::path& repos
       metadata.snapshot_dir_name = requested_backup_id;
       metadata.manifest_rel = "snapshots/" + metadata.snapshot_dir_name + "/manifest.json";
       metadata.files_rel = "snapshots/" + metadata.snapshot_dir_name + "/files.json";
+      metadata.public_metadata_rel = "snapshots/" + metadata.snapshot_dir_name + "/public-bootstrap.json";
+      metadata.signature_rel = "snapshots/" + metadata.snapshot_dir_name + "/public-bootstrap-signature.json";
     }
 
     validate_backup_id_fragment( metadata.backup_id );
@@ -623,6 +798,8 @@ PublicSnapshotMetadata fetch_public_metadata( const std::filesystem::path& repos
     validate_relative_path( metadata.snapshot_dir_name );
     validate_relative_path( metadata.manifest_rel );
     validate_relative_path( metadata.files_rel );
+    validate_relative_path( metadata.public_metadata_rel );
+    validate_relative_path( metadata.signature_rel );
 
     const auto snapshot_tmp = metadata_root / "snapshot";
     std::filesystem::create_directories( snapshot_tmp );
@@ -638,6 +815,8 @@ PublicSnapshotMetadata fetch_public_metadata( const std::filesystem::path& repos
     client.download_relative( "snapshots/" + metadata.snapshot_dir_name + "/COMPLETE", metadata.complete_tmp, options );
     emit_progress( options, "public-restore-metadata-snapshot", metadata.backup_id, 3, 3, 1, 3, 0 );
     metadata_file_count += 3;
+
+    verify_public_bootstrap_signature( metadata, client, latest_tmp, metadata_file_count, options );
 
     const auto manifest = nlohmann::json::parse( read_file( metadata.manifest_tmp ) );
     const auto manifest_backup_id = manifest.value( "backup_id", metadata.backup_id );
@@ -798,6 +977,7 @@ PublicRestoreFetchResult fetch_public_restore_snapshot(
   result.target_basedir = target_basedir;
   result.public_base_url = client.base_url();
   result.transport = public_restore.base_url.rfind( "file://", 0 ) == 0 ? "file" : "public-http";
+  result.signature_required = public_restore.signature_required;
 
   const auto selected_backup_id = backup_id == "latest" ? std::string{} : backup_id;
   uint64_t metadata_count = 0;
@@ -809,6 +989,7 @@ PublicRestoreFetchResult fetch_public_restore_snapshot(
   result.metadata_fetched = true;
   result.metadata_file_count = metadata_count;
   result.backup_id = metadata.backup_id;
+  result.signature_verified = metadata.signature_verified;
 
   result.preflight = build_local_restore_preflight(
     repository_dir,
@@ -845,6 +1026,8 @@ std::string public_restore_fetch_result_to_text( const PublicRestoreFetchResult&
   out << "transport: " << result.transport << "\n";
   out << "metadata_fetched: " << ( result.metadata_fetched ? "true" : "false" ) << "\n";
   out << "metadata_file_count: " << result.metadata_file_count << "\n";
+  out << "signature_required: " << ( result.signature_required ? "true" : "false" ) << "\n";
+  out << "signature_verified: " << ( result.signature_verified ? "true" : "false" ) << "\n";
   out << "object_file_count: " << result.object_file_count << "\n";
   out << "object_bytes: " << result.object_bytes << "\n";
   out << "repository_available_bytes: " << result.repository_available_bytes << "\n";
@@ -870,6 +1053,8 @@ std::string public_restore_fetch_result_to_json( const PublicRestoreFetchResult&
   out << "  \"transport\": \"" << json_escape( result.transport ) << "\",\n";
   out << "  \"metadata_fetched\": " << ( result.metadata_fetched ? "true" : "false" ) << ",\n";
   out << "  \"metadata_file_count\": " << result.metadata_file_count << ",\n";
+  out << "  \"signature_required\": " << ( result.signature_required ? "true" : "false" ) << ",\n";
+  out << "  \"signature_verified\": " << ( result.signature_verified ? "true" : "false" ) << ",\n";
   out << "  \"object_file_count\": " << result.object_file_count << ",\n";
   out << "  \"object_bytes\": " << result.object_bytes << ",\n";
   out << "  \"repository_available_bytes\": " << result.repository_available_bytes << ",\n";

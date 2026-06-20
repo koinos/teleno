@@ -28,6 +28,8 @@ struct PublicRestoreFetchResult
   bool metadata_fetched = false;
   bool objects_fetched = false;
   bool ready_to_stage = false;
+  bool signature_required = false;
+  bool signature_verified = false;
   std::string download_skipped_reason;
 };
 

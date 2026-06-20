@@ -110,6 +110,8 @@ backup:
     require-https: true
     timeout-seconds: 45
     retries: 4
+    signature-required: true
+    signature-public-key-file: /tmp/teleno-public-bootstrap.pub
   admin:
     enabled: true
     listen: 127.0.0.1:18089
@@ -148,6 +150,8 @@ backup:
     assert( cfg.backup.public_restore.require_https );
     assert( cfg.backup.public_restore.timeout_seconds == 45 );
     assert( cfg.backup.public_restore.retries == 4 );
+    assert( cfg.backup.public_restore.signature_required );
+    assert( cfg.backup.public_restore.signature_public_key_file == "/tmp/teleno-public-bootstrap.pub" );
     assert( cfg.backup.admin.enabled );
     assert( cfg.backup.admin.listen == "127.0.0.1:18089" );
     assert( cfg.backup.admin.token_file == "/tmp/teleno-backup-admin-token" );

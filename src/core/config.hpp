@@ -65,6 +65,8 @@ struct BackupPublicRestoreConfig
   bool require_https = true;
   uint64_t timeout_seconds = 30;
   uint64_t retries = 3;
+  bool signature_required = false;
+  std::string signature_public_key_file;
 };
 
 struct BackupAdminConfig
