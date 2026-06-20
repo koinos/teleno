@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIRM_VALUE="I_UNDERSTAND_MAINNET_BLOCK_PRODUCTION"
+BASEDIR="${TELENO_BASEDIR:-/data}"
+CONFIG_FILE="${TELENO_CONFIG:-$BASEDIR/config.yml}"
+TEMPLATE_FILE="${TELENO_CONFIG_TEMPLATE:-/usr/local/share/teleno/config/prodnet-docker-producer.yml}"
+PRODUCER_ADDRESS="${TELENO_PRODUCER_ADDRESS:-}"
+PRODUCER_KEY_FILE="${TELENO_PRODUCER_KEY_FILE:-$BASEDIR/block_producer/private.key}"
+JSONRPC_LISTEN="${TELENO_JSONRPC_LISTEN:-0.0.0.0:8080}"
+P2P_LISTEN="${TELENO_P2P_LISTEN:-/ip4/0.0.0.0/tcp/8888}"
+LOG_LEVEL="${TELENO_LOG_LEVEL:-info}"
+
+die() {
+  echo "Fatal: $*" >&2
+  exit 1
+}
+
+require_confirmation() {
+  if [[ "${TELENO_ENABLE_PROD_PRODUCER:-}" != "$CONFIRM_VALUE" ]]; then
+    die "set TELENO_ENABLE_PROD_PRODUCER=$CONFIRM_VALUE to start prodnet block production"
+  fi
+}
+
+write_initial_config() {
+  [[ -f "$TEMPLATE_FILE" ]] || die "missing config template: $TEMPLATE_FILE"
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+  cp "$TEMPLATE_FILE" "$CONFIG_FILE"
+}
+
+patch_config() {
+  python3 - "$CONFIG_FILE" "$PRODUCER_ADDRESS" "$PRODUCER_KEY_FILE" <<'PY'
+import pathlib
+import sys
+
+config = pathlib.Path(sys.argv[1])
+producer = sys.argv[2]
+key_file = sys.argv[3]
+text = config.read_text()
+lines = text.splitlines()
+out = []
+in_block_producer = False
+seen_producer = False
+seen_key = False
+for line in lines:
+    stripped = line.strip()
+    if line and not line.startswith((" ", "\t")):
+        if in_block_producer and not seen_producer:
+            out.append(f"  producer: {producer}")
+        if in_block_producer and not seen_key:
+            out.append(f"  private-key-file: {key_file}")
+        in_block_producer = stripped == "block_producer:"
+        seen_producer = False
+        seen_key = False
+        out.append(line)
+        continue
+    if in_block_producer and stripped.startswith("producer:"):
+        out.append(f"  producer: {producer}")
+        seen_producer = True
+    elif in_block_producer and stripped.startswith("private-key-file:"):
+        out.append(f"  private-key-file: {key_file}")
+        seen_key = True
+    else:
+        out.append(line)
+if in_block_producer and not seen_producer:
+    out.append(f"  producer: {producer}")
+if in_block_producer and not seen_key:
+    out.append(f"  private-key-file: {key_file}")
+config.write_text("\n".join(out) + "\n")
+PY
+}
+
+require_confirmation
+[[ "$BASEDIR" == "/data" || -d "$BASEDIR" ]] || die "basedir does not exist: $BASEDIR"
+[[ "$BASEDIR" != "/" ]] || die "refusing to use / as basedir"
+[[ -n "$PRODUCER_ADDRESS" ]] || die "TELENO_PRODUCER_ADDRESS is required"
+
+mkdir -p "$BASEDIR/block_producer"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  write_initial_config
+fi
+patch_config
+
+if [[ ! -f "$PRODUCER_KEY_FILE" ]]; then
+  die "producer private key is missing: $PRODUCER_KEY_FILE; mount or copy the registered prod producer hot key before starting"
+fi
+chmod 600 "$PRODUCER_KEY_FILE" 2>/dev/null || true
+
+if [[ -f "$BASEDIR/.backup-just-restored" && "${TELENO_ALLOW_RESTORED_PRODUCER_START:-}" != "I_UNDERSTAND_RESTORED_FIRST_START" ]]; then
+  die "restore marker exists at $BASEDIR/.backup-just-restored; start once as observer or set TELENO_ALLOW_RESTORED_PRODUCER_START=I_UNDERSTAND_RESTORED_FIRST_START"
+fi
+
+exec teleno_node \
+  --basedir "$BASEDIR" \
+  --config "$CONFIG_FILE" \
+  --jsonrpc-listen "$JSONRPC_LISTEN" \
+  --p2p-listen "$P2P_LISTEN" \
+  --log-level "$LOG_LEVEL" \
+  --enable block_producer p2p jsonrpc chain block_store mempool contract_meta_store transaction_store account_history \
+  "$@"

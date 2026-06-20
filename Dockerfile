@@ -41,7 +41,8 @@ RUN apt-get update \
 WORKDIR /src
 COPY . .
 
-RUN chmod +x scripts/build-cpp-libp2p-koinos.sh \
+RUN --mount=type=cache,target=/opt/teleno-deps,sharing=locked \
+    chmod +x scripts/build-cpp-libp2p-koinos.sh \
     scripts/build-rocksdb-zstd.sh \
     scripts/build-zstd-static.sh \
     scripts/build-gmp-static.sh \
@@ -64,6 +65,7 @@ RUN apt-get update \
       ca-certificates \
       libgcc-s1 \
       libstdc++6 \
+      python3 \
       tzdata \
       zlib1g \
     && rm -rf /var/lib/apt/lists/* \
@@ -72,7 +74,10 @@ RUN apt-get update \
 COPY --from=build /out/teleno_node /usr/local/bin/teleno_node
 COPY config/testnet-public-bootstrap-observer.yml /usr/local/share/teleno/config/testnet-public-bootstrap-observer.yml
 COPY config/testnet-public-bootstrap-observer.container.yml /usr/local/share/teleno/config/testnet-public-bootstrap-observer.container.yml
+COPY config/prodnet-docker-producer.yml /usr/local/share/teleno/config/prodnet-docker-producer.yml
 COPY config/public-bootstrap/ /usr/local/share/teleno/public-bootstrap/
+COPY docker/teleno-prod-producer /usr/local/bin/teleno-prod-producer
+RUN chmod +x /usr/local/bin/teleno-prod-producer
 
 LABEL org.opencontainers.image.title="Teleno Node" \
       org.opencontainers.image.description="Linux container image for the monolithic teleno_node runtime" \

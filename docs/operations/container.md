@@ -86,6 +86,60 @@ docker run --rm \
   --backup-list-remote
 ```
 
+## Fast Prodnet Producer Launch
+
+The image includes a guarded helper for prodnet block production:
+
+```text
+/usr/local/bin/teleno-prod-producer
+```
+
+It is intentionally not the default entrypoint. It refuses to start unless the operator explicitly confirms mainnet production, provides a producer address, and mounts an existing registered producer hot key.
+
+Prepare the host basedir:
+
+```bash
+mkdir -p "$HOME/teleno-prodnet/basedir/block_producer"
+install -m 600 /path/to/registered-prod-private.key \
+  "$HOME/teleno-prodnet/basedir/block_producer/private.key"
+```
+
+Start the prodnet producer:
+
+```bash
+docker run -d --name teleno-prod-producer \
+  --restart unless-stopped \
+  -e TELENO_ENABLE_PROD_PRODUCER=I_UNDERSTAND_MAINNET_BLOCK_PRODUCTION \
+  -e TELENO_PRODUCER_ADDRESS="<prodnet-producer-address>" \
+  -v "$HOME/teleno-prodnet/basedir:/data" \
+  -p 127.0.0.1:8080:8080 \
+  -p 8888:8888 \
+  --entrypoint teleno-prod-producer \
+  ghcr.io/pgarciagon/teleno-node:beta
+```
+
+Check the node from the Linux host:
+
+```bash
+curl -sS http://127.0.0.1:8080/ \
+  -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"chain.get_head_info","params":{}}'
+```
+
+Tail logs:
+
+```bash
+docker logs -f teleno-prod-producer
+```
+
+Stop it:
+
+```bash
+docker stop teleno-prod-producer
+```
+
+The helper writes `/data/config.yml` from the bundled prodnet template when no config exists, then patches only the producer address and private-key path. It does not create a missing producer private key for prodnet. If the key is absent, startup fails so the operator does not accidentally run with an unregistered hot key.
+
 ## Publish From GitHub
 
 The workflow `.github/workflows/teleno-node-container.yml` builds and smoke-tests the image on Ubuntu 24.04. It publishes package tags to GitHub Container Registry on:

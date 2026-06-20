@@ -23,8 +23,10 @@ on:
       - .dockerignore
       - .github/workflows/teleno-node-container.yml
       - config/public-bootstrap/**
+      - config/prodnet-docker-producer.yml
       - config/testnet-public-bootstrap-observer.container.yml
       - config/testnet-public-bootstrap-observer.yml
+      - docker/**
       - node/teleno-node/**
       - scripts/build-cpp-libp2p-koinos.sh
       - scripts/build-gmp-static.sh
@@ -37,8 +39,10 @@ on:
       - .dockerignore
       - .github/workflows/teleno-node-container.yml
       - config/public-bootstrap/**
+      - config/prodnet-docker-producer.yml
       - config/testnet-public-bootstrap-observer.container.yml
       - config/testnet-public-bootstrap-observer.yml
+      - docker/**
       - node/teleno-node/**
       - scripts/build-cpp-libp2p-koinos.sh
       - scripts/build-gmp-static.sh
@@ -110,6 +114,8 @@ jobs:
           docker run --rm teleno-node:ci --version
           docker run --rm teleno-node:ci --help >/tmp/teleno-node-help.txt
           grep -q -- "--backup-public-list" /tmp/teleno-node-help.txt
+          docker run --rm --entrypoint teleno-prod-producer teleno-node:ci 2>/tmp/teleno-prod-producer-guard.txt && exit 1 || true
+          grep -q "TELENO_ENABLE_PROD_PRODUCER=I_UNDERSTAND_MAINNET_BLOCK_PRODUCTION" /tmp/teleno-prod-producer-guard.txt
 
       - name: Login to GitHub Container Registry
         if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.event.inputs.push_image == 'true')
