@@ -124,6 +124,14 @@ std::string BackupService::config_summary_json() const
   out << "      \"listen\": \"" << json_escape( _cfg.backup.admin.listen ) << "\",\n";
   out << "      \"token_file_configured\": " << ( _cfg.backup.admin.token_file.empty() ? "false" : "true" ) << ",\n";
   out << "      \"jobs\": " << _cfg.backup.admin.jobs << "\n";
+  out << "    },\n";
+  out << "    \"public_restore\": {\n";
+  out << "      \"enabled\": " << ( _cfg.backup.public_restore.enabled ? "true" : "false" ) << ",\n";
+  out << "      \"base_url\": \"" << json_escape( _cfg.backup.public_restore.base_url ) << "\",\n";
+  out << "      \"network\": \"" << json_escape( _cfg.backup.public_restore.network ) << "\",\n";
+  out << "      \"require_https\": " << ( _cfg.backup.public_restore.require_https ? "true" : "false" ) << ",\n";
+  out << "      \"timeout_seconds\": " << _cfg.backup.public_restore.timeout_seconds << ",\n";
+  out << "      \"retries\": " << _cfg.backup.public_restore.retries << "\n";
   out << "    }\n";
   out << "  }\n";
   out << "}\n";
@@ -145,6 +153,15 @@ BackupSnapshotListResult BackupService::list_remote_snapshots()
     _cfg.backup.remote );
 }
 
+BackupSnapshotListResult BackupService::list_public_snapshots( const std::string& backup_id )
+{
+  validate_public_restore_request( "public backup list" );
+  return list_public_backup_snapshots(
+    _cfg.backup.local.directory,
+    _cfg.backup.public_restore,
+    backup_id == "latest" ? std::string{} : backup_id );
+}
+
 RestorePreflightResult BackupService::restore_preflight( const std::string& backup_id ) const
 {
   validate_local_repository_request( "restore preflight" );
@@ -152,6 +169,20 @@ RestorePreflightResult BackupService::restore_preflight( const std::string& back
     _cfg.backup.local.directory,
     _basedir,
     backup_id == "latest" ? std::string{} : backup_id );
+}
+
+RestorePreflightResult BackupService::public_restore_preflight( const std::string& backup_id )
+{
+  const auto selected_backup_id = backup_id == "latest" ? std::string{} : backup_id;
+  validate_public_restore_request( "public restore preflight" );
+  (void)list_public_backup_snapshots(
+    _cfg.backup.local.directory,
+    _cfg.backup.public_restore,
+    selected_backup_id );
+  return build_local_restore_preflight(
+    _cfg.backup.local.directory,
+    _basedir,
+    selected_backup_id );
 }
 
 void BackupService::validate_local_snapshot_request() const
@@ -190,6 +221,15 @@ void BackupService::validate_remote_repository_request( const std::string& opera
     throw std::invalid_argument( operation_name + " requires backup.remote.directory" );
   if( !_cfg.backup.ssh.enabled )
     throw std::invalid_argument( operation_name + " requires backup.ssh.enabled=true" );
+}
+
+void BackupService::validate_public_restore_request( const std::string& operation_name ) const
+{
+  validate_local_repository_request( operation_name );
+  if( !_cfg.backup.public_restore.enabled )
+    throw std::invalid_argument( operation_name + " requires backup.public-restore.enabled=true" );
+  if( _cfg.backup.public_restore.base_url.empty() )
+    throw std::invalid_argument( operation_name + " requires backup.public-restore.base-url" );
 }
 
 std::string BackupService::next_operation_id() const
@@ -524,6 +564,39 @@ void BackupService::execute_restore_fetch_operation( const std::string& backup_i
   }
 }
 
+void BackupService::execute_public_restore_fetch_operation( const std::string& backup_id )
+{
+  try
+  {
+    throw_if_cancel_requested();
+    update_operation_progress( "public-restore-fetch", "fetching public backup restore data" );
+    auto fetch = fetch_public_restore_snapshot(
+      _cfg.backup.local.directory,
+      _basedir,
+      _cfg.backup.public_restore,
+      backup_id,
+      operation_public_restore_options() );
+    {
+      std::lock_guard< std::mutex > lock( _mutex );
+      _status.has_public_restore_fetch = true;
+      _status.public_restore_fetch = fetch;
+      _status.has_restore_preflight = true;
+      _status.restore_preflight = fetch.preflight;
+    }
+    finish_operation_success( fetch.ready_to_stage
+                                ? "public backup restore data fetched and ready to stage"
+                                : "public backup restore data fetched but not ready to stage" );
+  }
+  catch( const std::exception& e )
+  {
+    finish_operation_failure( e.what() );
+  }
+  catch( ... )
+  {
+    finish_operation_failure( "unknown public restore fetch failure" );
+  }
+}
+
 SftpTransferOptions BackupService::operation_sftp_transfer_options()
 {
   SftpTransferOptions options;
@@ -537,6 +610,30 @@ SftpTransferOptions BackupService::operation_sftp_transfer_options()
       progress.phase.empty() ? std::string( "remote SFTP transfer in progress" )
                              : std::string( "remote SFTP transfer phase: " ) + progress.phase,
       &progress );
+  };
+  return options;
+}
+
+PublicRestoreOptions BackupService::operation_public_restore_options()
+{
+  PublicRestoreOptions options;
+  options.cancel_requested = [this]() {
+    std::lock_guard< std::mutex > lock( _mutex );
+    return _status.cancel_requested;
+  };
+  options.progress = [this]( const PublicRestoreProgress& progress ) {
+    SftpTransferProgress normalized;
+    normalized.phase = progress.phase;
+    normalized.completed_batches = progress.completed_batches;
+    normalized.total_batches = progress.total_batches;
+    normalized.attempt = progress.attempt;
+    normalized.file_count = progress.file_count;
+    normalized.total_bytes = progress.total_bytes;
+    update_operation_progress(
+      progress.phase,
+      progress.phase.empty() ? std::string( "public restore transfer in progress" )
+                             : std::string( "public restore transfer phase: " ) + progress.phase,
+      &normalized );
   };
   return options;
 }
@@ -708,6 +805,42 @@ BackupOperationStatus BackupService::start_restore_fetch_async( const std::strin
   return status();
 }
 
+BackupOperationStatus BackupService::start_public_restore_fetch_async( const std::string& backup_id )
+{
+  join_finished_worker();
+  validate_public_restore_request( "public restore fetch" );
+
+  const auto operation_id = next_operation_id( "public-restore-fetch" );
+  begin_operation( operation_id,
+                   "public-restore-fetch",
+                   "prepare",
+                   "preparing public backup restore fetch",
+                   {} );
+
+  {
+    std::lock_guard< std::mutex > lock( _mutex );
+    _worker_active = true;
+  }
+
+  try
+  {
+    _worker = std::thread( [this, backup_id]() {
+      execute_public_restore_fetch_operation( backup_id );
+      std::lock_guard< std::mutex > lock( _mutex );
+      _worker_active = false;
+    } );
+  }
+  catch( const std::exception& e )
+  {
+    finish_operation_failure( e.what() );
+    std::lock_guard< std::mutex > lock( _mutex );
+    _worker_active = false;
+    throw;
+  }
+
+  return status();
+}
+
 BackupOperationStatus BackupService::cancel_current_operation()
 {
   std::lock_guard< std::mutex > lock( _mutex );
@@ -842,6 +975,7 @@ std::string backup_operation_status_to_text( const BackupOperationStatus& status
   }
   out << "has_remote_upload: " << ( status.has_remote_upload ? "true" : "false" ) << "\n";
   out << "has_restore_fetch: " << ( status.has_restore_fetch ? "true" : "false" ) << "\n";
+  out << "has_public_restore_fetch: " << ( status.has_public_restore_fetch ? "true" : "false" ) << "\n";
   out << "delete_result_count: " << status.delete_results.size() << "\n";
   return out.str();
 }
@@ -869,6 +1003,7 @@ std::string backup_operation_status_to_json( const BackupOperationStatus& status
   out << "  \"has_snapshot\": " << ( status.has_snapshot ? "true" : "false" ) << ",\n";
   out << "  \"has_remote_upload\": " << ( status.has_remote_upload ? "true" : "false" ) << ",\n";
   out << "  \"has_restore_fetch\": " << ( status.has_restore_fetch ? "true" : "false" ) << ",\n";
+  out << "  \"has_public_restore_fetch\": " << ( status.has_public_restore_fetch ? "true" : "false" ) << ",\n";
   out << "  \"has_restore_preflight\": " << ( status.has_restore_preflight ? "true" : "false" ) << ",\n";
   out << "  \"has_restore_stage\": " << ( status.has_restore_stage ? "true" : "false" ) << ",\n";
   out << "  \"has_activation_request\": " << ( status.has_activation_request ? "true" : "false" ) << ",\n";
@@ -887,6 +1022,11 @@ std::string backup_operation_status_to_json( const BackupOperationStatus& status
   {
     out << ",\n";
     out << "  \"restore_fetch\": " << sftp_restore_fetch_result_to_json( status.restore_fetch );
+  }
+  if( status.has_public_restore_fetch )
+  {
+    out << ",\n";
+    out << "  \"public_restore_fetch\": " << public_restore_fetch_result_to_json( status.public_restore_fetch );
   }
   if( status.has_restore_preflight )
   {

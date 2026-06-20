@@ -171,6 +171,27 @@ target_link_libraries(
     PRIVATE
       nlohmann_json::nlohmann_json)
 
+# ── Public read-only bootstrap restore backend ──
+add_library(koinos_backup_public_restore_lib
+  backup/public_restore.cpp
+  backup/public_restore.hpp)
+
+target_include_directories(
+  koinos_backup_public_restore_lib
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+
+target_link_libraries(
+  koinos_backup_public_restore_lib
+    PUBLIC
+      koinos_node_core
+      koinos_backup_snapshot_lib
+      Boost::system
+      OpenSSL::SSL
+      OpenSSL::Crypto
+    PRIVATE
+      nlohmann_json::nlohmann_json)
+
 # ── Runtime backup service (in-process hot backup primitive) ──
 add_library(koinos_backup_service_lib
   backup/backup_scheduler.cpp
@@ -188,6 +209,7 @@ target_link_libraries(
     PUBLIC
       koinos_backup_snapshot_lib
       koinos_backup_sftp_lib
+      koinos_backup_public_restore_lib
       koinos_storage_lib
       Koinos::log)
 
@@ -512,6 +534,14 @@ if(KOINOS_BUILD_TESTS)
 
   add_test(NAME koinos_backup_sftp_test COMMAND koinos_backup_sftp_test)
 
+  add_executable(koinos_backup_public_restore_test
+    ../tests/backup/backup_public_restore_test.cpp)
+
+  target_link_libraries(koinos_backup_public_restore_test PRIVATE
+    koinos_backup_public_restore_lib)
+
+  add_test(NAME koinos_backup_public_restore_test COMMAND koinos_backup_public_restore_test)
+
   add_executable(koinos_backup_service_test
     ../tests/backup/backup_service_test.cpp)
 
@@ -663,6 +693,7 @@ target_link_libraries(
       koinos_backup_checkpoint_lib
       koinos_backup_snapshot_lib
       koinos_backup_sftp_lib
+      koinos_backup_public_restore_lib
       koinos_backup_service_lib
       koinos_backup_admin_lib
       koinos_storage_lib

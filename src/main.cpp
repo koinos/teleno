@@ -82,6 +82,7 @@
 #include "backup/backup_service.hpp"
 #include "backup/checkpoint_manager.hpp"
 #include "backup/backup_plan.hpp"
+#include "backup/public_restore.hpp"
 #include "backup/restore_activation_supervisor.hpp"
 #include "backup/sftp_uploader.hpp"
 #include "backup/snapshot_repository.hpp"
@@ -128,6 +129,10 @@
 #define BACKUP_UPLOAD_LATEST_OPTION "backup-upload-latest"
 #define BACKUP_LIST_OPTION "backup-list"
 #define BACKUP_LIST_REMOTE_OPTION "backup-list-remote"
+#define BACKUP_PUBLIC_LIST_OPTION "backup-public-list"
+#define BACKUP_PUBLIC_FETCH_OPTION "backup-public-fetch"
+#define BACKUP_PUBLIC_RESTORE_OPTION "backup-public-restore"
+#define BACKUP_PUBLIC_URL_OPTION "backup-public-url"
 #define BACKUP_DELETE_OPTION "backup-delete"
 #define BACKUP_SCOPE_OPTION "backup-scope"
 #define BACKUP_DELETE_CONFIRM_OPTION "backup-delete-confirm"
@@ -203,7 +208,7 @@ std::pair< std::string, uint16_t > parse_jsonrpc_listen( const std::string& list
 std::string backup_snapshot_list_cli_text(
   const node::backup::BackupSnapshotListResult& result,
   const std::string& source,
-  const std::optional< std::filesystem::path >& remote_directory = std::nullopt )
+  const std::optional< std::string >& remote_reference = std::nullopt )
 {
   const auto body = node::backup::backup_snapshot_list_result_to_text( result );
   const auto header_end = body.find( '\n' );
@@ -211,8 +216,8 @@ std::string backup_snapshot_list_cli_text(
   std::ostringstream out;
   out << "Native backup snapshots\n";
   out << "source: " << source << "\n";
-  if( remote_directory )
-    out << "remote_directory: " << remote_directory->string() << "\n";
+  if( remote_reference )
+    out << "remote_reference: " << *remote_reference << "\n";
   if( header_end == std::string::npos )
     return out.str();
   out << body.substr( header_end + 1 );
@@ -222,13 +227,13 @@ std::string backup_snapshot_list_cli_text(
 std::string backup_snapshot_list_cli_json(
   const node::backup::BackupSnapshotListResult& result,
   const std::string& source,
-  const std::optional< std::filesystem::path >& remote_directory = std::nullopt )
+  const std::optional< std::string >& remote_reference = std::nullopt )
 {
   auto json = nlohmann::ordered_json::parse(
     node::backup::backup_snapshot_list_result_to_json( result ) );
   json[ "source" ] = source;
-  if( remote_directory )
-    json[ "remote_directory" ] = remote_directory->string();
+  if( remote_reference )
+    json[ "remote_reference" ] = *remote_reference;
   return json.dump( 2 ) + "\n";
 }
 
@@ -386,6 +391,27 @@ node::backup::SftpTransferOptions cli_sftp_transfer_options( bool emit_json_prog
   return options;
 }
 
+node::backup::PublicRestoreOptions cli_public_restore_options( bool emit_json_progress )
+{
+  node::backup::PublicRestoreOptions options;
+  if( !emit_json_progress )
+    return options;
+
+  options.progress = []( const node::backup::PublicRestoreProgress& progress ) {
+    nlohmann::json event;
+    event[ "event" ] = "backup-progress";
+    event[ "phase" ] = progress.phase;
+    event[ "backup_id" ] = progress.backup_id;
+    event[ "completed_batches" ] = progress.completed_batches;
+    event[ "total_batches" ] = progress.total_batches;
+    event[ "attempt" ] = progress.attempt;
+    event[ "file_count" ] = progress.file_count;
+    event[ "total_bytes" ] = progress.total_bytes;
+    std::cerr << event.dump() << std::endl;
+  };
+  return options;
+}
+
 std::string shell_quote( const std::filesystem::path& path )
 {
   std::string value = path.string();
@@ -405,7 +431,9 @@ struct ConfiguredRestoreResult
 {
   bool ok = false;
   bool remote_enabled = false;
+  bool public_restore_enabled = false;
   std::optional< node::backup::SftpRestoreFetchResult > remote_fetch;
+  std::optional< node::backup::PublicRestoreFetchResult > public_fetch;
   node::backup::RestorePreflightResult preflight;
   std::optional< node::backup::RestoreStageResult > stage;
   std::optional< node::backup::RestoreActivationResult > activation;
@@ -418,8 +446,11 @@ std::string configured_restore_result_to_text( const ConfiguredRestoreResult& re
   out << ( result.ok ? "Restored configured Teleno backup\n"
                      : "Teleno backup restore did not complete\n" );
   out << "remote_enabled: " << ( result.remote_enabled ? "true" : "false" ) << "\n";
+  out << "public_restore_enabled: " << ( result.public_restore_enabled ? "true" : "false" ) << "\n";
   if( result.remote_fetch )
     out << node::backup::sftp_restore_fetch_result_to_text( *result.remote_fetch );
+  if( result.public_fetch )
+    out << node::backup::public_restore_fetch_result_to_text( *result.public_fetch );
   out << node::backup::restore_preflight_result_to_text( result.preflight );
   if( result.stage )
     out << node::backup::restore_stage_result_to_text( *result.stage );
@@ -436,8 +467,12 @@ std::string configured_restore_result_to_json( const ConfiguredRestoreResult& re
   nlohmann::json json;
   json[ "ok" ] = result.ok;
   json[ "remote_enabled" ] = result.remote_enabled;
+  json[ "public_restore_enabled" ] = result.public_restore_enabled;
   json[ "remote_fetch" ] = result.remote_fetch
     ? nlohmann::json::parse( node::backup::sftp_restore_fetch_result_to_json( *result.remote_fetch ) )
+    : nlohmann::json( nullptr );
+  json[ "public_fetch" ] = result.public_fetch
+    ? nlohmann::json::parse( node::backup::public_restore_fetch_result_to_json( *result.public_fetch ) )
     : nlohmann::json( nullptr );
   json[ "preflight" ] = nlohmann::json::parse(
     node::backup::restore_preflight_result_to_json( result.preflight ) );
@@ -449,6 +484,89 @@ std::string configured_restore_result_to_json( const ConfiguredRestoreResult& re
     : nlohmann::json( nullptr );
   json[ "observer_start_command" ] = result.observer_start_command;
   return json.dump( 2 ) + "\n";
+}
+
+bool config_file_exists( const std::filesystem::path& config_path )
+{
+  std::error_code ec;
+  return std::filesystem::is_regular_file( config_path, ec );
+}
+
+void ensure_public_restore_local_repository( node::NodeConfig& cfg,
+                                             const std::filesystem::path& basedir )
+{
+  cfg.backup.local.enabled = true;
+  if( cfg.backup.local.directory.empty() )
+    cfg.backup.local.directory = ( basedir / ".teleno-native-backups" / "repository" ).string();
+  std::filesystem::create_directories( cfg.backup.local.directory );
+}
+
+void validate_public_restore_config( const node::NodeConfig& cfg )
+{
+  if( !cfg.backup.public_restore.enabled )
+    throw std::runtime_error( "public restore requires backup.public-restore.enabled=true or --backup-public-url" );
+  if( cfg.backup.public_restore.base_url.empty() )
+    throw std::runtime_error( "public restore requires backup.public-restore.base-url or --backup-public-url" );
+  if( cfg.backup.local.directory.empty() )
+    throw std::runtime_error( "public restore requires backup.local.directory" );
+}
+
+void write_observer_config_for_public_restore( const std::filesystem::path& config_path,
+                                               const node::NodeConfig& cfg,
+                                               const std::filesystem::path& basedir )
+{
+  if( config_file_exists( config_path ) )
+    return;
+
+  std::filesystem::create_directories( config_path.parent_path() );
+  std::ofstream out( config_path, std::ios::binary | std::ios::trunc );
+  if( !out )
+    throw std::runtime_error( "failed to write observer config after public restore: " + config_path.string() );
+
+  const auto jsonrpc_listen = cfg.backup.public_restore.network == "testnet" ? "127.0.0.1:18122" : "127.0.0.1:8080";
+  const auto p2p_listen = cfg.backup.public_restore.network == "testnet" ? "/ip4/0.0.0.0/tcp/18888"
+                                                                          : "/ip4/0.0.0.0/tcp/8888";
+  out << "global:\n";
+  out << "  log-level: info\n";
+  out << "  fork-algorithm: pob\n";
+  out << "chain:\n";
+  out << "  verify-blocks: true\n";
+  out << "p2p:\n";
+  out << "  listen: " << p2p_listen << "\n";
+  out << "  peer-log-interval-seconds: 60\n";
+  if( cfg.backup.public_restore.network == "testnet" )
+  {
+    out << "  peer:\n";
+    out << "    - /dns4/testnet.koinosfoundation.org/tcp/8888/p2p/QmYV414G6xRzkSUytntEsBsCSjXrVGubfYJn4vpeER2s2W\n";
+  }
+  out << "jsonrpc:\n";
+  out << "  listen: " << jsonrpc_listen << "\n";
+  out << "features:\n";
+  out << "  chain: true\n";
+  out << "  mempool: true\n";
+  out << "  block_store: true\n";
+  out << "  p2p: true\n";
+  out << "  jsonrpc: true\n";
+  out << "  grpc: false\n";
+  out << "  block_producer: false\n";
+  out << "  contract_meta_store: true\n";
+  out << "  transaction_store: false\n";
+  out << "  account_history: false\n";
+  out << "backup:\n";
+  out << "  enabled: true\n";
+  out << "  node-id: teleno-public-" << cfg.backup.public_restore.network << "\n";
+  out << "  workspace: " << ( basedir / ".teleno-native-backups" / "workspace" ).string() << "\n";
+  out << "  local:\n";
+  out << "    enabled: true\n";
+  out << "    directory: " << cfg.backup.local.directory << "\n";
+  out << "    retention-count: " << cfg.backup.local.retention_count << "\n";
+  out << "  public-restore:\n";
+  out << "    enabled: true\n";
+  out << "    base-url: " << cfg.backup.public_restore.base_url << "\n";
+  out << "    network: " << cfg.backup.public_restore.network << "\n";
+  out << "    require-https: " << ( cfg.backup.public_restore.require_https ? "true" : "false" ) << "\n";
+  out << "    timeout-seconds: " << cfg.backup.public_restore.timeout_seconds << "\n";
+  out << "    retries: " << cfg.backup.public_restore.retries << "\n";
 }
 
 } // anonymous namespace
@@ -587,6 +705,14 @@ int main( int argc, char** argv )
         "List completed snapshots in backup.local.directory, then exit without opening RocksDB" )
       ( BACKUP_LIST_REMOTE_OPTION,
         "Fetch and list completed snapshots from backup.remote.directory over native libssh SFTP, caching metadata locally" )
+      ( BACKUP_PUBLIC_LIST_OPTION,
+        "Fetch and list the latest or selected public read-only backup snapshot metadata over HTTP(S), caching metadata locally" )
+      ( BACKUP_PUBLIC_FETCH_OPTION,
+        "Fetch latest or selected public read-only backup metadata and missing objects over HTTP(S), then exit without opening RocksDB" )
+      ( BACKUP_PUBLIC_RESTORE_OPTION,
+        "Restore latest or selected public read-only backup over HTTP(S), preflight, stage, activate, then exit" )
+      ( BACKUP_PUBLIC_URL_OPTION, po::value< std::string >()->default_value( "" ),
+        "Public read-only backup base URL override for --backup-public-list/fetch/restore" )
       ( BACKUP_DELETE_OPTION,
         "Delete the selected native backup snapshot. Dry-run by default; requires --backup-delete-confirm=<backup-id> to mutate" )
       ( BACKUP_SCOPE_OPTION, po::value< std::string >()->default_value( "local" ),
@@ -660,6 +786,20 @@ int main( int argc, char** argv )
       cfg.jsonrpc_listen = jrpc;
     if( vm.count( REQUIRE_ROCKSDB_COMPRESSION_OPTION ) )
       cfg.rocksdb_require_compression = true;
+    if( auto public_url = vm[ BACKUP_PUBLIC_URL_OPTION ].as< std::string >(); !public_url.empty() )
+    {
+      cfg.backup.public_restore.enabled = true;
+      cfg.backup.public_restore.base_url = public_url;
+    }
+
+    const bool public_backup_mode = vm.count( BACKUP_PUBLIC_LIST_OPTION )
+                                 || vm.count( BACKUP_PUBLIC_FETCH_OPTION )
+                                 || vm.count( BACKUP_PUBLIC_RESTORE_OPTION );
+    if( public_backup_mode )
+    {
+      ensure_public_restore_local_repository( cfg, basedir );
+      validate_public_restore_config( cfg );
+    }
 
     if( vm.count( BACKUP_JSON_OPTION )
         && !vm.count( BACKUP_DRY_RUN_OPTION )
@@ -669,6 +809,9 @@ int main( int argc, char** argv )
         && !vm.count( BACKUP_UPLOAD_LATEST_OPTION )
         && !vm.count( BACKUP_LIST_OPTION )
         && !vm.count( BACKUP_LIST_REMOTE_OPTION )
+        && !vm.count( BACKUP_PUBLIC_LIST_OPTION )
+        && !vm.count( BACKUP_PUBLIC_FETCH_OPTION )
+        && !vm.count( BACKUP_PUBLIC_RESTORE_OPTION )
         && !vm.count( BACKUP_DELETE_OPTION )
         && !vm.count( BACKUP_RESTORE_OPTION )
         && !vm.count( BACKUP_RESTORE_PREFLIGHT_OPTION )
@@ -702,6 +845,21 @@ int main( int argc, char** argv )
       return EXIT_SUCCESS;
     }
 
+    if( vm.count( BACKUP_PUBLIC_LIST_OPTION ) )
+    {
+      const auto backup_id = vm[ BACKUP_ID_OPTION ].as< std::string >();
+      auto result = node::backup::list_public_backup_snapshots(
+        cfg.backup.local.directory,
+        cfg.backup.public_restore,
+        backup_id,
+        cli_public_restore_options( vm.count( BACKUP_JSON_OPTION ) > 0 ) );
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << backup_snapshot_list_cli_json( result, "public_http", cfg.backup.public_restore.base_url );
+      else
+        std::cout << backup_snapshot_list_cli_text( result, "public_http", cfg.backup.public_restore.base_url );
+      return EXIT_SUCCESS;
+    }
+
     if( vm.count( BACKUP_LIST_REMOTE_OPTION ) )
     {
       if( !cfg.backup.local.enabled )
@@ -725,6 +883,22 @@ int main( int argc, char** argv )
       else
         std::cout << backup_snapshot_list_cli_text( result, "remote_sftp", cfg.backup.remote.directory );
       return EXIT_SUCCESS;
+    }
+
+    if( vm.count( BACKUP_PUBLIC_FETCH_OPTION ) )
+    {
+      const auto backup_id = vm[ BACKUP_ID_OPTION ].as< std::string >();
+      auto result = node::backup::fetch_public_restore_snapshot(
+        cfg.backup.local.directory,
+        basedir,
+        cfg.backup.public_restore,
+        backup_id,
+        cli_public_restore_options( vm.count( BACKUP_JSON_OPTION ) > 0 ) );
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << node::backup::public_restore_fetch_result_to_json( result );
+      else
+        std::cout << node::backup::public_restore_fetch_result_to_text( result );
+      return result.ready_to_stage ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
     if( vm.count( BACKUP_DELETE_OPTION ) )
@@ -821,6 +995,51 @@ int main( int argc, char** argv )
         std::cout << node::backup::sftp_upload_result_to_json( result );
       else
         std::cout << node::backup::sftp_upload_result_to_text( result );
+      return EXIT_SUCCESS;
+    }
+
+    if( vm.count( BACKUP_PUBLIC_RESTORE_OPTION ) )
+    {
+      const auto backup_id = vm[ BACKUP_ID_OPTION ].as< std::string >();
+      ConfiguredRestoreResult result;
+      result.public_restore_enabled = true;
+      result.public_fetch = node::backup::fetch_public_restore_snapshot(
+        cfg.backup.local.directory,
+        basedir,
+        cfg.backup.public_restore,
+        backup_id,
+        cli_public_restore_options( vm.count( BACKUP_JSON_OPTION ) > 0 ) );
+      result.preflight = result.public_fetch->preflight;
+      if( !result.public_fetch->ready_to_stage )
+      {
+        if( vm.count( BACKUP_JSON_OPTION ) )
+          std::cout << configured_restore_result_to_json( result );
+        else
+          std::cout << configured_restore_result_to_text( result );
+        return EXIT_FAILURE;
+      }
+
+      const auto output = vm[ BACKUP_OUTPUT_OPTION ].as< std::string >();
+      result.stage = node::backup::stage_local_restore_snapshot(
+        cfg.backup.local.directory,
+        basedir,
+        backup_id == "latest" ? std::string{} : backup_id,
+        output );
+      result.activation = node::backup::activate_staged_restore_snapshot(
+        result.stage->staging_dir,
+        basedir );
+      write_observer_config_for_public_restore( config_path, cfg, basedir );
+      result.ok = true;
+      std::ostringstream start_command;
+      start_command << "teleno_node --basedir " << shell_quote( basedir )
+                    << " --config " << shell_quote( config_path )
+                    << " --disable block_producer";
+      result.observer_start_command = start_command.str();
+
+      if( vm.count( BACKUP_JSON_OPTION ) )
+        std::cout << configured_restore_result_to_json( result );
+      else
+        std::cout << configured_restore_result_to_text( result );
       return EXIT_SUCCESS;
     }
 

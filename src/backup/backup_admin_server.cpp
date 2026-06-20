@@ -229,6 +229,18 @@ std::string BackupAdminServer::config_response()
   return response.dump();
 }
 
+std::string BackupAdminServer::public_config_response()
+{
+  auto config = nlohmann::json::parse( _backup_service->config_summary_json() );
+  nlohmann::json response;
+  response[ "ok" ] = true;
+  response[ "basedir" ] = config.at( "basedir" );
+  response[ "config_path" ] = config.at( "config_path" );
+  response[ "local_repository" ] = config.at( "backup" ).at( "local" ).at( "directory" );
+  response[ "public_restore" ] = config.at( "backup" ).at( "public_restore" );
+  return response.dump();
+}
+
 std::string BackupAdminServer::list_response( bool remote )
 {
   const auto result = remote
@@ -237,6 +249,16 @@ std::string BackupAdminServer::list_response( bool remote )
   nlohmann::json response;
   response[ "ok" ] = true;
   response[ "source" ] = remote ? "remote_sftp" : "local";
+  response[ "snapshots" ] = nlohmann::json::parse( backup_snapshot_list_result_to_json( result ) );
+  return response.dump();
+}
+
+std::string BackupAdminServer::public_list_response()
+{
+  auto result = _backup_service->list_public_snapshots();
+  nlohmann::json response;
+  response[ "ok" ] = true;
+  response[ "source" ] = "public_http";
   response[ "snapshots" ] = nlohmann::json::parse( backup_snapshot_list_result_to_json( result ) );
   return response.dump();
 }
@@ -288,10 +310,30 @@ std::string BackupAdminServer::restore_fetch_response( const std::string& body )
   return response.dump();
 }
 
+std::string BackupAdminServer::public_restore_fetch_response( const std::string& body )
+{
+  const auto request = parse_request_body( body );
+  auto status = _backup_service->start_public_restore_fetch_async( backup_id_from_request( request ) );
+  nlohmann::json response;
+  response[ "ok" ] = true;
+  response[ "status" ] = nlohmann::json::parse( backup_operation_status_to_json( status ) );
+  return response.dump();
+}
+
 std::string BackupAdminServer::restore_preflight_response( const std::string& body )
 {
   const auto request = parse_request_body( body );
   auto result = _backup_service->restore_preflight( backup_id_from_request( request ) );
+  nlohmann::json response;
+  response[ "ok" ] = true;
+  response[ "preflight" ] = nlohmann::json::parse( restore_preflight_result_to_json( result ) );
+  return response.dump();
+}
+
+std::string BackupAdminServer::public_restore_preflight_response( const std::string& body )
+{
+  const auto request = parse_request_body( body );
+  auto result = _backup_service->public_restore_preflight( backup_id_from_request( request ) );
   nlohmann::json response;
   response[ "ok" ] = true;
   response[ "preflight" ] = nlohmann::json::parse( restore_preflight_result_to_json( result ) );
@@ -390,6 +432,16 @@ void BackupAdminServer::handle_session( tcp::socket socket )
         res.result( http::status::ok );
         res.body() = config_response();
       }
+      else if( req.method() == http::verb::get && target == "/admin/backup/public/config" )
+      {
+        res.result( http::status::ok );
+        res.body() = public_config_response();
+      }
+      else if( req.method() == http::verb::get && target == "/admin/backup/public/snapshots" )
+      {
+        res.result( http::status::ok );
+        res.body() = public_list_response();
+      }
       else if( req.method() == http::verb::get && target == "/admin/backup/snapshots/local" )
       {
         res.result( http::status::ok );
@@ -445,6 +497,26 @@ void BackupAdminServer::handle_session( tcp::socket socket )
       {
         res.result( http::status::ok );
         res.body() = restore_stage_response( req.body() );
+      }
+      else if( req.method() == http::verb::post && target == "/admin/backup/public/fetch" )
+      {
+        res.result( http::status::accepted );
+        res.body() = public_restore_fetch_response( req.body() );
+      }
+      else if( req.method() == http::verb::post && target == "/admin/backup/public/preflight" )
+      {
+        res.result( http::status::ok );
+        res.body() = public_restore_preflight_response( req.body() );
+      }
+      else if( req.method() == http::verb::post && target == "/admin/backup/public/restore/stage" )
+      {
+        res.result( http::status::ok );
+        res.body() = restore_stage_response( req.body() );
+      }
+      else if( req.method() == http::verb::post && target == "/admin/backup/public/restore/activate" )
+      {
+        res.result( http::status::accepted );
+        res.body() = restore_activate_response( req.body() );
       }
       else if( req.method() == http::verb::post && target == "/admin/backup/restore/fetch" )
       {

@@ -542,6 +542,12 @@ void RocksDBManager::compact_all_column_families()
 void RocksDBManager::initialize_storage_metadata( const std::filesystem::path& basedir )
 {
   auto chain_storage = read_metadata( "layout.chain_storage" );
+  const auto legacy_chain_db_path = basedir / "chain" / "blockchain";
+  std::error_code legacy_chain_ec;
+  const auto has_legacy_chain_db =
+    std::filesystem::exists( legacy_chain_db_path / "CURRENT", legacy_chain_ec );
+  legacy_chain_ec.clear();
+
   if( chain_storage == "migration-in-progress" )
     throw std::runtime_error( "storage migration is marked in progress; refusing to start until migration is repaired or rolled back" );
   if( !chain_storage.empty() && chain_storage != "legacy" && chain_storage != "unified" )
@@ -550,7 +556,15 @@ void RocksDBManager::initialize_storage_metadata( const std::filesystem::path& b
   if( read_metadata( "layout.version" ).empty() )
     write_metadata( "layout.version", "1" );
   if( chain_storage.empty() )
-    write_metadata( "layout.chain_storage", "legacy" );
+  {
+    chain_storage = has_legacy_chain_db ? "legacy" : "unified";
+    write_metadata( "layout.chain_storage", chain_storage );
+  }
+  else if( chain_storage == "legacy" && !has_legacy_chain_db )
+  {
+    chain_storage = "unified";
+    write_metadata( "layout.chain_storage", chain_storage );
+  }
   if( read_metadata( "layout.created_at" ).empty() )
     write_metadata( "layout.created_at", iso8601_now() );
   if( read_metadata( "layout.network" ).empty() )

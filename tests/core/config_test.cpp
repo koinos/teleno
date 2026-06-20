@@ -103,6 +103,13 @@ backup:
     retention-count: 14
     retention-days: 30
     upload-temp-suffix: .uploading
+  public-restore:
+    enabled: true
+    base-url: https://testnet.koinosfoundation.org/backups/testnet/teleno-bootstrap
+    network: testnet
+    require-https: true
+    timeout-seconds: 45
+    retries: 4
   admin:
     enabled: true
     listen: 127.0.0.1:18089
@@ -135,6 +142,12 @@ backup:
     assert( cfg.backup.remote.retention_count == 14 );
     assert( cfg.backup.remote.retention_days == 30 );
     assert( cfg.backup.remote.upload_temp_suffix == ".uploading" );
+    assert( cfg.backup.public_restore.enabled );
+    assert( cfg.backup.public_restore.base_url == "https://testnet.koinosfoundation.org/backups/testnet/teleno-bootstrap" );
+    assert( cfg.backup.public_restore.network == "testnet" );
+    assert( cfg.backup.public_restore.require_https );
+    assert( cfg.backup.public_restore.timeout_seconds == 45 );
+    assert( cfg.backup.public_restore.retries == 4 );
     assert( cfg.backup.admin.enabled );
     assert( cfg.backup.admin.listen == "127.0.0.1:18089" );
     assert( cfg.backup.admin.token_file == "/tmp/teleno-backup-admin-token" );

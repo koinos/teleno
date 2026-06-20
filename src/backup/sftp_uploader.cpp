@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -220,6 +221,18 @@ std::string remote_join( const std::string& lhs, const std::string& rhs )
   if( lhs.back() == '/' )
     return lhs + rhs;
   return lhs + "/" + rhs;
+}
+
+std::string remote_parent_path( std::string path )
+{
+  while( path.size() > 1 && path.back() == '/' )
+    path.pop_back();
+  const auto slash = path.find_last_of( '/' );
+  if( slash == std::string::npos )
+    return {};
+  if( slash == 0 )
+    return "/";
+  return path.substr( 0, slash );
 }
 
 void push_unique_command( std::vector< std::string >& commands, const std::string& command )
@@ -626,6 +639,37 @@ public:
   bool exists( const std::string& path )
   {
     return remote_exists( remote_path( path ) );
+  }
+
+  uint64_t available_bytes( const std::string& path, std::string* checked_path = nullptr )
+  {
+    auto probe_path = remote_path( path );
+    while( !probe_path.empty() && !remote_exists( probe_path ) )
+    {
+      const auto parent_path = remote_parent_path( probe_path );
+      if( parent_path == probe_path )
+        break;
+      probe_path = parent_path;
+    }
+    if( probe_path.empty() )
+      probe_path = "/";
+
+    auto stats = sftp_statvfs( _sftp, probe_path.c_str() );
+    if( !stats )
+      throw std::runtime_error( "failed to read remote SFTP free space at " + probe_path
+                                + ": " + sftp_error_message( _session, _sftp ) );
+
+    std::unique_ptr< sftp_statvfs_struct, decltype( &sftp_statvfs_free ) > guard(
+      stats,
+      sftp_statvfs_free );
+    const auto block_size = stats->f_frsize ? stats->f_frsize : stats->f_bsize;
+    if( checked_path )
+      *checked_path = probe_path;
+    if( block_size == 0 || stats->f_bavail == 0 )
+      return 0;
+    if( stats->f_bavail > std::numeric_limits< uint64_t >::max() / block_size )
+      return std::numeric_limits< uint64_t >::max();
+    return stats->f_bavail * block_size;
   }
 
   void download( const std::string& remote_file, const std::filesystem::path& local_file )
@@ -1414,6 +1458,24 @@ BackupSnapshotListResult list_remote_backup_snapshots_once( const std::filesyste
     NativeSftpClient client( ssh );
     std::set< std::string > remote_backup_ids;
     std::string remote_latest_backup_id;
+    bool remote_space_check_ok = false;
+    uint64_t remote_available_bytes = 0;
+    std::string remote_space_target_path = remote.directory;
+    std::string remote_space_message;
+
+    try
+    {
+      remote_available_bytes = client.available_bytes( remote.directory, &remote_space_target_path );
+      remote_space_check_ok = true;
+      std::ostringstream message;
+      message << "Remote backup directory has " << remote_available_bytes
+              << " bytes available at " << remote_space_target_path;
+      remote_space_message = message.str();
+    }
+    catch( const std::exception& e )
+    {
+      remote_space_message = std::string( "Remote free-space check failed: " ) + e.what();
+    }
 
     const auto remote_latest = remote_join( remote.directory, "latest.json" );
     if( client.exists( remote_latest ) )
@@ -1428,7 +1490,9 @@ BackupSnapshotListResult list_remote_backup_snapshots_once( const std::filesyste
     }
 
     const auto remote_snapshots_dir = remote_join( remote.directory, "snapshots" );
-    const auto entries = client.list_directory( remote_snapshots_dir );
+    const auto entries = client.exists( remote_snapshots_dir )
+      ? client.list_directory( remote_snapshots_dir )
+      : std::vector< RemoteDirectoryEntry >{};
     uint64_t index = 0;
     uint64_t snapshot_count = 0;
     for( const auto& entry: entries )
@@ -1497,6 +1561,11 @@ BackupSnapshotListResult list_remote_backup_snapshots_once( const std::filesyste
       remote_snapshots.push_back( std::move( snapshot ) );
     }
     result.latest_backup_id = remote_latest_backup_id;
+    result.remote_directory = remote.directory;
+    result.remote_space_target_path = remote_space_target_path;
+    result.remote_space_message = remote_space_message;
+    result.remote_available_bytes = remote_available_bytes;
+    result.remote_space_check_ok = remote_space_check_ok;
     result.snapshots = std::move( remote_snapshots );
     std::error_code cleanup_ec;
     std::filesystem::remove_all( metadata_root, cleanup_ec );

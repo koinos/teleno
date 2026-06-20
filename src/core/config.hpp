@@ -57,6 +57,16 @@ struct BackupRemoteConfig
   std::string upload_temp_suffix = ".partial";
 };
 
+struct BackupPublicRestoreConfig
+{
+  bool enabled = false;
+  std::string base_url;
+  std::string network = "testnet";
+  bool require_https = true;
+  uint64_t timeout_seconds = 30;
+  uint64_t retries = 3;
+};
+
 struct BackupAdminConfig
 {
   bool enabled = false;
@@ -74,6 +84,7 @@ struct BackupConfig
   BackupLocalConfig local;
   BackupSshConfig ssh;
   BackupRemoteConfig remote;
+  BackupPublicRestoreConfig public_restore;
   BackupAdminConfig admin;
 };
 

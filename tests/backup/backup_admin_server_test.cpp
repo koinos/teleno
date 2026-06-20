@@ -118,6 +118,10 @@ int main()
     write_file( basedir / "jsonrpc" / "descriptors" / "koinos_descriptors.pb", "descriptor-bytes" );
 
     auto cfg = admin_config( root );
+    cfg.backup.public_restore.enabled = true;
+    cfg.backup.public_restore.base_url = "file://" + ( root / "public-repo" ).string();
+    cfg.backup.public_restore.network = "testnet";
+    cfg.backup.public_restore.require_https = false;
     storage::RocksDBManager manager;
     manager.open( basedir, cfg );
     manager.write_metadata( "layout.chain_storage", "unified" );
@@ -157,6 +161,13 @@ int main()
     assert( status_json.at( "operation_kind" ) == "local-snapshot" );
     const auto backup_id = status_json.at( "snapshot" ).at( "backup_id" ).get< std::string >();
     assert( !backup_id.empty() );
+
+    const auto public_repo = root / "public-repo";
+    std::filesystem::remove_all( public_repo );
+    std::filesystem::copy(
+      cfg.backup.local.directory,
+      public_repo,
+      std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing );
 
     auto config = http_request( port, http::verb::get, "/admin/backup/config", "admin-test-token" );
     assert( config.status == http::status::ok );
@@ -290,6 +301,72 @@ int main()
     assert( delete_confirmed_status.at( "delete_results" ).at( 0 ).at( "dry_run" ) == false );
     assert( delete_confirmed_status.at( "delete_results" ).at( 0 ).at( "deleted_snapshot" ) == true );
     assert( !std::filesystem::exists( cfg.backup.local.directory + "/snapshots/" + backup_id ) );
+
+    auto public_config = http_request(
+      port, http::verb::get, "/admin/backup/public/config", "admin-test-token" );
+    assert( public_config.status == http::status::ok );
+    auto public_config_json = nlohmann::json::parse( public_config.body );
+    assert( public_config_json.at( "ok" ) == true );
+    assert( public_config_json.at( "public_restore" ).at( "enabled" ) == true );
+    assert( public_config_json.at( "public_restore" ).at( "base_url" ).get< std::string >().find( "file://" ) == 0 );
+
+    auto public_list = http_request(
+      port, http::verb::get, "/admin/backup/public/snapshots", "admin-test-token" );
+    assert( public_list.status == http::status::ok );
+    auto public_list_json = nlohmann::json::parse( public_list.body );
+    assert( public_list_json.at( "ok" ) == true );
+    assert( public_list_json.at( "source" ) == "public_http" );
+    assert( public_list_json.at( "snapshots" ).at( "snapshot_count" ) == 1 );
+    assert( public_list_json.at( "snapshots" ).at( "latest_backup_id" ) == backup_id );
+
+    auto public_preflight = http_request(
+      port,
+      http::verb::post,
+      "/admin/backup/public/preflight",
+      "admin-test-token",
+      std::string( "{\"backup_id\":\"" ) + backup_id + "\"}" );
+    assert( public_preflight.status == http::status::ok );
+    auto public_preflight_json = nlohmann::json::parse( public_preflight.body );
+    assert( public_preflight_json.at( "ok" ) == true );
+    assert( public_preflight_json.at( "preflight" ).at( "backup_id" ) == backup_id );
+
+    auto public_fetch = http_request(
+      port,
+      http::verb::post,
+      "/admin/backup/public/fetch",
+      "admin-test-token",
+      std::string( "{\"backup_id\":\"" ) + backup_id + "\"}" );
+    assert( public_fetch.status == http::status::accepted );
+    auto public_fetch_status = wait_for_terminal_backup_status( port, "admin-test-token" );
+    assert( public_fetch_status.at( "operation_kind" ) == "public-restore-fetch" );
+    assert( public_fetch_status.at( "has_public_restore_fetch" ) == true );
+    assert( public_fetch_status.at( "public_restore_fetch" ).at( "ready_to_stage" ) == true );
+    assert( public_fetch_status.at( "public_restore_fetch" ).at( "backup_id" ) == backup_id );
+
+    const auto public_staging_dir = root / "public-stage";
+    auto public_stage = http_request(
+      port,
+      http::verb::post,
+      "/admin/backup/public/restore/stage",
+      "admin-test-token",
+      std::string( "{\"backup_id\":\"" ) + backup_id + "\",\"staging_dir\":\""
+        + public_staging_dir.string() + "\"}" );
+    assert( public_stage.status == http::status::ok );
+    auto public_stage_json = nlohmann::json::parse( public_stage.body );
+    assert( public_stage_json.at( "ok" ) == true );
+    assert( std::filesystem::exists( public_staging_dir / "RESTORE_STAGE_COMPLETE" ) );
+
+    auto public_activate = http_request(
+      port,
+      http::verb::post,
+      "/admin/backup/public/restore/activate",
+      "admin-test-token",
+      std::string( "{\"backup_id\":\"" ) + backup_id + "\",\"staging_dir\":\""
+        + public_staging_dir.string() + "\"}" );
+    assert( public_activate.status == http::status::accepted );
+    auto public_activate_json = nlohmann::json::parse( public_activate.body );
+    assert( public_activate_json.at( "ok" ) == true );
+    assert( public_activate_json.at( "activation_request" ).at( "requires_node_stop" ) == true );
 
     server.stop();
     manager.close();

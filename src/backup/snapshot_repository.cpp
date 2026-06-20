@@ -1443,6 +1443,14 @@ std::string backup_snapshot_list_result_to_text( const BackupSnapshotListResult&
   out << "repository_dir: " << result.repository_dir.string() << "\n";
   out << "latest_backup_id: " << result.latest_backup_id << "\n";
   out << "snapshot_count: " << result.snapshots.size() << "\n";
+  if( !result.remote_directory.empty() )
+  {
+    out << "remote_directory: " << result.remote_directory << "\n";
+    out << "remote_space_ok: " << json_bool( result.remote_space_check_ok ) << "\n";
+    out << "remote_available_bytes: " << result.remote_available_bytes << "\n";
+    out << "remote_space_target_path: " << result.remote_space_target_path << "\n";
+    out << "remote_space_message: " << result.remote_space_message << "\n";
+  }
   for( const auto& snapshot: result.snapshots )
   {
     out << "- backup_id: " << snapshot.backup_id << "\n";
@@ -1468,6 +1476,15 @@ std::string backup_snapshot_list_result_to_json( const BackupSnapshotListResult&
   out << "  \"repository_dir\": \"" << json_escape( result.repository_dir.string() ) << "\",\n";
   out << "  \"latest_backup_id\": \"" << json_escape( result.latest_backup_id ) << "\",\n";
   out << "  \"snapshot_count\": " << result.snapshots.size() << ",\n";
+  if( !result.remote_directory.empty() )
+  {
+    out << "  \"remote_space\": {\n";
+    out << "    \"ok\": " << json_bool( result.remote_space_check_ok ) << ",\n";
+    out << "    \"available_bytes\": " << result.remote_available_bytes << ",\n";
+    out << "    \"target_path\": \"" << json_escape( result.remote_space_target_path ) << "\",\n";
+    out << "    \"message\": \"" << json_escape( result.remote_space_message ) << "\"\n";
+    out << "  },\n";
+  }
   out << "  \"snapshots\": [\n";
   for( std::size_t i = 0; i < result.snapshots.size(); ++i )
   {

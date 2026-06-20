@@ -9,6 +9,7 @@
 
 #include "backup/sftp_uploader.hpp"
 #include "backup/snapshot_repository.hpp"
+#include "backup/public_restore.hpp"
 #include "core/config.hpp"
 #include "storage/rocksdb_manager.hpp"
 
@@ -54,6 +55,8 @@ struct BackupOperationStatus
   SftpUploadResult remote_upload;
   bool has_restore_fetch = false;
   SftpRestoreFetchResult restore_fetch;
+  bool has_public_restore_fetch = false;
+  PublicRestoreFetchResult public_restore_fetch;
   bool has_restore_preflight = false;
   RestorePreflightResult restore_preflight;
   bool has_restore_stage = false;
@@ -76,7 +79,9 @@ public:
   std::string config_summary_json() const;
   BackupSnapshotListResult list_local_snapshots() const;
   BackupSnapshotListResult list_remote_snapshots();
+  BackupSnapshotListResult list_public_snapshots( const std::string& backup_id = {} );
   RestorePreflightResult restore_preflight( const std::string& backup_id = {} ) const;
+  RestorePreflightResult public_restore_preflight( const std::string& backup_id = {} );
   LocalSnapshotResult create_local_snapshot();
   BackupOperationStatus start_configured_backup_async( bool upload_remote );
   BackupOperationStatus start_local_snapshot_async();
@@ -85,6 +90,7 @@ public:
                                             const std::string& backup_id,
                                             const std::string& confirm );
   BackupOperationStatus start_restore_fetch_async( const std::string& backup_id );
+  BackupOperationStatus start_public_restore_fetch_async( const std::string& backup_id );
   BackupOperationStatus cancel_current_operation();
   void wait_for_current_operation();
   RestoreStageResult stage_restore_snapshot( const std::string& backup_id = {},
@@ -96,6 +102,7 @@ private:
   void validate_local_snapshot_request() const;
   void validate_local_repository_request( const std::string& operation_name ) const;
   void validate_remote_repository_request( const std::string& operation_name ) const;
+  void validate_public_restore_request( const std::string& operation_name ) const;
   std::string next_operation_id() const;
   std::string next_operation_id( const std::string& kind ) const;
   void begin_operation( const std::string& operation_id,
@@ -120,7 +127,9 @@ private:
                                  const std::string& backup_id,
                                  bool dry_run );
   void execute_restore_fetch_operation( const std::string& backup_id );
+  void execute_public_restore_fetch_operation( const std::string& backup_id );
   SftpTransferOptions operation_sftp_transfer_options();
+  PublicRestoreOptions operation_public_restore_options();
   void throw_if_cancel_requested() const;
   void join_finished_worker();
 

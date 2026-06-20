@@ -391,6 +391,22 @@ NodeConfig load_config( const std::filesystem::path& config_path,
           yaml_get< std::string >( remote, "upload-temp-suffix", cfg.backup.remote.upload_temp_suffix );
       }
 
+      if( auto public_restore = yaml_child( b, "public-restore" ); public_restore.IsDefined() )
+      {
+        cfg.backup.public_restore.enabled =
+          yaml_get< bool >( public_restore, "enabled", cfg.backup.public_restore.enabled );
+        cfg.backup.public_restore.base_url =
+          yaml_get< std::string >( public_restore, "base-url", cfg.backup.public_restore.base_url );
+        cfg.backup.public_restore.network =
+          yaml_get< std::string >( public_restore, "network", cfg.backup.public_restore.network );
+        cfg.backup.public_restore.require_https =
+          yaml_get< bool >( public_restore, "require-https", cfg.backup.public_restore.require_https );
+        cfg.backup.public_restore.timeout_seconds =
+          yaml_get< uint64_t >( public_restore, "timeout-seconds", cfg.backup.public_restore.timeout_seconds );
+        cfg.backup.public_restore.retries =
+          yaml_get< uint64_t >( public_restore, "retries", cfg.backup.public_restore.retries );
+      }
+
       if( auto admin = yaml_child( b, "admin" ); admin.IsDefined() )
       {
         cfg.backup.admin.enabled =

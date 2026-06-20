@@ -125,6 +125,11 @@ struct BackupSnapshotListResult
 {
   std::filesystem::path repository_dir;
   std::string latest_backup_id;
+  std::string remote_directory;
+  std::string remote_space_target_path;
+  std::string remote_space_message;
+  uint64_t remote_available_bytes = 0;
+  bool remote_space_check_ok = false;
   std::vector< BackupSnapshotSummary > snapshots;
 };
 
