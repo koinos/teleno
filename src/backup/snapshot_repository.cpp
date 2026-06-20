@@ -623,6 +623,10 @@ BackupSnapshotSummary read_snapshot_summary( const std::filesystem::path& reposi
   const auto snapshot = manifest.value( "snapshot", nlohmann::json::object() );
   const auto source = manifest.value( "source", nlohmann::json::object() );
   const auto node = manifest.value( "node", nlohmann::json::object() );
+  const auto public_bootstrap = manifest.value( "public_bootstrap", nlohmann::json::object() );
+  const auto public_source = public_bootstrap.is_object()
+    ? public_bootstrap.value( "source", nlohmann::json::object() )
+    : nlohmann::json::object();
 
   uint64_t inventory_file_count = 0;
   for( const auto& _: files.at( "files" ) )
@@ -641,6 +645,16 @@ BackupSnapshotSummary read_snapshot_summary( const std::filesystem::path& reposi
   summary.node_version = node.value( "version", "" );
   summary.node_id = source.value( "node_id", "" );
   summary.storage_layout = source.value( "storage_layout", "" );
+  summary.public_bootstrap = public_bootstrap.is_object() && !public_bootstrap.empty();
+  summary.network = summary.public_bootstrap ? public_bootstrap.value( "network", source.value( "network", "" ) ) : source.value( "network", "" );
+  summary.chain_id = summary.public_bootstrap ? public_bootstrap.value( "chain_id", source.value( "chain_id", "" ) ) : source.value( "chain_id", "" );
+  summary.public_base_url = summary.public_bootstrap ? public_bootstrap.value( "public_base_url", "" ) : "";
+  summary.promoted_at = summary.public_bootstrap ? public_bootstrap.value( "promoted_at", "" ) : "";
+  summary.source_backup_id = summary.public_bootstrap ? public_bootstrap.value( "source_backup_id", "" ) : "";
+  summary.source_created_at = public_source.value( "created_at", summary.created_at );
+  summary.source_node_version = public_source.value( "node_version", summary.node_version );
+  summary.source_head_height = public_source.value( "head_height", 0ULL );
+  summary.source_lib_height = public_source.value( "lib_height", 0ULL );
   summary.file_count = snapshot.value( "file_count", inventory_file_count );
   summary.object_count = snapshot.value( "object_count", 0ULL );
   summary.total_bytes = snapshot.value( "total_bytes", 0ULL );
@@ -1460,6 +1474,19 @@ std::string backup_snapshot_list_result_to_text( const BackupSnapshotListResult&
     out << "  node_id: " << snapshot.node_id << "\n";
     out << "  node_version: " << snapshot.node_version << "\n";
     out << "  storage_layout: " << snapshot.storage_layout << "\n";
+    if( snapshot.public_bootstrap )
+    {
+      out << "  public_bootstrap: true\n";
+      out << "  network: " << snapshot.network << "\n";
+      out << "  chain_id: " << snapshot.chain_id << "\n";
+      out << "  public_base_url: " << snapshot.public_base_url << "\n";
+      out << "  promoted_at: " << snapshot.promoted_at << "\n";
+      out << "  source_backup_id: " << snapshot.source_backup_id << "\n";
+      out << "  source_created_at: " << snapshot.source_created_at << "\n";
+      out << "  source_node_version: " << snapshot.source_node_version << "\n";
+      out << "  source_head_height: " << snapshot.source_head_height << "\n";
+      out << "  source_lib_height: " << snapshot.source_lib_height << "\n";
+    }
     out << "  file_count: " << snapshot.file_count << "\n";
     out << "  object_count: " << snapshot.object_count << "\n";
     out << "  total_bytes: " << snapshot.total_bytes << "\n";
@@ -1497,6 +1524,16 @@ std::string backup_snapshot_list_result_to_json( const BackupSnapshotListResult&
     out << "      \"node_id\": \"" << json_escape( snapshot.node_id ) << "\",\n";
     out << "      \"node_version\": \"" << json_escape( snapshot.node_version ) << "\",\n";
     out << "      \"storage_layout\": \"" << json_escape( snapshot.storage_layout ) << "\",\n";
+    out << "      \"public_bootstrap\": " << json_bool( snapshot.public_bootstrap ) << ",\n";
+    out << "      \"network\": \"" << json_escape( snapshot.network ) << "\",\n";
+    out << "      \"chain_id\": \"" << json_escape( snapshot.chain_id ) << "\",\n";
+    out << "      \"public_base_url\": \"" << json_escape( snapshot.public_base_url ) << "\",\n";
+    out << "      \"promoted_at\": \"" << json_escape( snapshot.promoted_at ) << "\",\n";
+    out << "      \"source_backup_id\": \"" << json_escape( snapshot.source_backup_id ) << "\",\n";
+    out << "      \"source_created_at\": \"" << json_escape( snapshot.source_created_at ) << "\",\n";
+    out << "      \"source_node_version\": \"" << json_escape( snapshot.source_node_version ) << "\",\n";
+    out << "      \"source_head_height\": " << snapshot.source_head_height << ",\n";
+    out << "      \"source_lib_height\": " << snapshot.source_lib_height << ",\n";
     out << "      \"repository_dir\": \"" << json_escape( snapshot.repository_dir.string() ) << "\",\n";
     out << "      \"snapshot_dir\": \"" << json_escape( snapshot.snapshot_dir.string() ) << "\",\n";
     out << "      \"manifest\": \"" << json_escape( snapshot.manifest_path.string() ) << "\",\n";

@@ -109,6 +109,13 @@ struct BackupSnapshotSummary
   std::string node_version;
   std::string node_id;
   std::string storage_layout;
+  std::string network;
+  std::string chain_id;
+  std::string public_base_url;
+  std::string promoted_at;
+  std::string source_backup_id;
+  std::string source_created_at;
+  std::string source_node_version;
   std::filesystem::path repository_dir;
   std::filesystem::path snapshot_dir;
   std::filesystem::path manifest_path;
@@ -116,9 +123,12 @@ struct BackupSnapshotSummary
   uint64_t file_count = 0;
   uint64_t object_count = 0;
   uint64_t total_bytes = 0;
+  uint64_t source_head_height = 0;
+  uint64_t source_lib_height = 0;
   RestoreSpaceEstimate restore_space;
   bool snapshot_complete = false;
   bool latest = false;
+  bool public_bootstrap = false;
 };
 
 struct BackupSnapshotListResult

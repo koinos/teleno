@@ -205,7 +205,27 @@ void write_public_snapshot( const std::filesystem::path& repo,
               "    \"object_download_bytes\": " + std::to_string( total_bytes ) + ",\n"
               "    \"archive_bytes\": 0\n"
               "  },\n"
-              "  \"restore\": { \"start_as_observer_first\": true, \"force_block_producer_disabled_on_first_start\": true }\n"
+              "  \"restore\": { \"start_as_observer_first\": true, \"force_block_producer_disabled_on_first_start\": true },\n"
+              "  \"public_bootstrap\": {\n"
+              "    \"version\": 1,\n"
+              "    \"network\": \"testnet\",\n"
+              "    \"chain_id\": \"test-chain\",\n"
+              "    \"source_backup_id\": \"" + backup_id + "\",\n"
+              "    \"public_base_url\": \"file://" + repo.string() + "\",\n"
+              "    \"promoted_at\": \"20260619T000000Z\",\n"
+              "    \"producer_mode\": false,\n"
+              "    \"sanitized_config\": true,\n"
+              "    \"source\": {\n"
+              "      \"backup_id\": \"" + backup_id + "\",\n"
+              "      \"created_at\": \"20260619T000000Z\",\n"
+              "      \"node_id\": \"public-test\",\n"
+              "      \"node_version\": \"test\",\n"
+              "      \"storage_layout\": \"unified\",\n"
+              "      \"chain_id\": \"test-chain\",\n"
+              "      \"head_height\": 777,\n"
+              "      \"lib_height\": 700\n"
+              "    }\n"
+              "  }\n"
               "}\n";
   const auto public_metadata_json = json_string( nlohmann::json{
     { "format", "teleno-public-bootstrap-snapshot" },
@@ -311,6 +331,12 @@ int main()
     assert( list.snapshots[ 0 ].backup_id == backup_id );
     assert( list.snapshots[ 0 ].latest );
     assert( list.snapshots[ 0 ].file_count == 4 );
+    assert( list.snapshots[ 0 ].public_bootstrap );
+    assert( list.snapshots[ 0 ].network == "testnet" );
+    assert( list.snapshots[ 0 ].chain_id == "test-chain" );
+    assert( list.snapshots[ 0 ].public_base_url.find( "file://" ) == 0 );
+    assert( list.snapshots[ 0 ].source_head_height == 777 );
+    assert( list.snapshots[ 0 ].source_lib_height == 700 );
     assert( !std::filesystem::exists( local_repo / "objects" ) );
 
     auto exact_local_repo = root / "exact-local-repo";
