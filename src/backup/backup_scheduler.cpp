@@ -88,6 +88,19 @@ BackupScheduler::BackupScheduler( BackupService* backup_service,
     if( _cfg.backup.remote.directory.empty() )
       throw std::runtime_error( "backup.remote.directory is required for scheduled remote backups" );
   }
+  if( _cfg.backup.public_publish.enabled )
+  {
+    if( !_cfg.backup.remote.enabled )
+      throw std::runtime_error( "backup.remote.enabled must be true for scheduled public bootstrap publishing" );
+    if( _cfg.backup.public_publish.directory.empty() )
+      throw std::runtime_error( "backup.public-publish.directory is required for scheduled public bootstrap publishing" );
+    if( _cfg.backup.public_publish.base_url.empty() )
+      throw std::runtime_error( "backup.public-publish.base-url is required for scheduled public bootstrap publishing" );
+    if( _cfg.backup.public_publish.network.empty() )
+      throw std::runtime_error( "backup.public-publish.network is required for scheduled public bootstrap publishing" );
+    if( _cfg.backup.public_publish.observer_config_file.empty() )
+      throw std::runtime_error( "backup.public-publish.observer-config-file is required for scheduled public bootstrap publishing" );
+  }
 }
 
 BackupScheduler::~BackupScheduler()
@@ -207,7 +220,7 @@ void BackupScheduler::run_once()
 
   try
   {
-    auto started = _backup_service->start_local_snapshot_async();
+    auto started = _backup_service->start_configured_backup_async( _cfg.backup.remote.enabled );
     LOG( info ) << "[backup_scheduler] Started scheduled backup operation_id="
                 << started.operation_id << " head_height=" << head_height;
 
@@ -215,34 +228,27 @@ void BackupScheduler::run_once()
     const auto finished = _backup_service->status();
     if( finished.state == BackupOperationState::succeeded )
     {
-      if( _cfg.backup.remote.enabled )
+      if( finished.has_remote_upload )
       {
-        SftpTransferOptions transfer_options;
-        transfer_options.cancel_requested = [this]() {
-          return stop_requested();
-        };
-        transfer_options.progress = []( const SftpTransferProgress& progress ) {
-          LOG( info ) << "[backup_scheduler] Remote backup progress"
-                      << " phase=" << progress.phase
-                      << " backup_id=" << progress.backup_id
-                      << " completed_batches=" << progress.completed_batches
-                      << " total_batches=" << progress.total_batches
-                      << " attempt=" << progress.attempt
-                      << " file_count=" << progress.file_count
-                      << " total_bytes=" << progress.total_bytes;
-        };
-
-        auto upload = upload_latest_snapshot_with_managed_sftp(
-          _cfg.backup.local.directory,
-          _cfg.backup.ssh,
-          _cfg.backup.remote,
-          transfer_options );
         LOG( info ) << "[backup_scheduler] Scheduled remote backup uploaded"
-                    << " backup_id=" << upload.backup_id
-                    << " remote_directory=" << upload.remote_directory
-                    << " file_count=" << upload.file_count
-                    << " total_bytes=" << upload.total_bytes
-                    << " retries=" << upload.retry_count;
+                    << " backup_id=" << finished.remote_upload.backup_id
+                    << " remote_directory=" << finished.remote_upload.remote_directory
+                    << " file_count=" << finished.remote_upload.file_count
+                    << " total_bytes=" << finished.remote_upload.total_bytes
+                    << " retries=" << finished.remote_upload.retry_count;
+      }
+      if( finished.has_public_publish )
+      {
+        LOG( info ) << "[backup_scheduler] Scheduled public bootstrap published"
+                    << " backup_id=" << finished.public_publish.backup_id
+                    << " public_base_url=" << finished.public_publish.public_base_url
+                    << " removed_public_snapshot_count="
+                    << finished.public_publish.removed_public_snapshot_count;
+      }
+      if( !finished.delete_results.empty() )
+      {
+        LOG( info ) << "[backup_scheduler] Scheduled remote retention complete"
+                    << " delete_result_count=" << finished.delete_results.size();
       }
 
       _last_successful_backup_height = head_height;

@@ -60,6 +60,13 @@ NodeConfig valid_backup_config( const std::filesystem::path& root )
   cfg.backup.remote.directory = "/srv/teleno-backups";
   cfg.backup.remote.retention_count = 14;
   cfg.backup.remote.retention_days = 30;
+  cfg.backup.public_publish.enabled = true;
+  cfg.backup.public_publish.directory = "/srv/teleno-backups/testnet/public/teleno-bootstrap";
+  cfg.backup.public_publish.base_url = "https://testnet.koinosfoundation.org/backups/testnet/teleno-bootstrap";
+  cfg.backup.public_publish.network = "testnet";
+  cfg.backup.public_publish.observer_config_file = ( root / "public-bootstrap-observer.yml" ).string();
+  cfg.backup.public_publish.retention_count = 1;
+  cfg.backup.public_publish.upload_temp_suffix = ".public-partial";
   cfg.backup.ssh.enabled = true;
   cfg.backup.ssh.host = "10.0.0.2";
   cfg.backup.ssh.port = 22;
@@ -97,6 +104,13 @@ int main()
                 "example ssh-ed25519 AAAA\n",
                 std::filesystem::perms::owner_read | std::filesystem::perms::group_read
                   | std::filesystem::perms::others_read );
+    write_file( root / "public-bootstrap-observer.yml",
+                "chain:\n"
+                "  verify-blocks: true\n"
+                "features:\n"
+                "  block_producer: false\n",
+                std::filesystem::perms::owner_read | std::filesystem::perms::group_read
+                  | std::filesystem::perms::others_read );
 
     auto cfg = valid_backup_config( root );
     auto plan = build_backup_dry_run_plan( cfg, basedir, basedir / "config.yml" );
@@ -107,12 +121,16 @@ int main()
     assert( plan.schedule_interval == "6h" );
     assert( plan.local_enabled );
     assert( plan.remote_enabled );
+    assert( plan.public_publish_enabled );
+    assert( plan.public_publish_base_url == "https://testnet.koinosfoundation.org/backups/testnet/teleno-bootstrap" );
+    assert( plan.public_publish_observer_config_file == ( root / "public-bootstrap-observer.yml" ).string() );
     assert( plan.ssh_enabled );
     assert( plan.source_db_exists );
     assert( plan.source_unified_chain );
     assert( !plan.has_errors() );
     assert( backup_dry_run_plan_to_text( plan ).find( "Teleno native backup dry run" ) != std::string::npos );
     assert( backup_dry_run_plan_to_json( plan ).find( "\"node_id\": \"testnet-producer-1\"" ) != std::string::npos );
+    assert( backup_dry_run_plan_to_json( plan ).find( "\"public_publish\"" ) != std::string::npos );
 
     std::filesystem::remove_all( root );
   }
@@ -126,6 +144,7 @@ int main()
     auto cfg = valid_backup_config( root );
     cfg.backup.local.enabled = false;
     cfg.backup.ssh.password_file = ( root / "missing-password" ).string();
+    cfg.backup.public_publish.enabled = false;
 
     auto plan = build_backup_dry_run_plan( cfg, basedir, basedir / "config.yml" );
     assert( plan.has_errors() );
@@ -146,6 +165,7 @@ int main()
 
     auto cfg = valid_backup_config( root );
     cfg.backup.ssh.transport = "managed-openssh";
+    cfg.backup.public_publish.enabled = false;
 
     auto plan = build_backup_dry_run_plan( cfg, basedir, basedir / "config.yml" );
     assert( plan.has_errors() );
@@ -167,6 +187,7 @@ int main()
     auto cfg = valid_backup_config( root );
     cfg.backup.local.enabled = false;
     cfg.backup.ssh.known_hosts_file.clear();
+    cfg.backup.public_publish.enabled = false;
 
     auto plan = build_backup_dry_run_plan( cfg, basedir, basedir / "config.yml" );
     assert( plan.has_errors() );

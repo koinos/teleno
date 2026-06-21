@@ -411,6 +411,24 @@ NodeConfig load_config( const std::filesystem::path& config_path,
           yaml_get< std::string >( public_restore, "signature-public-key-file", cfg.backup.public_restore.signature_public_key_file );
       }
 
+      if( auto public_publish = yaml_child( b, "public-publish" ); public_publish.IsDefined() )
+      {
+        cfg.backup.public_publish.enabled =
+          yaml_get< bool >( public_publish, "enabled", cfg.backup.public_publish.enabled );
+        cfg.backup.public_publish.directory =
+          yaml_get< std::string >( public_publish, "directory", cfg.backup.public_publish.directory );
+        cfg.backup.public_publish.base_url =
+          yaml_get< std::string >( public_publish, "base-url", cfg.backup.public_publish.base_url );
+        cfg.backup.public_publish.network =
+          yaml_get< std::string >( public_publish, "network", cfg.backup.public_publish.network );
+        cfg.backup.public_publish.observer_config_file =
+          yaml_get< std::string >( public_publish, "observer-config-file", cfg.backup.public_publish.observer_config_file );
+        cfg.backup.public_publish.retention_count =
+          yaml_get< uint64_t >( public_publish, "retention-count", cfg.backup.public_publish.retention_count );
+        cfg.backup.public_publish.upload_temp_suffix =
+          yaml_get< std::string >( public_publish, "upload-temp-suffix", cfg.backup.public_publish.upload_temp_suffix );
+      }
+
       if( auto admin = yaml_child( b, "admin" ); admin.IsDefined() )
       {
         cfg.backup.admin.enabled =

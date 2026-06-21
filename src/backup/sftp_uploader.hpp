@@ -35,6 +35,22 @@ struct SftpUploadResult
   uint64_t retry_count = 0;
 };
 
+struct PublicBootstrapPublishResult
+{
+  std::string backup_id;
+  std::filesystem::path repository_dir;
+  std::string public_directory;
+  std::string public_base_url;
+  std::string network;
+  std::string sanitized_config_sha256;
+  uint64_t sanitized_config_size = 0;
+  uint64_t file_count = 0;
+  uint64_t object_count = 0;
+  uint64_t total_bytes = 0;
+  uint64_t removed_public_snapshot_count = 0;
+  std::vector< std::string > removed_public_snapshot_ids;
+};
+
 struct SftpRestoreObjectDownload
 {
   std::string sha256;
@@ -109,6 +125,11 @@ SftpUploadResult upload_latest_snapshot_with_managed_sftp( const std::filesystem
                                                            const BackupSshConfig& ssh,
                                                            const BackupRemoteConfig& remote,
                                                            const SftpTransferOptions& options = {} );
+PublicBootstrapPublishResult publish_latest_public_bootstrap_with_managed_sftp(
+  const std::filesystem::path& repository_dir,
+  const BackupSshConfig& ssh,
+  const BackupPublicPublishConfig& public_publish,
+  const SftpTransferOptions& options = {} );
 BackupSnapshotListResult list_remote_backup_snapshots_with_sftp( const std::filesystem::path& repository_dir,
                                                                  const BackupSshConfig& ssh,
                                                                  const BackupRemoteConfig& remote );
@@ -147,6 +168,8 @@ BackupDeleteResult delete_remote_backup_snapshot_with_managed_sftp( const std::f
 std::string sftp_upload_plan_to_text( const SftpUploadPlan& plan );
 std::string sftp_upload_result_to_text( const SftpUploadResult& result );
 std::string sftp_upload_result_to_json( const SftpUploadResult& result );
+std::string public_bootstrap_publish_result_to_text( const PublicBootstrapPublishResult& result );
+std::string public_bootstrap_publish_result_to_json( const PublicBootstrapPublishResult& result );
 std::string sftp_restore_fetch_result_to_text( const SftpRestoreFetchResult& result );
 std::string sftp_restore_fetch_result_to_json( const SftpRestoreFetchResult& result );
 

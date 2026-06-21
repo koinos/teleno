@@ -69,6 +69,17 @@ struct BackupPublicRestoreConfig
   std::string signature_public_key_file;
 };
 
+struct BackupPublicPublishConfig
+{
+  bool enabled = false;
+  std::string directory;
+  std::string base_url;
+  std::string network = "mainnet";
+  std::string observer_config_file;
+  uint64_t retention_count = 1;
+  std::string upload_temp_suffix = ".partial";
+};
+
 struct BackupAdminConfig
 {
   bool enabled = false;
@@ -87,6 +98,7 @@ struct BackupConfig
   BackupSshConfig ssh;
   BackupRemoteConfig remote;
   BackupPublicRestoreConfig public_restore;
+  BackupPublicPublishConfig public_publish;
   BackupAdminConfig admin;
 };
 

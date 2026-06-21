@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <ctime>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -30,6 +31,21 @@ namespace {
 constexpr uint64_t repository_download_margin_bytes = 128ULL * 1024ULL * 1024ULL;
 
 std::string read_file( const std::filesystem::path& path );
+
+std::string utc_timestamp()
+{
+  const auto now = std::chrono::system_clock::now();
+  const auto time = std::chrono::system_clock::to_time_t( now );
+  std::tm tm{};
+#if defined( _WIN32 )
+  gmtime_s( &tm, &time );
+#else
+  gmtime_r( &time, &tm );
+#endif
+  std::ostringstream out;
+  out << std::put_time( &tm, "%Y%m%dT%H%M%SZ" );
+  return out.str();
+}
 
 std::string read_secret_file( const std::filesystem::path& path )
 {
@@ -142,6 +158,39 @@ std::string sha256_file( const std::filesystem::path& path )
   return bytes_to_hex( digest, digest_size );
 }
 
+std::string sha256_bytes( const std::string& bytes )
+{
+  EVP_MD_CTX* raw_ctx = EVP_MD_CTX_new();
+  if( !raw_ctx )
+    throw std::runtime_error( "failed to allocate SHA-256 context" );
+  std::unique_ptr< EVP_MD_CTX, decltype( &EVP_MD_CTX_free ) > ctx( raw_ctx, EVP_MD_CTX_free );
+
+  if( EVP_DigestInit_ex( ctx.get(), EVP_sha256(), nullptr ) != 1 )
+    throw std::runtime_error( "failed to initialize SHA-256 context" );
+  if( !bytes.empty()
+      && EVP_DigestUpdate( ctx.get(), bytes.data(), bytes.size() ) != 1 )
+    throw std::runtime_error( "failed to update SHA-256" );
+
+  unsigned char digest[ EVP_MAX_MD_SIZE ];
+  unsigned int digest_size = 0;
+  if( EVP_DigestFinal_ex( ctx.get(), digest, &digest_size ) != 1 )
+    throw std::runtime_error( "failed to finalize SHA-256" );
+  return bytes_to_hex( digest, digest_size );
+}
+
+std::string json_bytes( const nlohmann::json& value )
+{
+  return value.dump( 2 ) + "\n";
+}
+
+std::string lower_ascii( std::string value )
+{
+  std::transform( value.begin(), value.end(), value.begin(), []( unsigned char ch ) {
+    return static_cast< char >( std::tolower( ch ) );
+  } );
+  return value;
+}
+
 std::string sftp_quote( const std::string& value )
 {
   std::string out = "\"";
@@ -197,6 +246,92 @@ void validate_relative_path( const std::string& relative_path )
     if( value == "." || value == ".." )
       throw std::runtime_error( "backup metadata contains an unsafe path: " + relative_path );
   }
+}
+
+bool has_string_suffix( const std::string& value, const std::string& suffix )
+{
+  return value.size() >= suffix.size()
+         && value.compare( value.size() - suffix.size(), suffix.size(), suffix ) == 0;
+}
+
+bool public_snapshot_path_allowed( const std::string& relative_path )
+{
+  if( relative_path == "config.yml"
+      || relative_path == "chain/genesis_data.json"
+      || relative_path == "jsonrpc/descriptors/koinos_descriptors.pb" )
+    return true;
+  return relative_path.rfind( "db/", 0 ) == 0;
+}
+
+void validate_public_snapshot_path( const std::string& relative_path )
+{
+  validate_relative_path( relative_path );
+  const auto lower = lower_ascii( relative_path );
+  if( lower == ".teleno-native-backups/admin.token"
+      || lower == ".teleno-native-backups/teleno-native-backup-config.yml"
+      || lower == "block_producer/private.key"
+      || lower.find( "/.ssh/" ) != std::string::npos
+      || lower.rfind( ".ssh/", 0 ) == 0
+      || lower.find( "wallet" ) != std::string::npos
+      || lower.find( "id_rsa" ) != std::string::npos
+      || lower.find( "id_ed25519" ) != std::string::npos
+      || lower.find( "private-key" ) != std::string::npos
+      || lower.find( "private_key" ) != std::string::npos
+      || lower.find( "password" ) != std::string::npos
+      || lower.find( "passphrase" ) != std::string::npos
+      || has_string_suffix( lower, ".token" )
+      || has_string_suffix( lower, ".pem" )
+      || has_string_suffix( lower, ".p12" )
+      || has_string_suffix( lower, ".pfx" ) )
+    throw std::runtime_error( "public bootstrap snapshot contains denied path: " + relative_path );
+  if( !public_snapshot_path_allowed( relative_path ) )
+    throw std::runtime_error( "public bootstrap snapshot contains non-allowlisted path: " + relative_path );
+}
+
+void validate_public_observer_config( const std::string& config )
+{
+  const auto lower = lower_ascii( config );
+  if( lower.find( "block_producer: true" ) != std::string::npos )
+    throw std::runtime_error( "public bootstrap observer config enables block_producer feature" );
+  if( lower.find( "features:" ) == std::string::npos
+      || lower.find( "block_producer: false" ) == std::string::npos )
+    throw std::runtime_error( "public bootstrap observer config must explicitly disable block production" );
+  if( lower.find( "verify-blocks: true" ) == std::string::npos )
+    throw std::runtime_error( "public bootstrap observer config must enable chain.verify-blocks" );
+  for( const auto& forbidden: { "private-key-file", "password-file", "passphrase-file", "admin.token" } )
+  {
+    if( lower.find( forbidden ) != std::string::npos )
+      throw std::runtime_error( std::string( "public bootstrap observer config contains forbidden setting: " )
+                                + forbidden );
+  }
+}
+
+uint64_t optional_json_uint64( const nlohmann::json& first,
+                               const nlohmann::json& second,
+                               const std::initializer_list< std::string >& keys )
+{
+  for( const auto& key: keys )
+  {
+    if( first.is_object() && first.contains( key ) && first.at( key ).is_number_unsigned() )
+      return first.at( key ).get< uint64_t >();
+    if( second.is_object() && second.contains( key ) && second.at( key ).is_number_unsigned() )
+      return second.at( key ).get< uint64_t >();
+  }
+  return 0;
+}
+
+std::string optional_json_string( const nlohmann::json& first,
+                                  const nlohmann::json& second,
+                                  const std::initializer_list< std::string >& keys )
+{
+  for( const auto& key: keys )
+  {
+    if( first.is_object() && first.contains( key ) && first.at( key ).is_string() )
+      return first.at( key ).get< std::string >();
+    if( second.is_object() && second.contains( key ) && second.at( key ).is_string() )
+      return second.at( key ).get< std::string >();
+  }
+  return {};
 }
 
 void validate_backup_id_fragment( const std::string& backup_id )
@@ -395,6 +530,30 @@ struct RemoteSnapshotMetadata
   uint64_t metadata_file_count = 0;
   uint64_t metadata_bytes = 0;
   std::map< std::string, uint64_t > objects;
+};
+
+struct PublicBootstrapPublishPlan
+{
+  std::filesystem::path repository_dir;
+  std::string backup_id;
+  std::string public_directory;
+  std::string public_base_url;
+  std::string network;
+  std::string sanitized_config_sha256;
+  uint64_t sanitized_config_size = 0;
+  uint64_t file_count = 0;
+  uint64_t object_count = 0;
+  uint64_t total_bytes = 0;
+  nlohmann::json latest_json;
+  nlohmann::json manifest_json;
+  nlohmann::json files_json;
+  nlohmann::json public_metadata_json;
+  std::filesystem::path sanitized_config_tmp;
+  std::filesystem::path latest_tmp;
+  std::filesystem::path manifest_tmp;
+  std::filesystem::path files_tmp;
+  std::filesystem::path public_metadata_tmp;
+  std::filesystem::path complete_tmp;
 };
 
 ParsedSftpCommand parse_sftp_command( const std::string& command )
@@ -1217,6 +1376,245 @@ std::string latest_json_for_remote_backup_id( const std::string& backup_id )
   return out.str();
 }
 
+std::filesystem::path write_temp_file( const std::string& prefix,
+                                       const std::string& content )
+{
+  const auto file = std::filesystem::temp_directory_path()
+                    / ( prefix + "-" + std::to_string( std::chrono::duration_cast< std::chrono::milliseconds >(
+                          std::chrono::system_clock::now().time_since_epoch() ).count() )
+                        + "-" + std::to_string( std::rand() ) );
+  std::ofstream out( file, std::ios::binary | std::ios::trunc );
+  if( !out )
+    throw std::runtime_error( "failed to write temporary file: " + file.string() );
+  out << content;
+  return file;
+}
+
+nlohmann::json public_latest_json_for_backup_id( const std::string& backup_id )
+{
+  return {
+    { "format", "teleno-native-latest-snapshot" },
+    { "version", 1 },
+    { "backup_id", backup_id },
+    { "snapshot_dir", backup_id },
+    { "manifest", "snapshots/" + backup_id + "/manifest.json" },
+    { "files", "snapshots/" + backup_id + "/files.json" },
+    { "public_metadata", "snapshots/" + backup_id + "/public-bootstrap.json" },
+  };
+}
+
+PublicBootstrapPublishPlan build_public_bootstrap_publish_plan(
+  const std::filesystem::path& repository_dir,
+  const BackupPublicPublishConfig& public_publish )
+{
+  if( repository_dir.empty() )
+    throw std::runtime_error( "public bootstrap publish requires backup.local.directory" );
+  if( !public_publish.enabled )
+    throw std::runtime_error( "public bootstrap publish requires backup.public-publish.enabled=true" );
+  if( public_publish.directory.empty() )
+    throw std::runtime_error( "public bootstrap publish requires backup.public-publish.directory" );
+  if( public_publish.base_url.empty() )
+    throw std::runtime_error( "public bootstrap publish requires backup.public-publish.base-url" );
+  if( public_publish.network.empty() )
+    throw std::runtime_error( "public bootstrap publish requires backup.public-publish.network" );
+  if( public_publish.observer_config_file.empty() )
+    throw std::runtime_error( "public bootstrap publish requires backup.public-publish.observer-config-file" );
+
+  const auto backup_id = latest_backup_id( repository_dir );
+  validate_backup_id_fragment( backup_id );
+  const auto snapshot_dir = repository_dir / "snapshots" / backup_id;
+  if( !std::filesystem::exists( snapshot_dir / "COMPLETE" ) )
+    throw std::runtime_error( "latest local snapshot is not complete: " + snapshot_dir.string() );
+
+  auto source_manifest = nlohmann::json::parse( read_file( snapshot_dir / "manifest.json" ) );
+  auto source_files = nlohmann::json::parse( read_file( snapshot_dir / "files.json" ) );
+  if( source_manifest.value( "backup_id", std::string{} ) != backup_id )
+    throw std::runtime_error( "snapshot manifest backup_id does not match latest backup" );
+  if( source_files.value( "backup_id", std::string{} ) != backup_id )
+    throw std::runtime_error( "snapshot files backup_id does not match latest backup" );
+  if( !source_files.contains( "files" ) || !source_files.at( "files" ).is_array() )
+    throw std::runtime_error( "snapshot files.json has unexpected format" );
+
+  const auto observer_config = read_file( public_publish.observer_config_file );
+  validate_public_observer_config( observer_config );
+  const auto config_sha = sha256_bytes( observer_config );
+  const auto config_size = static_cast< uint64_t >( observer_config.size() );
+
+  std::vector< nlohmann::json > output_entries;
+  std::map< std::string, uint64_t > unique_objects;
+  uint64_t total_bytes = 0;
+  uint64_t restored_database_bytes = 0;
+  uint64_t runtime_files_bytes = 0;
+
+  for( const auto& file: source_files.at( "files" ) )
+  {
+    const auto relative_path = file.at( "path" ).get< std::string >();
+    validate_public_snapshot_path( relative_path );
+    const auto sha256 = file.at( "sha256" ).get< std::string >();
+    if( sha256.size() != 64 )
+      throw std::runtime_error( "invalid SHA-256 in snapshot files.json: " + sha256 );
+    const auto size_bytes = file.value( "size_bytes", 0ULL );
+    const auto object_file = object_path( repository_dir, sha256 );
+    if( !std::filesystem::is_regular_file( object_file ) )
+      throw std::runtime_error( "missing snapshot object for public publish: " + object_file.string() );
+    std::error_code size_ec;
+    const auto actual_size = std::filesystem::file_size( object_file, size_ec );
+    if( size_ec || actual_size != size_bytes )
+      throw std::runtime_error( "snapshot object size mismatch for public publish: " + object_file.string() );
+
+    nlohmann::json entry = {
+      { "path", relative_path },
+      { "sha256", sha256 },
+      { "size_bytes", size_bytes },
+      { "runtime_file", file.value( "runtime_file", false ) },
+    };
+    if( relative_path == "config.yml" )
+    {
+      entry[ "sha256" ] = config_sha;
+      entry[ "size_bytes" ] = config_size;
+      entry[ "runtime_file" ] = true;
+    }
+
+    const auto entry_size = entry.at( "size_bytes" ).get< uint64_t >();
+    const auto entry_sha = entry.at( "sha256" ).get< std::string >();
+    total_bytes += entry_size;
+    if( relative_path.rfind( "db/", 0 ) == 0 )
+      restored_database_bytes += entry_size;
+    else
+      runtime_files_bytes += entry_size;
+    unique_objects.emplace( entry_sha, entry_size );
+    output_entries.push_back( std::move( entry ) );
+  }
+
+  std::sort( output_entries.begin(), output_entries.end(), []( const auto& lhs, const auto& rhs ) {
+    return lhs.at( "path" ).template get< std::string >()
+           < rhs.at( "path" ).template get< std::string >();
+  } );
+
+  const uint64_t metadata_overhead_bytes = 128ULL * 1024ULL * 1024ULL;
+  const uint64_t recommended_margin_bytes = std::max< uint64_t >(
+    10ULL * 1024ULL * 1024ULL * 1024ULL,
+    restored_database_bytes / 5ULL );
+  nlohmann::json sizes = {
+    { "restored_database_bytes", restored_database_bytes },
+    { "runtime_files_bytes", runtime_files_bytes },
+    { "object_download_bytes", total_bytes },
+    { "archive_bytes", 0 },
+    { "minimum_target_free_bytes", restored_database_bytes + runtime_files_bytes + metadata_overhead_bytes },
+    { "recommended_target_free_bytes", restored_database_bytes + runtime_files_bytes + metadata_overhead_bytes + recommended_margin_bytes },
+  };
+
+  const auto source = source_manifest.value( "source", nlohmann::json::object() );
+  const auto node = source_manifest.value( "node", nlohmann::json::object() );
+  const auto source_chain = source_manifest.value( "chain", nlohmann::json::object() );
+  const auto source_head = source_manifest.value( "head", nlohmann::json::object() );
+  const auto source_lib = source_manifest.value( "lib", nlohmann::json::object() );
+  const auto source_snapshot = source_manifest.value( "snapshot", nlohmann::json::object() );
+  nlohmann::json public_source = {
+    { "backup_id", backup_id },
+    { "created_at", source_manifest.value( "created_at", std::string{} ) },
+    { "node_id", source.value( "node_id", std::string{} ) },
+    { "node_version", node.value( "version", std::string{} ) },
+    { "storage_layout", source.value( "storage_layout", std::string( "unified" ) ) },
+    { "chain_id", optional_json_string( source, source_chain, { "chain_id" } ) },
+    { "head_height", optional_json_uint64( source, source_head, { "head_height", "height" } ) },
+    { "lib_height", optional_json_uint64( source, source_lib, { "lib_height", "height" } ) },
+  };
+  if( public_source.at( "head_height" ).get< uint64_t >() == 0 )
+    public_source[ "head_height" ] = optional_json_uint64( source_snapshot, source_chain, { "head_height" } );
+  if( public_source.at( "lib_height" ).get< uint64_t >() == 0 )
+    public_source[ "lib_height" ] = optional_json_uint64( source_snapshot, source_chain, { "lib_height" } );
+
+  auto public_base_url = public_publish.base_url;
+  while( !public_base_url.empty() && public_base_url.back() == '/' )
+    public_base_url.pop_back();
+  const auto promoted_at = utc_timestamp();
+
+  auto public_manifest = source_manifest;
+  public_manifest[ "source" ] = {
+    { "node_id", "public-bootstrap-" + public_publish.network },
+    { "storage_layout", source.value( "storage_layout", std::string( "unified" ) ) },
+    { "network", public_publish.network },
+    { "chain_id", public_source.value( "chain_id", std::string{} ) },
+  };
+  public_manifest[ "repository" ] = {
+    { "type", "public-bootstrap-object-store" },
+    { "base_url", public_base_url },
+  };
+  public_manifest[ "snapshot" ] = {
+    { "file_count", static_cast< uint64_t >( output_entries.size() ) },
+    { "object_count", static_cast< uint64_t >( unique_objects.size() ) },
+    { "total_bytes", total_bytes },
+  };
+  public_manifest[ "sizes" ] = sizes;
+  public_manifest[ "restore" ] = {
+    { "requires_node_stop", true },
+    { "start_as_observer_first", true },
+    { "force_block_producer_disabled_on_first_start", true },
+  };
+  public_manifest[ "public_bootstrap" ] = {
+    { "version", 1 },
+    { "network", public_publish.network },
+    { "chain_id", public_source.value( "chain_id", std::string{} ) },
+    { "source_backup_id", backup_id },
+    { "public_base_url", public_base_url },
+    { "promoted_at", promoted_at },
+    { "producer_mode", false },
+    { "sanitized_config", true },
+    { "source", public_source },
+    { "restore_space", sizes },
+  };
+
+  nlohmann::json public_files = {
+    { "format", "teleno-native-snapshot-files" },
+    { "version", source_files.value( "version", 1 ) },
+    { "backup_id", backup_id },
+    { "files", output_entries },
+  };
+
+  nlohmann::json public_metadata = {
+    { "format", "teleno-public-bootstrap-snapshot" },
+    { "version", 1 },
+    { "network", public_publish.network },
+    { "chain_id", public_source.value( "chain_id", std::string{} ) },
+    { "backup_id", backup_id },
+    { "source_backup_id", backup_id },
+    { "public_base_url", public_base_url },
+    { "promoted_at", promoted_at },
+    { "sanitized_config_sha256", config_sha },
+    { "sanitized_config_size_bytes", config_size },
+    { "file_count", static_cast< uint64_t >( output_entries.size() ) },
+    { "object_count", static_cast< uint64_t >( unique_objects.size() ) },
+    { "total_bytes", total_bytes },
+    { "producer_mode", false },
+    { "source", public_source },
+    { "restore_space", sizes },
+  };
+
+  PublicBootstrapPublishPlan plan;
+  plan.repository_dir = repository_dir;
+  plan.backup_id = backup_id;
+  plan.public_directory = public_publish.directory;
+  plan.public_base_url = public_base_url;
+  plan.network = public_publish.network;
+  plan.sanitized_config_sha256 = config_sha;
+  plan.sanitized_config_size = config_size;
+  plan.file_count = static_cast< uint64_t >( output_entries.size() );
+  plan.object_count = static_cast< uint64_t >( unique_objects.size() );
+  plan.total_bytes = total_bytes;
+  plan.latest_json = public_latest_json_for_backup_id( backup_id );
+  plan.manifest_json = std::move( public_manifest );
+  plan.files_json = std::move( public_files );
+  plan.public_metadata_json = std::move( public_metadata );
+  plan.sanitized_config_tmp = write_temp_file( "teleno-public-config", observer_config );
+  plan.latest_tmp = write_temp_file( "teleno-public-latest", json_bytes( plan.latest_json ) );
+  plan.manifest_tmp = write_temp_file( "teleno-public-manifest", json_bytes( plan.manifest_json ) );
+  plan.files_tmp = write_temp_file( "teleno-public-files", json_bytes( plan.files_json ) );
+  plan.public_metadata_tmp = write_temp_file( "teleno-public-metadata", json_bytes( plan.public_metadata_json ) );
+  plan.complete_tmp = write_temp_file( "teleno-public-complete", "complete\n" );
+  return plan;
+}
+
 std::vector< RemoteSnapshotMetadata > download_remote_snapshot_metadata(
   NativeSftpClient& client,
   const std::filesystem::path& metadata_root,
@@ -1319,6 +1717,197 @@ void cache_downloaded_snapshot_metadata( const std::filesystem::path& repository
   {
     throw std::runtime_error( "local snapshot metadata exists but is incomplete: " + local_snapshot_dir.string() );
   }
+}
+
+void execute_sftp_commands( NativeSftpClient& client,
+                            const std::vector< std::string >& commands )
+{
+  for( const auto& command: commands )
+    client.execute( parse_sftp_command( command ) );
+}
+
+void ensure_remote_directory( NativeSftpClient& client,
+                              const std::string& remote_directory )
+{
+  std::vector< std::string > commands;
+  add_remote_directory_mkdirs( commands, remote_directory );
+  execute_sftp_commands( client, commands );
+}
+
+void ensure_remote_file_parent( NativeSftpClient& client,
+                                const std::string& remote_file )
+{
+  const auto parent = remote_parent_path( remote_file );
+  if( !parent.empty() )
+    ensure_remote_directory( client, parent );
+}
+
+void upload_public_file( NativeSftpClient& client,
+                         const std::filesystem::path& local_file,
+                         const std::string& remote_file )
+{
+  ensure_remote_file_parent( client, remote_file );
+  client.upload( local_file, remote_file );
+}
+
+bool remove_public_snapshot_metadata_if_exists( NativeSftpClient& client,
+                                                const std::string& public_directory,
+                                                const std::string& backup_id )
+{
+  validate_backup_id_fragment( backup_id );
+  const auto snapshot_dir = remote_join( public_directory, remote_join( "snapshots", backup_id ) );
+  if( !client.exists( snapshot_dir ) )
+    return false;
+
+  const auto entries = client.list_directory( snapshot_dir );
+  for( const auto& entry: entries )
+  {
+    if( entry.directory )
+      throw std::runtime_error( "public bootstrap snapshot contains unexpected directory: "
+                                + remote_join( snapshot_dir, entry.name ) );
+    client.remove_file_if_exists( remote_join( snapshot_dir, entry.name ) );
+  }
+  return client.remove_directory_if_exists( snapshot_dir, false );
+}
+
+std::vector< std::string > prune_public_bootstrap_metadata( NativeSftpClient& client,
+                                                            const std::string& public_directory,
+                                                            uint64_t retention_count )
+{
+  std::vector< std::string > removed;
+  if( retention_count == 0 )
+    return removed;
+
+  const auto snapshots_dir = remote_join( public_directory, "snapshots" );
+  if( !client.exists( snapshots_dir ) )
+    return removed;
+
+  std::vector< std::string > completed;
+  for( const auto& entry: client.list_directory( snapshots_dir ) )
+  {
+    if( !entry.directory )
+      continue;
+    if( entry.name.size() >= 8 && entry.name.substr( entry.name.size() - 8 ) == ".partial" )
+      continue;
+    if( entry.name.find( ".partial-" ) != std::string::npos )
+      continue;
+    validate_backup_id_fragment( entry.name );
+    if( client.exists( remote_join( snapshots_dir, remote_join( entry.name, "COMPLETE" ) ) ) )
+      completed.push_back( entry.name );
+  }
+
+  std::sort( completed.begin(), completed.end() );
+  if( completed.size() <= retention_count )
+    return removed;
+
+  const auto remove_count = completed.size() - static_cast< std::size_t >( retention_count );
+  for( std::size_t i = 0; i < remove_count; ++i )
+  {
+    if( remove_public_snapshot_metadata_if_exists( client, public_directory, completed[ i ] ) )
+      removed.push_back( completed[ i ] );
+  }
+  return removed;
+}
+
+PublicBootstrapPublishResult publish_public_bootstrap_plan_with_sftp(
+  const PublicBootstrapPublishPlan& plan,
+  const BackupSshConfig& ssh,
+  const BackupPublicPublishConfig& public_publish,
+  const SftpTransferOptions& options )
+{
+  NativeSftpClient client( ssh );
+  const auto public_directory = plan.public_directory;
+  ensure_remote_directory( client, public_directory );
+  if( !client.exists( remote_join( public_directory, "objects" ) ) )
+    throw std::runtime_error( "public bootstrap publish requires pre-provisioned public objects overlay: "
+                              + remote_join( public_directory, "objects" ) );
+
+  emit_progress( options,
+                 "public-publish-config-object",
+                 plan.backup_id,
+                 0,
+                 4,
+                 1,
+                 1,
+                 plan.sanitized_config_size );
+  const auto config_object = remote_join(
+    public_directory,
+    "objects/sha256/" + plan.sanitized_config_sha256.substr( 0, 2 ) + "/"
+    + plan.sanitized_config_sha256.substr( 2, 2 ) + "/" + plan.sanitized_config_sha256 );
+  upload_public_file( client, plan.sanitized_config_tmp, config_object );
+
+  emit_progress( options,
+                 "public-publish-metadata",
+                 plan.backup_id,
+                 1,
+                 4,
+                 1,
+                 4,
+                 plan.total_bytes );
+  const auto suffix = public_publish.upload_temp_suffix.empty()
+    ? std::string( ".partial" )
+    : public_publish.upload_temp_suffix;
+  const auto partial_snapshot_name = plan.backup_id + suffix + "-"
+                                     + std::to_string( std::chrono::duration_cast< std::chrono::milliseconds >(
+                                       std::chrono::system_clock::now().time_since_epoch() ).count() );
+  const auto snapshots_dir = remote_join( public_directory, "snapshots" );
+  const auto partial_snapshot_dir = remote_join( snapshots_dir, partial_snapshot_name );
+  const auto final_snapshot_dir = remote_join( snapshots_dir, plan.backup_id );
+  ensure_remote_directory( client, partial_snapshot_dir );
+  upload_public_file( client, plan.manifest_tmp, remote_join( partial_snapshot_dir, "manifest.json" ) );
+  upload_public_file( client, plan.files_tmp, remote_join( partial_snapshot_dir, "files.json" ) );
+  upload_public_file( client, plan.public_metadata_tmp, remote_join( partial_snapshot_dir, "public-bootstrap.json" ) );
+  upload_public_file( client, plan.complete_tmp, remote_join( partial_snapshot_dir, "COMPLETE" ) );
+
+  emit_progress( options,
+                 "public-publish-activate",
+                 plan.backup_id,
+                 2,
+                 4,
+                 1,
+                 4,
+                 plan.total_bytes );
+  remove_public_snapshot_metadata_if_exists( client, public_directory, plan.backup_id );
+  client.rename( partial_snapshot_dir, final_snapshot_dir );
+
+  const auto latest_partial = remote_join( public_directory, "latest.json" + suffix );
+  upload_public_file( client, plan.latest_tmp, latest_partial );
+  client.remove_file_if_exists( remote_join( public_directory, "latest.json" ) );
+  client.rename( latest_partial, remote_join( public_directory, "latest.json" ) );
+
+  emit_progress( options,
+                 "public-publish-prune",
+                 plan.backup_id,
+                 3,
+                 4,
+                 1,
+                 plan.file_count,
+                 plan.total_bytes );
+  auto removed = prune_public_bootstrap_metadata( client, public_directory, public_publish.retention_count );
+
+  PublicBootstrapPublishResult result;
+  result.backup_id = plan.backup_id;
+  result.repository_dir = plan.repository_dir;
+  result.public_directory = public_directory;
+  result.public_base_url = plan.public_base_url;
+  result.network = plan.network;
+  result.sanitized_config_sha256 = plan.sanitized_config_sha256;
+  result.sanitized_config_size = plan.sanitized_config_size;
+  result.file_count = plan.file_count;
+  result.object_count = plan.object_count;
+  result.total_bytes = plan.total_bytes;
+  result.removed_public_snapshot_ids = std::move( removed );
+  result.removed_public_snapshot_count = static_cast< uint64_t >( result.removed_public_snapshot_ids.size() );
+
+  emit_progress( options,
+                 "public-publish-complete",
+                 plan.backup_id,
+                 4,
+                 4,
+                 1,
+                 result.file_count,
+                 result.total_bytes );
+  return result;
 }
 
 void fetch_remote_metadata( const std::filesystem::path& repository_dir,
@@ -1737,6 +2326,38 @@ SftpUploadResult upload_latest_snapshot_with_managed_sftp( const std::filesystem
   return result;
 }
 
+PublicBootstrapPublishResult publish_latest_public_bootstrap_with_managed_sftp(
+  const std::filesystem::path& repository_dir,
+  const BackupSshConfig& ssh,
+  const BackupPublicPublishConfig& public_publish,
+  const SftpTransferOptions& options )
+{
+  auto plan = build_public_bootstrap_publish_plan( repository_dir, public_publish );
+  try
+  {
+    auto result = publish_public_bootstrap_plan_with_sftp( plan, ssh, public_publish, options );
+    std::error_code ec;
+    std::filesystem::remove( plan.sanitized_config_tmp, ec );
+    std::filesystem::remove( plan.latest_tmp, ec );
+    std::filesystem::remove( plan.manifest_tmp, ec );
+    std::filesystem::remove( plan.files_tmp, ec );
+    std::filesystem::remove( plan.public_metadata_tmp, ec );
+    std::filesystem::remove( plan.complete_tmp, ec );
+    return result;
+  }
+  catch( ... )
+  {
+    std::error_code ec;
+    std::filesystem::remove( plan.sanitized_config_tmp, ec );
+    std::filesystem::remove( plan.latest_tmp, ec );
+    std::filesystem::remove( plan.manifest_tmp, ec );
+    std::filesystem::remove( plan.files_tmp, ec );
+    std::filesystem::remove( plan.public_metadata_tmp, ec );
+    std::filesystem::remove( plan.complete_tmp, ec );
+    throw;
+  }
+}
+
 BackupSnapshotListResult list_remote_backup_snapshots_with_sftp( const std::filesystem::path& repository_dir,
                                                                  const BackupSshConfig& ssh,
                                                                  const BackupRemoteConfig& remote )
@@ -2107,6 +2728,53 @@ std::string sftp_upload_result_to_json( const SftpUploadResult& result )
   out << "  \"retry_count\": " << result.retry_count << ",\n";
   out << "  \"file_count\": " << result.file_count << ",\n";
   out << "  \"total_bytes\": " << result.total_bytes << "\n";
+  out << "}\n";
+  return out.str();
+}
+
+std::string public_bootstrap_publish_result_to_text( const PublicBootstrapPublishResult& result )
+{
+  std::ostringstream out;
+  out << "Published public bootstrap snapshot\n";
+  out << "backup_id: " << result.backup_id << "\n";
+  out << "repository_dir: " << result.repository_dir.string() << "\n";
+  out << "public_directory: " << result.public_directory << "\n";
+  out << "public_base_url: " << result.public_base_url << "\n";
+  out << "network: " << result.network << "\n";
+  out << "sanitized_config_sha256: " << result.sanitized_config_sha256 << "\n";
+  out << "sanitized_config_size: " << result.sanitized_config_size << "\n";
+  out << "file_count: " << result.file_count << "\n";
+  out << "object_count: " << result.object_count << "\n";
+  out << "total_bytes: " << result.total_bytes << "\n";
+  out << "removed_public_snapshot_count: " << result.removed_public_snapshot_count << "\n";
+  for( const auto& backup_id: result.removed_public_snapshot_ids )
+    out << "removed_public_snapshot: " << backup_id << "\n";
+  return out.str();
+}
+
+std::string public_bootstrap_publish_result_to_json( const PublicBootstrapPublishResult& result )
+{
+  std::ostringstream out;
+  out << "{\n";
+  out << "  \"backup_id\": \"" << json_escape( result.backup_id ) << "\",\n";
+  out << "  \"repository_dir\": \"" << json_escape( result.repository_dir.string() ) << "\",\n";
+  out << "  \"public_directory\": \"" << json_escape( result.public_directory ) << "\",\n";
+  out << "  \"public_base_url\": \"" << json_escape( result.public_base_url ) << "\",\n";
+  out << "  \"network\": \"" << json_escape( result.network ) << "\",\n";
+  out << "  \"sanitized_config_sha256\": \"" << json_escape( result.sanitized_config_sha256 ) << "\",\n";
+  out << "  \"sanitized_config_size\": " << result.sanitized_config_size << ",\n";
+  out << "  \"file_count\": " << result.file_count << ",\n";
+  out << "  \"object_count\": " << result.object_count << ",\n";
+  out << "  \"total_bytes\": " << result.total_bytes << ",\n";
+  out << "  \"removed_public_snapshot_count\": " << result.removed_public_snapshot_count << ",\n";
+  out << "  \"removed_public_snapshot_ids\": [";
+  for( std::size_t i = 0; i < result.removed_public_snapshot_ids.size(); ++i )
+  {
+    if( i )
+      out << ", ";
+    out << "\"" << json_escape( result.removed_public_snapshot_ids[ i ] ) << "\"";
+  }
+  out << "]\n";
   out << "}\n";
   return out.str();
 }

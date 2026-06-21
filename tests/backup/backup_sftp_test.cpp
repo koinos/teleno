@@ -136,6 +136,30 @@ int main()
   }
 
   {
+    PublicBootstrapPublishResult result;
+    result.backup_id = "20260620T201059Z-ms-1781986259826-files-452";
+    result.repository_dir = "/tmp/repo";
+    result.public_directory = "/srv/teleno-backups/prodnet/public/teleno-bootstrap";
+    result.public_base_url = "https://seed.koinosfoundation.org/backups/prodnet/teleno-bootstrap";
+    result.network = "mainnet";
+    result.sanitized_config_sha256 = std::string( 64, 'a' );
+    result.sanitized_config_size = 512;
+    result.file_count = 452;
+    result.object_count = 451;
+    result.total_bytes = 123456789;
+    result.removed_public_snapshot_count = 1;
+    result.removed_public_snapshot_ids = { "20260619T000000Z-ms-1-files-1" };
+
+    const auto text = public_bootstrap_publish_result_to_text( result );
+    assert( text.find( "Published public bootstrap snapshot" ) != std::string::npos );
+    assert( text.find( "removed_public_snapshot: 20260619T000000Z-ms-1-files-1" ) != std::string::npos );
+
+    const auto json = public_bootstrap_publish_result_to_json( result );
+    assert( json.find( "\"public_base_url\": \"https://seed.koinosfoundation.org/backups/prodnet/teleno-bootstrap\"" ) != std::string::npos );
+    assert( json.find( "\"removed_public_snapshot_count\": 1" ) != std::string::npos );
+  }
+
+  {
     auto root = unique_temp_dir( "teleno-backup-sftp-managed-cancel" );
     auto repo = root / "repo";
     const std::string backup_id = "20260613T140000Z-ms-3-files-1";

@@ -53,6 +53,8 @@ struct BackupOperationStatus
   LocalSnapshotResult snapshot;
   bool has_remote_upload = false;
   SftpUploadResult remote_upload;
+  bool has_public_publish = false;
+  PublicBootstrapPublishResult public_publish;
   bool has_restore_fetch = false;
   SftpRestoreFetchResult restore_fetch;
   bool has_public_restore_fetch = false;
@@ -103,6 +105,7 @@ private:
   void validate_local_repository_request( const std::string& operation_name ) const;
   void validate_remote_repository_request( const std::string& operation_name ) const;
   void validate_public_restore_request( const std::string& operation_name ) const;
+  void validate_public_publish_request( const std::string& operation_name ) const;
   std::string next_operation_id() const;
   std::string next_operation_id( const std::string& kind ) const;
   void begin_operation( const std::string& operation_id,
@@ -123,6 +126,8 @@ private:
                                             const std::filesystem::path& checkpoint_dir,
                                             bool upload_remote );
   void execute_upload_latest_operation();
+  void publish_public_bootstrap_if_configured();
+  void prune_remote_retention_if_configured( const std::string& keep_backup_id );
   void execute_delete_operation( const std::string& scope,
                                  const std::string& backup_id,
                                  bool dry_run );

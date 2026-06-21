@@ -214,6 +214,14 @@ BackupDryRunPlan build_backup_dry_run_plan( const NodeConfig& cfg,
   plan.remote_retention_days = cfg.backup.remote.retention_days;
   plan.remote_upload_temp_suffix = cfg.backup.remote.upload_temp_suffix;
 
+  plan.public_publish_enabled = cfg.backup.public_publish.enabled;
+  plan.public_publish_directory = cfg.backup.public_publish.directory;
+  plan.public_publish_base_url = cfg.backup.public_publish.base_url;
+  plan.public_publish_network = cfg.backup.public_publish.network;
+  plan.public_publish_observer_config_file = cfg.backup.public_publish.observer_config_file;
+  plan.public_publish_retention_count = cfg.backup.public_publish.retention_count;
+  plan.public_publish_upload_temp_suffix = cfg.backup.public_publish.upload_temp_suffix;
+
   plan.ssh_enabled = cfg.backup.ssh.enabled;
   plan.ssh_transport = cfg.backup.ssh.transport;
   plan.ssh_host = cfg.backup.ssh.host;
@@ -275,6 +283,28 @@ BackupDryRunPlan build_backup_dry_run_plan( const NodeConfig& cfg,
       add_issue( plan, "warning", "remote retention is disabled; backups will accumulate until manually pruned" );
   }
 
+  if( plan.public_publish_enabled )
+  {
+    if( !plan.remote_enabled )
+      add_issue( plan, "error", "backup.public-publish.enabled requires backup.remote.enabled=true" );
+    if( plan.public_publish_directory.empty() )
+      add_issue( plan, "error", "backup.public-publish.directory is required when public publishing is enabled" );
+    else if( !starts_with( plan.public_publish_directory, "/" ) )
+      add_issue( plan, "error", "backup.public-publish.directory must be an absolute path on the remote server" );
+    if( plan.public_publish_base_url.empty() )
+      add_issue( plan, "error", "backup.public-publish.base-url is required when public publishing is enabled" );
+    if( plan.public_publish_network.empty() )
+      add_issue( plan, "error", "backup.public-publish.network is required when public publishing is enabled" );
+    if( plan.public_publish_observer_config_file.empty() )
+      add_issue( plan, "error", "backup.public-publish.observer-config-file is required when public publishing is enabled" );
+    else if( !std::filesystem::is_regular_file( plan.public_publish_observer_config_file ) )
+      add_issue( plan, "error", "backup.public-publish.observer-config-file must point to a readable file" );
+    if( plan.public_publish_retention_count == 0 )
+      add_issue( plan, "warning", "backup.public-publish.retention-count=0 will not prune old public metadata" );
+    if( plan.public_publish_upload_temp_suffix.empty() )
+      add_issue( plan, "error", "backup.public-publish.upload-temp-suffix must not be empty" );
+  }
+
   validate_ssh( plan );
 
   if( !plan.source_db_exists )
@@ -308,6 +338,12 @@ std::string backup_dry_run_plan_to_text( const BackupDryRunPlan& plan )
       << " directory=" << plan.remote_directory
       << " retention_count=" << plan.remote_retention_count
       << " retention_days=" << plan.remote_retention_days
+      << "\n";
+  out << "public_publish: " << ( plan.public_publish_enabled ? "enabled" : "disabled" )
+      << " directory=" << plan.public_publish_directory
+      << " base_url=" << plan.public_publish_base_url
+      << " network=" << plan.public_publish_network
+      << " retention_count=" << plan.public_publish_retention_count
       << "\n";
   out << "ssh: " << ( plan.ssh_enabled ? "enabled" : "disabled" )
       << " transport=" << plan.ssh_transport
@@ -361,6 +397,15 @@ std::string backup_dry_run_plan_to_json( const BackupDryRunPlan& plan )
   out << "    \"retention_count\": " << plan.remote_retention_count << ",\n";
   out << "    \"retention_days\": " << plan.remote_retention_days << ",\n";
   out << "    \"upload_temp_suffix\": \"" << json_escape( plan.remote_upload_temp_suffix ) << "\"\n";
+  out << "  },\n";
+  out << "  \"public_publish\": {\n";
+  out << "    \"enabled\": " << json_bool( plan.public_publish_enabled ) << ",\n";
+  out << "    \"directory\": \"" << json_escape( plan.public_publish_directory ) << "\",\n";
+  out << "    \"base_url\": \"" << json_escape( plan.public_publish_base_url ) << "\",\n";
+  out << "    \"network\": \"" << json_escape( plan.public_publish_network ) << "\",\n";
+  out << "    \"observer_config_file\": \"" << json_escape( plan.public_publish_observer_config_file ) << "\",\n";
+  out << "    \"retention_count\": " << plan.public_publish_retention_count << ",\n";
+  out << "    \"upload_temp_suffix\": \"" << json_escape( plan.public_publish_upload_temp_suffix ) << "\"\n";
   out << "  },\n";
   out << "  \"ssh\": {\n";
   out << "    \"enabled\": " << json_bool( plan.ssh_enabled ) << ",\n";

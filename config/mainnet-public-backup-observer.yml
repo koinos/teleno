@@ -1,0 +1,96 @@
+global:
+  log-level: info
+  log-color: false
+  log-datetime: true
+  fork-algorithm: pob
+
+chain:
+  verify-blocks: true
+
+p2p:
+  listen: /ip4/0.0.0.0/tcp/8888
+  seed-reconnect-interval-seconds: 60
+  peer-discovery: true
+  target-peer-count: 20
+  max-peer-candidates: 200
+  max-candidate-dials-per-cycle: 3
+  peer-acquisition-interval-seconds: 5
+  candidate-redial-interval-seconds: 60
+  peer-log-interval-seconds: 60
+  peer:
+    - /ip4/46.62.204.73/tcp/8888/p2p/QmPcF1YrxamfKGpyvP6uAZcPxnmK2WUBC4K4N5ZaWky8Sh
+    - /ip4/37.27.7.221/tcp/8888/p2p/QmY8NBHwoVrxBvrjS3wQoeTmWG4UUKMxmYHss7QYRXktrs
+    - /ip4/95.216.68.185/tcp/8888/p2p/QmeTy5SE79ksZruNZ1DJJqR6UCe1oZvWcYaUnn6MuYE8Ea
+    - /ip4/46.62.245.240/tcp/8888/p2p/QmWmxqE6WhcMWZEKwqUAbu87Qgm6JroZLdM4Xmxouu1Mmi
+    - /ip4/94.130.148.114/tcp/8888/p2p/QmQ841mUuYeCtbZXdEMeKcYCx4CZydgz84zSDqWVCeJ4H8
+
+jsonrpc:
+  listen: 127.0.0.1:8080
+
+backup:
+  enabled: true
+  node-id: teleno-prodnet-public-bootstrap
+  workspace: /var/lib/teleno-prodnet/basedir/.teleno-native-backups/workspace
+  local:
+    enabled: true
+    directory: /var/lib/teleno-prodnet/basedir/.teleno-native-backups/repository
+    retention-count: 1
+  ssh:
+    enabled: true
+    transport: native
+    host: seed.koinosfoundation.org
+    port: 22
+    user: teleno_backup
+    auth: private-key
+    strict-host-key-checking: true
+    connect-timeout-seconds: 15
+    private-key-file: /var/lib/teleno-prodnet/ssh/id_ed25519
+    known-hosts-file: /var/lib/teleno-prodnet/ssh/known_hosts
+  remote:
+    enabled: true
+    directory: /srv/teleno-backups/prodnet/teleno-dev/teleno-ux-mainnet
+    retention-count: 1
+    retention-days: 0
+    upload-temp-suffix: .partial
+  public-publish:
+    enabled: true
+    directory: /srv/teleno-backups/prodnet/public/teleno-bootstrap
+    base-url: https://seed.koinosfoundation.org/backups/prodnet/teleno-bootstrap
+    network: mainnet
+    observer-config-file: /var/lib/teleno-prodnet/config/mainnet-public-bootstrap-observer.yml
+    retention-count: 1
+    upload-temp-suffix: .partial
+  schedule:
+    enabled: true
+    interval: 24h
+    run-on-startup-if-missed: true
+    jitter-seconds: 300
+    minimum-head-progress: 1
+    skip-if-syncing-from-genesis: true
+    max-concurrent-backups: 1
+  admin:
+    enabled: true
+    listen: 127.0.0.1:18088
+    token-file: /var/lib/teleno-prodnet/basedir/.teleno-native-backups/admin.token
+    jobs: 1
+  public-restore:
+    enabled: true
+    base-url: https://seed.koinosfoundation.org/backups/prodnet/teleno-bootstrap
+    network: mainnet
+    require-https: true
+    timeout-seconds: 30
+    retries: 3
+    signature-required: false
+    signature-public-key-file: ""
+
+features:
+  chain: true
+  mempool: true
+  block_store: true
+  p2p: true
+  jsonrpc: true
+  grpc: false
+  block_producer: false
+  contract_meta_store: false
+  transaction_store: false
+  account_history: false

@@ -40,6 +40,14 @@ struct BackupDryRunPlan
   uint64_t remote_retention_days = 0;
   std::string remote_upload_temp_suffix;
 
+  bool public_publish_enabled = false;
+  std::string public_publish_directory;
+  std::string public_publish_base_url;
+  std::string public_publish_network;
+  std::string public_publish_observer_config_file;
+  uint64_t public_publish_retention_count = 0;
+  std::string public_publish_upload_temp_suffix;
+
   bool ssh_enabled = false;
   std::string ssh_transport;
   std::string ssh_host;

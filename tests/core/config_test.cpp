@@ -112,6 +112,14 @@ backup:
     retries: 4
     signature-required: true
     signature-public-key-file: /tmp/teleno-public-bootstrap.pub
+  public-publish:
+    enabled: true
+    directory: /srv/teleno-backups/testnet/public/teleno-bootstrap
+    base-url: https://testnet.koinosfoundation.org/backups/testnet/teleno-bootstrap
+    network: testnet
+    observer-config-file: /tmp/teleno-public-bootstrap-observer.yml
+    retention-count: 1
+    upload-temp-suffix: .public-partial
   admin:
     enabled: true
     listen: 127.0.0.1:18089
@@ -152,6 +160,13 @@ backup:
     assert( cfg.backup.public_restore.retries == 4 );
     assert( cfg.backup.public_restore.signature_required );
     assert( cfg.backup.public_restore.signature_public_key_file == "/tmp/teleno-public-bootstrap.pub" );
+    assert( cfg.backup.public_publish.enabled );
+    assert( cfg.backup.public_publish.directory == "/srv/teleno-backups/testnet/public/teleno-bootstrap" );
+    assert( cfg.backup.public_publish.base_url == "https://testnet.koinosfoundation.org/backups/testnet/teleno-bootstrap" );
+    assert( cfg.backup.public_publish.network == "testnet" );
+    assert( cfg.backup.public_publish.observer_config_file == "/tmp/teleno-public-bootstrap-observer.yml" );
+    assert( cfg.backup.public_publish.retention_count == 1 );
+    assert( cfg.backup.public_publish.upload_temp_suffix == ".public-partial" );
     assert( cfg.backup.admin.enabled );
     assert( cfg.backup.admin.listen == "127.0.0.1:18089" );
     assert( cfg.backup.admin.token_file == "/tmp/teleno-backup-admin-token" );

@@ -1,7 +1,9 @@
 #include "backup/backup_service.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -132,6 +134,15 @@ std::string BackupService::config_summary_json() const
   out << "      \"require_https\": " << ( _cfg.backup.public_restore.require_https ? "true" : "false" ) << ",\n";
   out << "      \"timeout_seconds\": " << _cfg.backup.public_restore.timeout_seconds << ",\n";
   out << "      \"retries\": " << _cfg.backup.public_restore.retries << "\n";
+  out << "    },\n";
+  out << "    \"public_publish\": {\n";
+  out << "      \"enabled\": " << ( _cfg.backup.public_publish.enabled ? "true" : "false" ) << ",\n";
+  out << "      \"directory\": \"" << json_escape( _cfg.backup.public_publish.directory ) << "\",\n";
+  out << "      \"base_url\": \"" << json_escape( _cfg.backup.public_publish.base_url ) << "\",\n";
+  out << "      \"network\": \"" << json_escape( _cfg.backup.public_publish.network ) << "\",\n";
+  out << "      \"observer_config_file\": \"" << json_escape( _cfg.backup.public_publish.observer_config_file ) << "\",\n";
+  out << "      \"retention_count\": " << _cfg.backup.public_publish.retention_count << ",\n";
+  out << "      \"upload_temp_suffix\": \"" << json_escape( _cfg.backup.public_publish.upload_temp_suffix ) << "\"\n";
   out << "    }\n";
   out << "  }\n";
   out << "}\n";
@@ -230,6 +241,21 @@ void BackupService::validate_public_restore_request( const std::string& operatio
     throw std::invalid_argument( operation_name + " requires backup.public-restore.enabled=true" );
   if( _cfg.backup.public_restore.base_url.empty() )
     throw std::invalid_argument( operation_name + " requires backup.public-restore.base-url" );
+}
+
+void BackupService::validate_public_publish_request( const std::string& operation_name ) const
+{
+  validate_remote_repository_request( operation_name );
+  if( !_cfg.backup.public_publish.enabled )
+    throw std::invalid_argument( operation_name + " requires backup.public-publish.enabled=true" );
+  if( _cfg.backup.public_publish.directory.empty() )
+    throw std::invalid_argument( operation_name + " requires backup.public-publish.directory" );
+  if( _cfg.backup.public_publish.base_url.empty() )
+    throw std::invalid_argument( operation_name + " requires backup.public-publish.base-url" );
+  if( _cfg.backup.public_publish.network.empty() )
+    throw std::invalid_argument( operation_name + " requires backup.public-publish.network" );
+  if( _cfg.backup.public_publish.observer_config_file.empty() )
+    throw std::invalid_argument( operation_name + " requires backup.public-publish.observer-config-file" );
 }
 
 std::string BackupService::next_operation_id() const
@@ -421,7 +447,11 @@ void BackupService::execute_configured_backup_operation( const std::string&,
         _status.has_remote_upload = true;
         _status.remote_upload = upload;
       }
-      finish_operation_success( "local backup snapshot created and uploaded to remote SFTP" );
+      publish_public_bootstrap_if_configured();
+      prune_remote_retention_if_configured( upload.backup_id );
+      finish_operation_success( _cfg.backup.public_publish.enabled
+                                  ? "local backup snapshot uploaded and published as public bootstrap"
+                                  : "local backup snapshot created and uploaded to remote SFTP" );
     }
     else
     {
@@ -442,6 +472,89 @@ void BackupService::execute_configured_backup_operation( const std::string&,
   }
 }
 
+void BackupService::publish_public_bootstrap_if_configured()
+{
+  if( !_cfg.backup.public_publish.enabled )
+    return;
+
+  validate_public_publish_request( "public bootstrap publish" );
+  throw_if_cancel_requested();
+  update_operation_progress( "public-publish", "publishing latest backup to public bootstrap URL" );
+  auto published = publish_latest_public_bootstrap_with_managed_sftp(
+    _cfg.backup.local.directory,
+    _cfg.backup.ssh,
+    _cfg.backup.public_publish,
+    operation_sftp_transfer_options() );
+  {
+    std::lock_guard< std::mutex > lock( _mutex );
+    _status.has_public_publish = true;
+    _status.public_publish = published;
+  }
+}
+
+void BackupService::prune_remote_retention_if_configured( const std::string& keep_backup_id )
+{
+  const auto retention_count = _cfg.backup.remote.retention_count;
+  if( retention_count == 0 )
+    return;
+
+  throw_if_cancel_requested();
+  update_operation_progress( "remote-retention", "pruning old remote backup snapshots" );
+  auto snapshots = list_remote_backup_snapshots_with_managed_sftp(
+    _cfg.backup.local.directory,
+    _cfg.backup.ssh,
+    _cfg.backup.remote,
+    operation_sftp_transfer_options() );
+  if( snapshots.snapshots.size() <= retention_count )
+    return;
+
+  std::vector< std::string > backup_ids;
+  for( const auto& snapshot: snapshots.snapshots )
+  {
+    if( !snapshot.backup_id.empty() )
+      backup_ids.push_back( snapshot.backup_id );
+  }
+  std::sort( backup_ids.begin(), backup_ids.end() );
+  backup_ids.erase( std::unique( backup_ids.begin(), backup_ids.end() ), backup_ids.end() );
+  if( backup_ids.size() <= retention_count )
+    return;
+
+  std::set< std::string > keep;
+  for( std::size_t i = backup_ids.size() - static_cast< std::size_t >( retention_count );
+       i < backup_ids.size();
+       ++i )
+  {
+    keep.insert( backup_ids[ i ] );
+  }
+  if( !keep_backup_id.empty() )
+    keep.insert( keep_backup_id );
+
+  std::vector< BackupDeleteResult > results;
+  {
+    std::lock_guard< std::mutex > lock( _mutex );
+    results = _status.delete_results;
+  }
+
+  for( const auto& backup_id: backup_ids )
+  {
+    if( keep.find( backup_id ) != keep.end() )
+      continue;
+    throw_if_cancel_requested();
+    update_operation_progress( "remote-retention-delete", "deleting old remote backup snapshot " + backup_id );
+    results.push_back( delete_remote_backup_snapshot_with_managed_sftp(
+      _cfg.backup.local.directory,
+      _cfg.backup.ssh,
+      _cfg.backup.remote,
+      backup_id,
+      false,
+      operation_sftp_transfer_options() ) );
+    {
+      std::lock_guard< std::mutex > lock( _mutex );
+      _status.delete_results = results;
+    }
+  }
+}
+
 void BackupService::execute_upload_latest_operation()
 {
   try
@@ -458,7 +571,11 @@ void BackupService::execute_upload_latest_operation()
       _status.has_remote_upload = true;
       _status.remote_upload = upload;
     }
-    finish_operation_success( "latest native backup uploaded to remote SFTP" );
+    publish_public_bootstrap_if_configured();
+    prune_remote_retention_if_configured( upload.backup_id );
+    finish_operation_success( _cfg.backup.public_publish.enabled
+                                ? "latest native backup uploaded and published as public bootstrap"
+                                : "latest native backup uploaded to remote SFTP" );
   }
   catch( const std::exception& e )
   {
@@ -643,7 +760,11 @@ BackupOperationStatus BackupService::start_configured_backup_async( bool upload_
   join_finished_worker();
   validate_local_snapshot_request();
   if( upload_remote )
+  {
     validate_remote_repository_request( "configured backup create" );
+    if( _cfg.backup.public_publish.enabled )
+      validate_public_publish_request( "configured backup public publish" );
+  }
 
   const auto operation_id = next_operation_id( upload_remote ? "configured-backup" : "local-snapshot" );
   const auto checkpoint_dir = std::filesystem::path( _cfg.backup.workspace )
@@ -689,6 +810,8 @@ BackupOperationStatus BackupService::start_upload_latest_async()
 {
   join_finished_worker();
   validate_remote_repository_request( "remote upload latest" );
+  if( _cfg.backup.public_publish.enabled )
+    validate_public_publish_request( "remote upload latest public publish" );
 
   const auto operation_id = next_operation_id( "upload-latest" );
   begin_operation( operation_id,
@@ -974,6 +1097,7 @@ std::string backup_operation_status_to_text( const BackupOperationStatus& status
     out << "snapshot_dir: " << status.snapshot.snapshot_dir.string() << "\n";
   }
   out << "has_remote_upload: " << ( status.has_remote_upload ? "true" : "false" ) << "\n";
+  out << "has_public_publish: " << ( status.has_public_publish ? "true" : "false" ) << "\n";
   out << "has_restore_fetch: " << ( status.has_restore_fetch ? "true" : "false" ) << "\n";
   out << "has_public_restore_fetch: " << ( status.has_public_restore_fetch ? "true" : "false" ) << "\n";
   out << "delete_result_count: " << status.delete_results.size() << "\n";
@@ -1002,6 +1126,7 @@ std::string backup_operation_status_to_json( const BackupOperationStatus& status
   out << "  },\n";
   out << "  \"has_snapshot\": " << ( status.has_snapshot ? "true" : "false" ) << ",\n";
   out << "  \"has_remote_upload\": " << ( status.has_remote_upload ? "true" : "false" ) << ",\n";
+  out << "  \"has_public_publish\": " << ( status.has_public_publish ? "true" : "false" ) << ",\n";
   out << "  \"has_restore_fetch\": " << ( status.has_restore_fetch ? "true" : "false" ) << ",\n";
   out << "  \"has_public_restore_fetch\": " << ( status.has_public_restore_fetch ? "true" : "false" ) << ",\n";
   out << "  \"has_restore_preflight\": " << ( status.has_restore_preflight ? "true" : "false" ) << ",\n";
@@ -1017,6 +1142,11 @@ std::string backup_operation_status_to_json( const BackupOperationStatus& status
   {
     out << ",\n";
     out << "  \"remote_upload\": " << sftp_upload_result_to_json( status.remote_upload );
+  }
+  if( status.has_public_publish )
+  {
+    out << ",\n";
+    out << "  \"public_publish\": " << public_bootstrap_publish_result_to_json( status.public_publish );
   }
   if( status.has_restore_fetch )
   {
