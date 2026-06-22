@@ -45,7 +45,7 @@ public:
   ~state_delta() = default;
 
   void put( const key_type& k, const value_type& v );
-  void erase( const key_type& k );
+  void erase( const key_type& k, bool preserve_tombstone = false );
   const value_type* find( const key_type& key ) const;
 
   void squash();

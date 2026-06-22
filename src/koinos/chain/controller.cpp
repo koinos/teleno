@@ -695,10 +695,10 @@ void controller_impl::apply_block_delta( const protocol::block& block,
 
   try
   {
-    ctx.push_frame( stack_frame{ .call_privilege = privilege::kernel_mode } );
-
-    ctx.set_state_node( block_node );
-    ctx.reset_cache();
+    KOINOS_ASSERT( block.header().previous_state_merkle_root()
+                     == util::converter::as< std::string >( parent_node->merkle_root() ),
+                   state_merkle_mismatch_exception,
+                   "block previous state merkle mismatch" );
 
     for( const auto& delta_entry: receipt.state_delta_entries() )
     {
@@ -710,7 +710,15 @@ void controller_impl::apply_block_delta( const protocol::block& block,
       if( delta_entry.has_value() )
         block_node->put_object( object_space, delta_entry.key(), &delta_entry.value() );
       else
-        block_node->remove_object( object_space, delta_entry.key() );
+        block_node->remove_object_preserve_tombstone( object_space, delta_entry.key() );
+    }
+
+    if( receipt.state_merkle_root().size() )
+    {
+      KOINOS_ASSERT( receipt.state_merkle_root()
+                       == util::converter::as< std::string >( block_node->pending_merkle_root() ),
+                     state_merkle_mismatch_exception,
+                     "block receipt state merkle mismatch" );
     }
 
     if( block_height % index_message_interval == 0 )
@@ -718,6 +726,11 @@ void controller_impl::apply_block_delta( const protocol::block& block,
       auto progress = block_height / static_cast< double >( index_to ) * 100;
       LOG( info ) << "Indexing chain (" << progress << "%) - Height: " << block_height << ", ID: " << block_id;
     }
+
+    ctx.push_frame( stack_frame{ .call_privilege = privilege::kernel_mode } );
+
+    ctx.set_state_node( block_node );
+    ctx.reset_cache();
 
     auto lib = system_call::get_last_irreversible_block( ctx );
 

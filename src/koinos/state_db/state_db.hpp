@@ -95,6 +95,14 @@ public:
   int64_t remove_object( const object_space& space, const object_key& key );
 
   /**
+   * Remove an object while preserving the delete tombstone even when the object is absent.
+   *
+   * This is intended only for replaying serialized historical state deltas. Normal state
+   * mutation should use remove_object().
+   */
+  int64_t remove_object_preserve_tombstone( const object_space& space, const object_key& key );
+
+  /**
    * Return true if the node is writable.
    */
   bool is_finalized() const;
@@ -103,6 +111,14 @@ public:
    * Return the merkle root of writes on this state node
    */
   crypto::multihash merkle_root() const;
+
+  /**
+   * Return the merkle root of writes on this state node without requiring finalization.
+   *
+   * This is intended for validation paths that must reject a writable node before
+   * it is finalized into the fork graph.
+   */
+  crypto::multihash pending_merkle_root() const;
 
   /**
    * Returns the state delta entries associated with this state node

@@ -39,9 +39,9 @@ void state_delta::put( const key_type& k, const value_type& v )
   _backend->put( k, v );
 }
 
-void state_delta::erase( const key_type& k )
+void state_delta::erase( const key_type& k, bool preserve_tombstone )
 {
-  if( find( k ) )
+  if( find( k ) || preserve_tombstone )
   {
     _backend->erase( k );
     _removed_objects.insert( k );

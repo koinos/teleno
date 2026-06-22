@@ -494,6 +494,14 @@ if(KOINOS_BUILD_TESTS)
 
   add_test(NAME koinos_service_registry_test COMMAND koinos_service_registry_test)
 
+  add_executable(koinos_controller_delta_test
+    ../tests/chain/controller_delta_test.cpp)
+
+  target_link_libraries(koinos_controller_delta_test PRIVATE
+    chain)
+
+  add_test(NAME koinos_controller_delta_test COMMAND koinos_controller_delta_test)
+
   add_executable(koinos_rocksdb_manager_test
     ../tests/storage/rocksdb_manager_test.cpp)
 
