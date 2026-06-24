@@ -133,7 +133,7 @@ int main()
     peer_snapshot.self_address = "/ip4/127.0.0.1/tcp/8888/p2p/12D3Self";
     peer_snapshot.connected.push_back(
       { "12D3Connected",
-        "/ip4/46.225.170.6/tcp/18889/p2p/12D3Connected" } );
+        "/ip4/203.0.113.10/tcp/18889/p2p/12D3Connected" } );
     peer_snapshot.connected.push_back( { "malformed-peer", "not-a-multiaddr" } );
     peer_snapshot.known.push_back(
       { "12D3Known",
@@ -174,7 +174,7 @@ int main()
     assert( live_peers_json.at( "snapshot_at" ).is_number_unsigned() );
     assert( live_peers_json.at( "connected" ).size() == 2 );
     assert( live_peers_json.at( "connected" ).at( 0 ).at( "peer_id" ) == "12D3Connected" );
-    assert( live_peers_json.at( "connected" ).at( 0 ).at( "host" ) == "46.225.170.6" );
+    assert( live_peers_json.at( "connected" ).at( 0 ).at( "host" ) == "203.0.113.10" );
     assert( live_peers_json.at( "connected" ).at( 0 ).at( "port" ) == 18889 );
     assert( live_peers_json.at( "connected" ).at( 0 ).at( "connected" ) == true );
     assert( live_peers_json.at( "connected" ).at( 1 ).at( "peer_id" ) == "malformed-peer" );
