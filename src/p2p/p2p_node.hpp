@@ -49,6 +49,8 @@ public:
   void stop();
 
   uint32_t connected_peer_count() const;
+  std::vector< PeerID > connected_peers() const;
+  std::vector< PeerID > known_peers() const;
 
 private:
   // ── Peer sync state ──

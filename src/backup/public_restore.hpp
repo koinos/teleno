@@ -41,6 +41,7 @@ struct PublicRestoreProgress
   uint64_t total_batches = 0;
   uint64_t attempt = 0;
   uint64_t file_count = 0;
+  uint64_t completed_bytes = 0;
   uint64_t total_bytes = 0;
 };
 

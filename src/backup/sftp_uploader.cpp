@@ -29,6 +29,7 @@ namespace koinos::node::backup {
 namespace {
 
 constexpr uint64_t repository_download_margin_bytes = 128ULL * 1024ULL * 1024ULL;
+using SftpFileProgressCallback = std::function< void( uint64_t ) >;
 
 std::string read_file( const std::filesystem::path& path );
 
@@ -493,7 +494,8 @@ void emit_progress( const SftpTransferOptions& options,
                     uint64_t total_batches,
                     uint64_t attempt,
                     uint64_t file_count,
-                    uint64_t total_bytes )
+                    uint64_t total_bytes,
+                    uint64_t completed_bytes = 0 )
 {
   if( !options.progress )
     return;
@@ -504,6 +506,7 @@ void emit_progress( const SftpTransferOptions& options,
   progress.total_batches = total_batches;
   progress.attempt = attempt;
   progress.file_count = file_count;
+  progress.completed_bytes = completed_bytes;
   progress.total_bytes = total_bytes;
   options.progress( progress );
 }
@@ -831,9 +834,11 @@ public:
     return stats->f_bavail * block_size;
   }
 
-  void download( const std::string& remote_file, const std::filesystem::path& local_file )
+  void download( const std::string& remote_file,
+                 const std::filesystem::path& local_file,
+                 SftpFileProgressCallback progress = {} )
   {
-    download_file( remote_path( remote_file ), local_file );
+    download_file( remote_path( remote_file ), local_file, progress );
   }
 
   void upload( const std::filesystem::path& local_file, const std::string& remote_file )
@@ -1156,7 +1161,9 @@ private:
                                 + ": " + sftp_error_message( _session, _sftp ) );
   }
 
-  void download_file( const std::string& remote_file, const std::filesystem::path& local_file )
+  void download_file( const std::string& remote_file,
+                      const std::filesystem::path& local_file,
+                      const SftpFileProgressCallback& progress = {} )
   {
     std::filesystem::create_directories( local_file.parent_path() );
     std::ofstream output( local_file, std::ios::binary | std::ios::trunc );
@@ -1169,6 +1176,7 @@ private:
                                 + ": " + sftp_error_message( _session, _sftp ) );
 
     std::array< char, 128 * 1024 > buffer{};
+    uint64_t downloaded_bytes = 0;
     try
     {
       while( true )
@@ -1182,6 +1190,9 @@ private:
         output.write( buffer.data(), static_cast< std::streamsize >( read_count ) );
         if( !output )
           throw std::runtime_error( "failed to write local SFTP download target: " + local_file.string() );
+        downloaded_bytes += static_cast< uint64_t >( read_count );
+        if( progress )
+          progress( downloaded_bytes );
       }
     }
     catch( ... )
@@ -1317,6 +1328,104 @@ void run_sftp_batch( const std::vector< std::string >& commands,
   }
   const auto removed = std::filesystem::remove( batch_file );
   (void)removed;
+}
+
+void fetch_sftp_restore_objects_with_progress( const SftpRestoreObjectFetchPlan& plan,
+                                               const BackupSshConfig& ssh,
+                                               const SftpTransferOptions& options,
+                                               uint64_t& batch_file_count,
+                                               uint64_t& retry_count )
+{
+  throw_if_transfer_cancelled( options );
+  const auto batch_file = write_batch_file( plan.batch_commands, "teleno-sftp-restore-objects" );
+  const auto max_attempts = std::max< uint64_t >( 1, options.max_attempts );
+  try
+  {
+    for( uint64_t attempt = 1; attempt <= max_attempts; ++attempt )
+    {
+      try
+      {
+        NativeSftpClient client( ssh );
+        client.execute( parse_sftp_command( "cd " + sftp_quote( plan.remote_directory ) ) );
+
+        uint64_t completed_objects = 0;
+        uint64_t completed_bytes = 0;
+        emit_progress( options,
+                       "restore-objects",
+                       plan.backup_id,
+                       completed_objects,
+                       plan.object_count,
+                       attempt,
+                       plan.object_count,
+                       plan.total_bytes,
+                       completed_bytes );
+
+        for( const auto& download: plan.downloads )
+        {
+          throw_if_transfer_cancelled( options );
+          auto last_emit = std::chrono::steady_clock::now() - std::chrono::seconds( 1 );
+          client.download(
+            download.remote_relative_path,
+            download.local_partial_path,
+            [&]( uint64_t current_object_bytes ) {
+              const auto now = std::chrono::steady_clock::now();
+              if( now - last_emit < std::chrono::milliseconds( 500 ) )
+                return;
+              last_emit = now;
+              emit_progress( options,
+                             "restore-objects",
+                             plan.backup_id,
+                             completed_objects,
+                             plan.object_count,
+                             attempt,
+                             plan.object_count,
+                             plan.total_bytes,
+                             std::min( plan.total_bytes, completed_bytes + current_object_bytes ) );
+            } );
+
+          const auto object_bytes = download.size_bytes != 0
+            ? download.size_bytes
+            : std::filesystem::file_size( download.local_partial_path );
+          completed_bytes += object_bytes;
+          ++completed_objects;
+          emit_progress( options,
+                         "restore-objects",
+                         plan.backup_id,
+                         completed_objects,
+                         plan.object_count,
+                         attempt,
+                         plan.object_count,
+                         plan.total_bytes,
+                         std::min( plan.total_bytes, completed_bytes ) );
+        }
+
+        ++batch_file_count;
+        std::error_code remove_ec;
+        std::filesystem::remove( batch_file, remove_ec );
+        return;
+      }
+      catch( const std::exception& )
+      {
+        if( attempt == max_attempts )
+          throw;
+      }
+
+      ++retry_count;
+      const auto retry_delay = std::chrono::seconds( options.retry_delay_seconds );
+      const auto deadline = std::chrono::steady_clock::now() + retry_delay;
+      while( std::chrono::steady_clock::now() < deadline )
+      {
+        throw_if_transfer_cancelled( options );
+        std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
+      }
+    }
+  }
+  catch( ... )
+  {
+    std::error_code ec;
+    std::filesystem::remove( batch_file, ec );
+    throw;
+  }
 }
 
 uint64_t available_space_bytes( std::filesystem::path path )
@@ -2648,17 +2757,12 @@ SftpRestoreFetchResult fetch_restore_snapshot_with_managed_sftp( const std::file
 
   if( !object_plan.downloads.empty() )
   {
-    run_sftp_batch( object_plan.batch_commands,
-                    "teleno-sftp-restore-objects",
-                    ssh,
-                    options,
-                    "restore-objects",
-                    result.backup_id,
-                    result.batch_file_count + 1,
-                    object_plan.object_count,
-                    object_plan.total_bytes,
-                    result.batch_file_count,
-                    result.retry_count );
+    fetch_sftp_restore_objects_with_progress(
+      object_plan,
+      ssh,
+      options,
+      result.batch_file_count,
+      result.retry_count );
 
     for( const auto& download: object_plan.downloads )
     {

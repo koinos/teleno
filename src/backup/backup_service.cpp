@@ -301,6 +301,7 @@ void BackupService::update_operation_progress( const std::string& phase,
     _status.total_batches = progress->total_batches;
     _status.attempt = progress->attempt;
     _status.progress_file_count = progress->file_count;
+    _status.progress_completed_bytes = progress->completed_bytes;
     _status.progress_total_bytes = progress->total_bytes;
   }
 }
@@ -745,6 +746,7 @@ PublicRestoreOptions BackupService::operation_public_restore_options()
     normalized.total_batches = progress.total_batches;
     normalized.attempt = progress.attempt;
     normalized.file_count = progress.file_count;
+    normalized.completed_bytes = progress.completed_bytes;
     normalized.total_bytes = progress.total_bytes;
     update_operation_progress(
       progress.phase,
@@ -1122,6 +1124,7 @@ std::string backup_operation_status_to_json( const BackupOperationStatus& status
   out << "    \"total_batches\": " << status.total_batches << ",\n";
   out << "    \"attempt\": " << status.attempt << ",\n";
   out << "    \"file_count\": " << status.progress_file_count << ",\n";
+  out << "    \"completed_bytes\": " << status.progress_completed_bytes << ",\n";
   out << "    \"total_bytes\": " << status.progress_total_bytes << "\n";
   out << "  },\n";
   out << "  \"has_snapshot\": " << ( status.has_snapshot ? "true" : "false" ) << ",\n";

@@ -1,7 +1,10 @@
 #include "backup/backup_admin_server.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -75,12 +78,121 @@ bool is_route_or_child( const std::string& target, const std::string& route )
   return target == route || target.rfind( route + "/", 0 ) == 0;
 }
 
+std::string request_path( const std::string& target )
+{
+  const auto query_pos = target.find( '?' );
+  return query_pos == std::string::npos ? target : target.substr( 0, query_pos );
+}
+
+std::string request_query( const std::string& target )
+{
+  const auto query_pos = target.find( '?' );
+  return query_pos == std::string::npos ? std::string{} : target.substr( query_pos + 1 );
+}
+
+std::string query_param_value( const std::string& query, const std::string& key )
+{
+  std::size_t pos = 0;
+  while( pos <= query.size() )
+  {
+    const auto next = query.find( '&', pos );
+    const auto token = query.substr( pos, next == std::string::npos ? std::string::npos : next - pos );
+    const auto eq = token.find( '=' );
+    const auto name = eq == std::string::npos ? token : token.substr( 0, eq );
+    if( name == key )
+      return eq == std::string::npos ? std::string{} : token.substr( eq + 1 );
+    if( next == std::string::npos )
+      break;
+    pos = next + 1;
+  }
+  return {};
+}
+
+bool query_param_true( const std::string& query, const std::string& key )
+{
+  const auto value = query_param_value( query, key );
+  return value == "1" || value == "true" || value == "yes";
+}
+
+std::size_t query_limit( const std::string& query, std::size_t default_limit )
+{
+  const auto value = query_param_value( query, "limit" );
+  if( value.empty() )
+    return default_limit;
+  try
+  {
+    const auto parsed = std::stoull( value );
+    return static_cast< std::size_t >( std::min< unsigned long long >( parsed, 1000 ) );
+  }
+  catch( ... )
+  {
+    return default_limit;
+  }
+}
+
 std::string child_route_id( const std::string& target, const std::string& route )
 {
   const auto prefix = route + "/";
   if( target.rfind( prefix, 0 ) != 0 )
     return {};
   return target.substr( prefix.size() );
+}
+
+std::uint64_t now_milliseconds()
+{
+  const auto now = std::chrono::system_clock::now().time_since_epoch();
+  return static_cast< std::uint64_t >(
+    std::chrono::duration_cast< std::chrono::milliseconds >( now ).count() );
+}
+
+std::string multiaddr_component( const std::string& address, const std::string& component )
+{
+  const auto prefix = "/" + component + "/";
+  const auto start = address.find( prefix );
+  if( start == std::string::npos )
+    return {};
+  const auto value_start = start + prefix.size();
+  const auto value_end = address.find( '/', value_start );
+  return address.substr( value_start, value_end == std::string::npos ? std::string::npos : value_end - value_start );
+}
+
+nlohmann::json peer_row_to_json( const AdminPeerRow& row, bool connected )
+{
+  nlohmann::json peer;
+  const auto peer_id = row.peer_id.empty() ? multiaddr_component( row.address, "p2p" ) : row.peer_id;
+  const auto host_ip4 = multiaddr_component( row.address, "ip4" );
+  const auto host_ip6 = multiaddr_component( row.address, "ip6" );
+  const auto host_dns4 = multiaddr_component( row.address, "dns4" );
+  const auto host_dns6 = multiaddr_component( row.address, "dns6" );
+  const auto host = !host_ip4.empty() ? host_ip4
+    : !host_ip6.empty() ? host_ip6
+    : !host_dns4.empty() ? host_dns4
+    : host_dns6;
+  const auto port_value = multiaddr_component( row.address, "tcp" );
+
+  peer[ "peer_id" ] = peer_id.empty() ? nlohmann::json{} : nlohmann::json( peer_id );
+  peer[ "address" ] = row.address;
+  peer[ "host" ] = host.empty() ? nlohmann::json{} : nlohmann::json( host );
+  if( port_value.empty() )
+  {
+    peer[ "port" ] = nullptr;
+  }
+  else
+  {
+    try
+    {
+      const auto parsed = std::stoul( port_value );
+      peer[ "port" ] = parsed <= std::numeric_limits< std::uint16_t >::max()
+        ? nlohmann::json( parsed )
+        : nlohmann::json();
+    }
+    catch( ... )
+    {
+      peer[ "port" ] = nullptr;
+    }
+  }
+  peer[ "connected" ] = connected;
+  return peer;
 }
 
 std::string bad_request_response( const std::string& error )
@@ -97,10 +209,12 @@ BackupAdminServer::BackupAdminServer( BackupService* backup_service,
                                       const std::string& listen_address,
                                       uint16_t port,
                                       unsigned int threads,
-                                      std::string bearer_token )
+                                      std::string bearer_token,
+                                      PeerSnapshotProvider peer_snapshot_provider )
   : _backup_service( backup_service ),
     _listen_address( listen_address == "localhost" ? "127.0.0.1" : listen_address ),
     _bearer_token( std::move( bearer_token ) ),
+    _peer_snapshot_provider( std::move( peer_snapshot_provider ) ),
     _ioc( std::max( threads, 1u ) ),
     _acceptor( _ioc, { loopback_address_or_throw( _listen_address ), port } ),
     _thread_count( std::max( threads, 1u ) )
@@ -192,7 +306,8 @@ void BackupAdminServer::do_accept()
 
 bool BackupAdminServer::is_admin_target( const std::string& target ) const
 {
-  return target.rfind( "/admin/backup/", 0 ) == 0;
+  return target.rfind( "/admin/backup/", 0 ) == 0
+    || target.rfind( "/admin/p2p/", 0 ) == 0;
 }
 
 bool BackupAdminServer::request_authorized( const http::request< http::string_body >& req ) const
@@ -373,6 +488,55 @@ std::string BackupAdminServer::restore_activate_response( const std::string& bod
   return response.dump();
 }
 
+std::string BackupAdminServer::p2p_peers_response( const std::string& target ) const
+{
+  const auto query = request_query( target );
+  const bool include_known = query_param_true( query, "include_known" )
+    || query_param_true( query, "include-known" );
+  const auto limit = query_limit( query, 100 );
+
+  nlohmann::json response;
+  response[ "source" ] = "p2p-live";
+  response[ "snapshot_at" ] = now_milliseconds();
+
+  if( !_peer_snapshot_provider )
+  {
+    response[ "ok" ] = false;
+    response[ "p2p_running" ] = false;
+    response[ "connected_count" ] = 0;
+    response[ "known_count" ] = 0;
+    response[ "self_address" ] = nullptr;
+    response[ "connected" ] = nlohmann::json::array();
+    response[ "known" ] = nlohmann::json::array();
+    response[ "error" ] = "p2p live peer provider is not configured";
+    return response.dump();
+  }
+
+  const auto snapshot = _peer_snapshot_provider();
+  response[ "ok" ] = snapshot.p2p_running;
+  response[ "p2p_running" ] = snapshot.p2p_running;
+  response[ "connected_count" ] = snapshot.connected.size();
+  response[ "known_count" ] = snapshot.known.size();
+  response[ "self_address" ] =
+    snapshot.self_address.empty() ? nlohmann::json{} : nlohmann::json( snapshot.self_address );
+
+  response[ "connected" ] = nlohmann::json::array();
+  for( std::size_t i = 0; i < snapshot.connected.size() && i < limit; ++i )
+    response[ "connected" ].push_back( peer_row_to_json( snapshot.connected[ i ], true ) );
+
+  response[ "known" ] = nlohmann::json::array();
+  if( include_known )
+  {
+    for( std::size_t i = 0; i < snapshot.known.size() && i < limit; ++i )
+      response[ "known" ].push_back( peer_row_to_json( snapshot.known[ i ], false ) );
+  }
+
+  if( !snapshot.p2p_running )
+    response[ "error" ] = "p2p is not running";
+
+  return response.dump();
+}
+
 void BackupAdminServer::handle_session( tcp::socket socket )
 {
   try
@@ -387,7 +551,8 @@ void BackupAdminServer::handle_session( tcp::socket socket )
     res.set( http::field::content_type, "application/json" );
 
     const auto target = std::string( req.target() );
-    if( is_admin_target( target ) && !request_authorized( req ) )
+    const auto route_path = request_path( target );
+    if( is_admin_target( route_path ) && !request_authorized( req ) )
     {
       res.result( http::status::unauthorized );
       res.set( http::field::www_authenticate, "Bearer" );
@@ -403,10 +568,10 @@ void BackupAdminServer::handle_session( tcp::socket socket )
     try
     {
       if( req.method() == http::verb::get
-          && is_route_or_child( target, "/admin/backup/status" ) )
+          && is_route_or_child( route_path, "/admin/backup/status" ) )
       {
-        const auto operation_id = child_route_id( target, "/admin/backup/status" );
-        const auto has_operation_id = target != "/admin/backup/status";
+        const auto operation_id = child_route_id( route_path, "/admin/backup/status" );
+        const auto has_operation_id = route_path != "/admin/backup/status";
         if( has_operation_id && operation_id.empty() )
         {
           res.result( http::status::bad_request );
@@ -427,51 +592,51 @@ void BackupAdminServer::handle_session( tcp::socket socket )
           }
         }
       }
-      else if( req.method() == http::verb::get && target == "/admin/backup/config" )
+      else if( req.method() == http::verb::get && route_path == "/admin/backup/config" )
       {
         res.result( http::status::ok );
         res.body() = config_response();
       }
-      else if( req.method() == http::verb::get && target == "/admin/backup/public/config" )
+      else if( req.method() == http::verb::get && route_path == "/admin/backup/public/config" )
       {
         res.result( http::status::ok );
         res.body() = public_config_response();
       }
-      else if( req.method() == http::verb::get && target == "/admin/backup/public/snapshots" )
+      else if( req.method() == http::verb::get && route_path == "/admin/backup/public/snapshots" )
       {
         res.result( http::status::ok );
         res.body() = public_list_response();
       }
-      else if( req.method() == http::verb::get && target == "/admin/backup/snapshots/local" )
+      else if( req.method() == http::verb::get && route_path == "/admin/backup/snapshots/local" )
       {
         res.result( http::status::ok );
         res.body() = list_response( false );
       }
-      else if( req.method() == http::verb::get && target == "/admin/backup/snapshots/remote" )
+      else if( req.method() == http::verb::get && route_path == "/admin/backup/snapshots/remote" )
       {
         res.result( http::status::ok );
         res.body() = list_response( true );
       }
-      else if( req.method() == http::verb::post && target == "/admin/backup/create" )
+      else if( req.method() == http::verb::post && route_path == "/admin/backup/create" )
       {
         res.result( http::status::accepted );
         res.body() = create_response( req.body() );
       }
-      else if( req.method() == http::verb::post && target == "/admin/backup/upload-latest" )
+      else if( req.method() == http::verb::post && route_path == "/admin/backup/upload-latest" )
       {
         res.result( http::status::accepted );
         res.body() = upload_latest_response();
       }
-      else if( req.method() == http::verb::post && target == "/admin/backup/delete" )
+      else if( req.method() == http::verb::post && route_path == "/admin/backup/delete" )
       {
         res.result( http::status::accepted );
         res.body() = delete_response( req.body() );
       }
       else if( req.method() == http::verb::post
-               && is_route_or_child( target, "/admin/backup/cancel" ) )
+               && is_route_or_child( route_path, "/admin/backup/cancel" ) )
       {
-        const auto operation_id = child_route_id( target, "/admin/backup/cancel" );
-        const auto has_operation_id = target != "/admin/backup/cancel";
+        const auto operation_id = child_route_id( route_path, "/admin/backup/cancel" );
+        const auto has_operation_id = route_path != "/admin/backup/cancel";
         if( has_operation_id && operation_id.empty() )
         {
           res.result( http::status::bad_request );
@@ -493,47 +658,52 @@ void BackupAdminServer::handle_session( tcp::socket socket )
           }
         }
       }
-      else if( req.method() == http::verb::post && target == "/admin/backup/restore/stage" )
+      else if( req.method() == http::verb::post && route_path == "/admin/backup/restore/stage" )
       {
         res.result( http::status::ok );
         res.body() = restore_stage_response( req.body() );
       }
-      else if( req.method() == http::verb::post && target == "/admin/backup/public/fetch" )
+      else if( req.method() == http::verb::post && route_path == "/admin/backup/public/fetch" )
       {
         res.result( http::status::accepted );
         res.body() = public_restore_fetch_response( req.body() );
       }
-      else if( req.method() == http::verb::post && target == "/admin/backup/public/preflight" )
+      else if( req.method() == http::verb::post && route_path == "/admin/backup/public/preflight" )
       {
         res.result( http::status::ok );
         res.body() = public_restore_preflight_response( req.body() );
       }
-      else if( req.method() == http::verb::post && target == "/admin/backup/public/restore/stage" )
+      else if( req.method() == http::verb::post && route_path == "/admin/backup/public/restore/stage" )
       {
         res.result( http::status::ok );
         res.body() = restore_stage_response( req.body() );
       }
-      else if( req.method() == http::verb::post && target == "/admin/backup/public/restore/activate" )
+      else if( req.method() == http::verb::post && route_path == "/admin/backup/public/restore/activate" )
       {
         res.result( http::status::accepted );
         res.body() = restore_activate_response( req.body() );
       }
-      else if( req.method() == http::verb::post && target == "/admin/backup/restore/fetch" )
+      else if( req.method() == http::verb::post && route_path == "/admin/backup/restore/fetch" )
       {
         res.result( http::status::accepted );
         res.body() = restore_fetch_response( req.body() );
       }
-      else if( req.method() == http::verb::post && target == "/admin/backup/restore/preflight" )
+      else if( req.method() == http::verb::post && route_path == "/admin/backup/restore/preflight" )
       {
         res.result( http::status::ok );
         res.body() = restore_preflight_response( req.body() );
       }
-      else if( req.method() == http::verb::post && target == "/admin/backup/restore/activate" )
+      else if( req.method() == http::verb::post && route_path == "/admin/backup/restore/activate" )
       {
         res.result( http::status::accepted );
         res.body() = restore_activate_response( req.body() );
       }
-      else if( req.method() == http::verb::get && ( target == "/health" || target == "/healthz" ) )
+      else if( req.method() == http::verb::get && route_path == "/admin/p2p/peers" )
+      {
+        res.result( http::status::ok );
+        res.body() = p2p_peers_response( target );
+      }
+      else if( req.method() == http::verb::get && ( route_path == "/health" || route_path == "/healthz" ) )
       {
         res.result( http::status::ok );
         res.body() = R"({"status":"ok","service":"backup_admin"})";
@@ -564,7 +734,7 @@ void BackupAdminServer::handle_session( tcp::socket socket )
       res.body() = error.dump();
     }
 
-    if( is_admin_target( target ) || target == "/health" || target == "/healthz" )
+    if( is_admin_target( route_path ) || route_path == "/health" || route_path == "/healthz" )
     {
       LOG( info ) << "[backup_admin] HTTP request"
                   << " method=" << req.method_string()

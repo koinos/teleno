@@ -231,6 +231,16 @@ uint32_t P2PNode::connected_peer_count() const
   return _transport->connected_peer_count();
 }
 
+std::vector< PeerID > P2PNode::connected_peers() const
+{
+  return _transport ? _transport->connected_peers() : std::vector< PeerID >{};
+}
+
+std::vector< PeerID > P2PNode::known_peers() const
+{
+  return _transport ? _transport->known_peers() : std::vector< PeerID >{};
+}
+
 void P2PNode::log_peer_snapshot()
 {
   auto peers = _transport->connected_peers();

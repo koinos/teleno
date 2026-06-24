@@ -35,6 +35,7 @@ using tcp = asio::ip::tcp;
 
 constexpr uint64_t repository_download_margin_bytes = 128ULL * 1024ULL * 1024ULL;
 constexpr uint64_t max_redirects = 5;
+using DownloadProgressCallback = std::function< void( uint64_t ) >;
 
 struct ParsedUrl
 {
@@ -358,7 +359,8 @@ void emit_progress( const PublicRestoreOptions& options,
                     uint64_t total_batches,
                     uint64_t attempt,
                     uint64_t file_count,
-                    uint64_t total_bytes )
+                    uint64_t total_bytes,
+                    uint64_t completed_bytes = 0 )
 {
   if( !options.progress )
     return;
@@ -369,6 +371,7 @@ void emit_progress( const PublicRestoreOptions& options,
   progress.total_batches = total_batches;
   progress.attempt = attempt;
   progress.file_count = file_count;
+  progress.completed_bytes = completed_bytes;
   progress.total_bytes = total_bytes;
   options.progress( progress );
 }
@@ -409,7 +412,8 @@ public:
 
   void download_relative( const std::string& relative,
                           const std::filesystem::path& destination,
-                          const PublicRestoreOptions& options )
+                          const PublicRestoreOptions& options,
+                          DownloadProgressCallback progress = {} )
   {
     const auto attempts = std::max< uint64_t >( 1, _config.retries );
     for( uint64_t attempt = 1; attempt <= attempts; ++attempt )
@@ -417,7 +421,7 @@ public:
       throw_if_cancelled( options );
       try
       {
-        download_url_to_file( join_url( _config.base_url, relative ), destination, 0 );
+        download_url_to_file( join_url( _config.base_url, relative ), destination, 0, progress );
         ++_request_count;
         return;
       }
@@ -453,7 +457,8 @@ public:
 private:
   void download_url_to_file( const std::string& url,
                              const std::filesystem::path& destination,
-                             uint64_t redirect_count )
+                             uint64_t redirect_count,
+                             const DownloadProgressCallback& progress )
   {
     if( redirect_count > max_redirects )
       throw std::runtime_error( "too many redirects while fetching public backup URL: " + url );
@@ -462,17 +467,25 @@ private:
     if( parsed.scheme == "file" )
     {
       copy_file_atomic( parsed.file_path, destination );
+      if( progress )
+      {
+        std::error_code size_ec;
+        const auto downloaded = std::filesystem::file_size( destination, size_ec );
+        if( !size_ec )
+          progress( downloaded );
+      }
       return;
     }
     if( parsed.scheme == "https" )
-      download_https_to_file( parsed, destination, redirect_count );
+      download_https_to_file( parsed, destination, redirect_count, progress );
     else
-      download_http_to_file( parsed, destination, redirect_count );
+      download_http_to_file( parsed, destination, redirect_count, progress );
   }
 
   void download_http_to_file( const ParsedUrl& parsed,
                               const std::filesystem::path& destination,
-                              uint64_t redirect_count )
+                              uint64_t redirect_count,
+                              const DownloadProgressCallback& progress )
   {
     asio::io_context ioc;
     tcp::resolver resolver( ioc );
@@ -487,7 +500,7 @@ private:
     req.set( http::field::accept, "*/*" );
 
     http::write( stream, req );
-    read_response_to_file( stream, parsed, destination, redirect_count );
+    read_response_to_file( stream, parsed, destination, redirect_count, progress );
 
     beast::error_code ec;
     stream.socket().shutdown( tcp::socket::shutdown_both, ec );
@@ -495,7 +508,8 @@ private:
 
   void download_https_to_file( const ParsedUrl& parsed,
                                const std::filesystem::path& destination,
-                               uint64_t redirect_count )
+                               uint64_t redirect_count,
+                               const DownloadProgressCallback& progress )
   {
     asio::io_context ioc;
     asio::ssl::context ctx( asio::ssl::context::tls_client );
@@ -521,7 +535,7 @@ private:
     req.set( http::field::accept, "*/*" );
 
     http::write( stream, req );
-    read_response_to_file( stream, parsed, destination, redirect_count );
+    read_response_to_file( stream, parsed, destination, redirect_count, progress );
 
     beast::error_code ec;
     stream.shutdown( ec );
@@ -563,7 +577,8 @@ private:
   void read_response_to_file( Stream& stream,
                               const ParsedUrl& parsed,
                               const std::filesystem::path& destination,
-                              uint64_t redirect_count )
+                              uint64_t redirect_count,
+                              const DownloadProgressCallback& progress )
   {
     std::filesystem::create_directories( destination.parent_path() );
     auto partial = destination;
@@ -579,7 +594,17 @@ private:
     if( file_ec )
       throw std::runtime_error( "failed to open public backup download destination: " + partial.string() );
 
-    http::read( stream, buffer, parser );
+    while( !parser.is_done() )
+    {
+      http::read_some( stream, buffer, parser );
+      if( progress )
+      {
+        std::error_code size_ec;
+        const auto downloaded = std::filesystem::file_size( partial, size_ec );
+        if( !size_ec )
+          progress( downloaded );
+      }
+    }
     auto response = parser.release();
 
     if( response.result_int() >= 300 && response.result_int() < 400 )
@@ -590,7 +615,8 @@ private:
         throw std::runtime_error( "public backup redirect response is missing Location header" );
       download_url_to_file( resolve_redirect( parsed, std::string( location ) ),
                             destination,
-                            redirect_count + 1 );
+                            redirect_count + 1,
+                            progress );
       return;
     }
 
@@ -603,6 +629,13 @@ private:
       throw std::runtime_error( message.str() );
     }
 
+    if( progress )
+    {
+      std::error_code size_ec;
+      const auto downloaded = std::filesystem::file_size( partial, size_ec );
+      if( !size_ec )
+        progress( downloaded );
+    }
     std::filesystem::rename( partial, destination );
   }
 
@@ -895,6 +928,7 @@ void fetch_missing_objects( PublicBackupClient& client,
   }
 
   uint64_t completed = 0;
+  uint64_t completed_bytes = 0;
   for( const auto& [sha256, size_bytes]: missing_objects )
   {
     throw_if_cancelled( options );
@@ -913,15 +947,46 @@ void fetch_missing_objects( PublicBackupClient& client,
                    missing_objects.size(),
                    1,
                    missing_objects.size(),
-                   result.object_bytes );
-    client.download_relative( relative, local_partial, options );
+                   result.object_bytes,
+                   completed_bytes );
+    auto last_emit = std::chrono::steady_clock::now() - std::chrono::seconds( 1 );
+    client.download_relative(
+      relative,
+      local_partial,
+      options,
+      [&]( uint64_t current_object_bytes ) {
+        const auto now = std::chrono::steady_clock::now();
+        if( now - last_emit < std::chrono::milliseconds( 500 ) )
+          return;
+        last_emit = now;
+        emit_progress( options,
+                       "public-restore-objects",
+                       result.backup_id,
+                       completed,
+                       missing_objects.size(),
+                       1,
+                       missing_objects.size(),
+                       result.object_bytes,
+                       std::min( result.object_bytes, completed_bytes + current_object_bytes ) );
+      } );
     if( size_bytes != 0 && std::filesystem::file_size( local_partial ) != size_bytes )
       throw std::runtime_error( "downloaded public backup object size mismatch: " + local_partial.string() );
     const auto actual_sha256 = sha256_file( local_partial );
     if( actual_sha256 != sha256 )
       throw std::runtime_error( "downloaded public backup object checksum mismatch: " + local_partial.string() );
+    const auto object_bytes = size_bytes != 0 ? size_bytes : std::filesystem::file_size( local_partial );
     std::filesystem::rename( local_partial, local_object );
+    completed_bytes += object_bytes;
     ++completed;
+    emit_progress( options,
+                   "public-restore-objects",
+                   result.backup_id,
+                   completed,
+                   missing_objects.size(),
+                   1,
+                   missing_objects.size(),
+                   result.object_bytes,
+                   completed_bytes );
   }
   emit_progress( options,
                  "public-restore-objects",
@@ -930,7 +995,8 @@ void fetch_missing_objects( PublicBackupClient& client,
                  missing_objects.size(),
                  1,
                  missing_objects.size(),
-                 result.object_bytes );
+                 result.object_bytes,
+                 completed_bytes );
   result.objects_fetched = true;
 }
 

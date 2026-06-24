@@ -48,6 +48,7 @@ struct BackupOperationStatus
   uint64_t total_batches = 0;
   uint64_t attempt = 0;
   uint64_t progress_file_count = 0;
+  uint64_t progress_completed_bytes = 0;
   uint64_t progress_total_bytes = 0;
   bool has_snapshot = false;
   LocalSnapshotResult snapshot;

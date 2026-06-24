@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -20,6 +21,22 @@ namespace http = beast::http;
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
 
+struct AdminPeerRow
+{
+  std::string peer_id;
+  std::string address;
+};
+
+struct AdminPeerSnapshot
+{
+  bool p2p_running = false;
+  std::string self_address;
+  std::vector< AdminPeerRow > connected;
+  std::vector< AdminPeerRow > known;
+};
+
+using PeerSnapshotProvider = std::function< AdminPeerSnapshot() >;
+
 class BackupAdminServer
 {
 public:
@@ -27,7 +44,8 @@ public:
                      const std::string& listen_address = "127.0.0.1",
                      uint16_t port = 18088,
                      unsigned int threads = 1,
-                     std::string bearer_token = {} );
+                     std::string bearer_token = {},
+                     PeerSnapshotProvider peer_snapshot_provider = {} );
   ~BackupAdminServer();
 
   void start();
@@ -58,10 +76,12 @@ private:
   std::string cancel_response( const BackupOperationStatus& status );
   std::string restore_stage_response( const std::string& body );
   std::string restore_activate_response( const std::string& body );
+  std::string p2p_peers_response( const std::string& target ) const;
 
   BackupService* _backup_service;
   std::string _listen_address;
   std::string _bearer_token;
+  PeerSnapshotProvider _peer_snapshot_provider;
   net::io_context _ioc;
   tcp::acceptor _acceptor;
   std::vector< std::thread > _threads;

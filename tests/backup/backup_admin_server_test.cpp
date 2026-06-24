@@ -128,7 +128,24 @@ int main()
     manager.write_metadata( "backup.admin.test", "present" );
 
     BackupService service( cfg, basedir, config_path, manager );
-    BackupAdminServer server( &service, "127.0.0.1", 0, 1, "admin-test-token" );
+    AdminPeerSnapshot peer_snapshot;
+    peer_snapshot.p2p_running = true;
+    peer_snapshot.self_address = "/ip4/127.0.0.1/tcp/8888/p2p/12D3Self";
+    peer_snapshot.connected.push_back(
+      { "12D3Connected",
+        "/ip4/46.225.170.6/tcp/18889/p2p/12D3Connected" } );
+    peer_snapshot.connected.push_back( { "malformed-peer", "not-a-multiaddr" } );
+    peer_snapshot.known.push_back(
+      { "12D3Known",
+        "/dns4/example.invalid/tcp/18888/p2p/12D3Known" } );
+
+    BackupAdminServer server(
+      &service,
+      "127.0.0.1",
+      0,
+      1,
+      "admin-test-token",
+      [peer_snapshot]() { return peer_snapshot; } );
     server.start();
     const auto port = server.port();
     assert( port != 0 );
@@ -141,6 +158,43 @@ int main()
 
     auto wrong_auth = http_request( port, http::verb::get, "/admin/backup/status", "wrong-token" );
     assert( wrong_auth.status == http::status::unauthorized );
+
+    auto missing_p2p_auth = http_request( port, http::verb::get, "/admin/p2p/peers" );
+    assert( missing_p2p_auth.status == http::status::unauthorized );
+
+    auto live_peers = http_request( port, http::verb::get, "/admin/p2p/peers", "admin-test-token" );
+    assert( live_peers.status == http::status::ok );
+    auto live_peers_json = nlohmann::json::parse( live_peers.body );
+    assert( live_peers_json.at( "ok" ) == true );
+    assert( live_peers_json.at( "source" ) == "p2p-live" );
+    assert( live_peers_json.at( "p2p_running" ) == true );
+    assert( live_peers_json.at( "connected_count" ) == 2 );
+    assert( live_peers_json.at( "known_count" ) == 1 );
+    assert( live_peers_json.at( "self_address" ) == peer_snapshot.self_address );
+    assert( live_peers_json.at( "snapshot_at" ).is_number_unsigned() );
+    assert( live_peers_json.at( "connected" ).size() == 2 );
+    assert( live_peers_json.at( "connected" ).at( 0 ).at( "peer_id" ) == "12D3Connected" );
+    assert( live_peers_json.at( "connected" ).at( 0 ).at( "host" ) == "46.225.170.6" );
+    assert( live_peers_json.at( "connected" ).at( 0 ).at( "port" ) == 18889 );
+    assert( live_peers_json.at( "connected" ).at( 0 ).at( "connected" ) == true );
+    assert( live_peers_json.at( "connected" ).at( 1 ).at( "peer_id" ) == "malformed-peer" );
+    assert( live_peers_json.at( "connected" ).at( 1 ).at( "host" ).is_null() );
+    assert( live_peers_json.at( "connected" ).at( 1 ).at( "port" ).is_null() );
+    assert( live_peers_json.at( "known" ).empty() );
+
+    auto live_peers_with_known = http_request(
+      port,
+      http::verb::get,
+      "/admin/p2p/peers?include_known=true&limit=1",
+      "admin-test-token" );
+    assert( live_peers_with_known.status == http::status::ok );
+    auto live_peers_with_known_json = nlohmann::json::parse( live_peers_with_known.body );
+    assert( live_peers_with_known_json.at( "connected" ).size() == 1 );
+    assert( live_peers_with_known_json.at( "known" ).size() == 1 );
+    assert( live_peers_with_known_json.at( "known" ).at( 0 ).at( "peer_id" ) == "12D3Known" );
+    assert( live_peers_with_known_json.at( "known" ).at( 0 ).at( "host" ) == "example.invalid" );
+    assert( live_peers_with_known_json.at( "known" ).at( 0 ).at( "port" ) == 18888 );
+    assert( live_peers_with_known_json.at( "known" ).at( 0 ).at( "connected" ) == false );
 
     auto initial = http_request( port, http::verb::get, "/admin/backup/status", "admin-test-token" );
     assert( initial.status == http::status::ok );
@@ -381,6 +435,21 @@ int main()
     write_file( basedir / "config.yml", "backup:\n  enabled: true\n" );
     manager.open( basedir, cfg );
     BackupService service( cfg, basedir, basedir / "config.yml", manager );
+
+    BackupAdminServer providerless_server( &service, "127.0.0.1", 0, 1, "admin-test-token" );
+    providerless_server.start();
+    const auto providerless_port = providerless_server.port();
+    assert( providerless_port != 0 );
+    auto providerless_peers = http_request(
+      providerless_port, http::verb::get, "/admin/p2p/peers", "admin-test-token" );
+    assert( providerless_peers.status == http::status::ok );
+    auto providerless_peers_json = nlohmann::json::parse( providerless_peers.body );
+    assert( providerless_peers_json.at( "ok" ) == false );
+    assert( providerless_peers_json.at( "source" ) == "p2p-live" );
+    assert( providerless_peers_json.at( "p2p_running" ) == false );
+    assert( providerless_peers_json.at( "connected" ).empty() );
+    assert( providerless_peers_json.at( "known" ).empty() );
+    providerless_server.stop();
 
     bool threw = false;
     try

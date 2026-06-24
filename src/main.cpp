@@ -385,6 +385,7 @@ node::backup::SftpTransferOptions cli_sftp_transfer_options( bool emit_json_prog
     event[ "total_batches" ] = progress.total_batches;
     event[ "attempt" ] = progress.attempt;
     event[ "file_count" ] = progress.file_count;
+    event[ "completed_bytes" ] = progress.completed_bytes;
     event[ "total_bytes" ] = progress.total_bytes;
     std::cerr << event.dump() << std::endl;
   };
@@ -406,6 +407,7 @@ node::backup::PublicRestoreOptions cli_public_restore_options( bool emit_json_pr
     event[ "total_batches" ] = progress.total_batches;
     event[ "attempt" ] = progress.attempt;
     event[ "file_count" ] = progress.file_count;
+    event[ "completed_bytes" ] = progress.completed_bytes;
     event[ "total_bytes" ] = progress.total_bytes;
     std::cerr << event.dump() << std::endl;
   };
@@ -1970,12 +1972,26 @@ int main( int argc, char** argv )
 
       const auto admin_token = read_backup_admin_token_file( cfg.backup.admin.token_file );
 
+      node::backup::PeerSnapshotProvider peer_snapshot_provider = [&]() {
+        node::backup::AdminPeerSnapshot snapshot;
+        snapshot.p2p_running = static_cast< bool >( p2p_node );
+        if( !p2p_node )
+          return snapshot;
+
+        for( const auto& peer: p2p_node->connected_peers() )
+          snapshot.connected.push_back( { peer.id, peer.address } );
+        for( const auto& peer: p2p_node->known_peers() )
+          snapshot.known.push_back( { peer.id, peer.address } );
+        return snapshot;
+      };
+
       backup_admin_server = std::make_unique< node::backup::BackupAdminServer >(
         backup_service_runtime.get(),
         admin_host,
         admin_port,
         static_cast< unsigned int >( std::max< uint64_t >( 1, cfg.backup.admin.jobs ) ),
-        admin_token );
+        admin_token,
+        std::move( peer_snapshot_provider ) );
 
       registry.add(
         "backup_admin",
