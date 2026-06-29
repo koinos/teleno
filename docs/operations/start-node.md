@@ -5,7 +5,7 @@ This guide starts the monolithic `teleno_node` runtime directly from the reposit
 Run all commands from the repository root:
 
 ```bash
-cd /Users/pgarcgo/code/teleno
+cd /Users/pgarcgo/code/koinos-one
 ```
 
 Build the node first if `node/teleno-node/build/teleno_node` does not exist:
