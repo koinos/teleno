@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -66,6 +67,18 @@ struct RestoreStageResult
   uint64_t restored_bytes = 0;
   std::vector< std::string > skipped_optional_runtime_files;
 };
+
+struct RestoreStageProgress
+{
+  std::string phase = "restore-stage";
+  std::string backup_id;
+  uint64_t completed_files = 0;
+  uint64_t total_files = 0;
+  uint64_t completed_bytes = 0;
+  uint64_t total_bytes = 0;
+};
+
+using RestoreStageProgressCallback = std::function< void( const RestoreStageProgress& ) >;
 
 struct RestoreActivatedPath
 {
@@ -182,11 +195,13 @@ RestorePreflightResult build_local_restore_preflight( const std::filesystem::pat
                                                       const std::string& backup_id );
 RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& repository_dir,
                                                  const std::filesystem::path& target_basedir,
-                                                 const std::filesystem::path& requested_staging_dir = {} );
+                                                 const std::filesystem::path& requested_staging_dir = {},
+                                                 RestoreStageProgressCallback progress = {} );
 RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& repository_dir,
                                                  const std::filesystem::path& target_basedir,
                                                  const std::string& backup_id,
-                                                 const std::filesystem::path& requested_staging_dir = {} );
+                                                 const std::filesystem::path& requested_staging_dir = {},
+                                                 RestoreStageProgressCallback progress = {} );
 RestoreActivationResult activate_staged_restore_snapshot( const std::filesystem::path& staging_dir,
                                                           const std::filesystem::path& target_basedir );
 BackupSnapshotListResult list_local_backup_snapshots( const std::filesystem::path& repository_dir );

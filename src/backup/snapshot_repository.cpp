@@ -959,15 +959,17 @@ RestorePreflightResult build_local_restore_preflight( const std::filesystem::pat
 
 RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& repository_dir,
                                                  const std::filesystem::path& target_basedir,
-                                                 const std::filesystem::path& requested_staging_dir )
+                                                 const std::filesystem::path& requested_staging_dir,
+                                                 RestoreStageProgressCallback progress )
 {
-  return stage_local_restore_snapshot( repository_dir, target_basedir, {}, requested_staging_dir );
+  return stage_local_restore_snapshot( repository_dir, target_basedir, {}, requested_staging_dir, std::move( progress ) );
 }
 
 RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& repository_dir,
                                                  const std::filesystem::path& target_basedir,
                                                  const std::string& backup_id,
-                                                 const std::filesystem::path& requested_staging_dir )
+                                                 const std::filesystem::path& requested_staging_dir,
+                                                 RestoreStageProgressCallback progress )
 {
   auto preflight = build_local_restore_preflight( repository_dir, target_basedir, backup_id );
   if( !preflight.ready_to_restore )
@@ -999,6 +1001,26 @@ RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& re
   try
   {
     const auto files = nlohmann::json::parse( read_text_file( result.preflight.files_path ) );
+    uint64_t total_files = 0;
+    uint64_t total_bytes = 0;
+    for( const auto& file: files.at( "files" ) )
+    {
+      ++total_files;
+      total_bytes += file.value( "size_bytes", 0ULL );
+    }
+    const auto emit_stage_progress = [&]() {
+      if( !progress )
+        return;
+      RestoreStageProgress stage_progress;
+      stage_progress.backup_id = result.preflight.backup_id;
+      stage_progress.completed_files = result.restored_file_count + result.skipped_optional_runtime_files.size();
+      stage_progress.total_files = total_files;
+      stage_progress.completed_bytes = result.restored_bytes;
+      stage_progress.total_bytes = total_bytes;
+      progress( stage_progress );
+    };
+    emit_stage_progress();
+
     for( const auto& file: files.at( "files" ) )
     {
       const auto relative_path = file.at( "path" ).get< std::string >();
@@ -1013,6 +1035,7 @@ RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& re
         if( optional_restored_config )
         {
           result.skipped_optional_runtime_files.push_back( relative_path );
+          emit_stage_progress();
           continue;
         }
         throw std::runtime_error( "restore object is missing: " + source.string() );
@@ -1029,6 +1052,7 @@ RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& re
         {
           std::filesystem::remove( destination );
           result.skipped_optional_runtime_files.push_back( relative_path );
+          emit_stage_progress();
           continue;
         }
         throw std::runtime_error( "restore checksum mismatch for " + relative_path );
@@ -1036,6 +1060,7 @@ RestoreStageResult stage_local_restore_snapshot( const std::filesystem::path& re
 
       ++result.restored_file_count;
       result.restored_bytes += size;
+      emit_stage_progress();
     }
 
     std::ostringstream metadata;

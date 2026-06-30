@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -178,13 +179,39 @@ int main()
     assert( !std::filesystem::exists( selected_stage.staging_dir / "config.yml" ) );
     assert( restore_stage_result_to_json( selected_stage ).find( "\"skipped_optional_runtime_files\": [\"config.yml\"]" ) != std::string::npos );
 
-    auto stage = stage_local_restore_snapshot( cfg.backup.local.directory, restore_target );
+    std::vector< RestoreStageProgress > stage_progress;
+    auto stage = stage_local_restore_snapshot(
+      cfg.backup.local.directory,
+      restore_target,
+      std::filesystem::path{},
+      [&]( const RestoreStageProgress& progress ) {
+        stage_progress.push_back( progress );
+      } );
     assert( stage.preflight.backup_id == second.backup_id );
     assert( std::filesystem::exists( stage.staging_dir / "RESTORE_STAGE_COMPLETE" ) );
     assert( std::filesystem::exists( stage.metadata_path ) );
     assert( std::filesystem::exists( stage.staging_dir / "config.yml" ) );
     assert( stage.restored_file_count == second.file_count );
     assert( stage.restored_bytes == second.total_bytes );
+    assert( !stage_progress.empty() );
+    assert( stage_progress.front().backup_id == second.backup_id );
+    assert( stage_progress.front().completed_files == 0 );
+    assert( stage_progress.front().total_files == second.file_count );
+    assert( stage_progress.front().total_bytes == second.total_bytes );
+    assert( stage_progress.back().completed_files == second.file_count );
+    assert( stage_progress.back().completed_bytes == second.total_bytes );
+    uint64_t last_progress_files = 0;
+    uint64_t last_progress_bytes = 0;
+    for( const auto& progress: stage_progress )
+    {
+      assert( progress.backup_id == second.backup_id );
+      assert( progress.total_files == second.file_count );
+      assert( progress.total_bytes == second.total_bytes );
+      assert( progress.completed_files >= last_progress_files );
+      assert( progress.completed_bytes >= last_progress_bytes );
+      last_progress_files = progress.completed_files;
+      last_progress_bytes = progress.completed_bytes;
+    }
     assert( restore_stage_result_to_text( stage ).find( "Staged backup restore" ) != std::string::npos );
     assert( restore_stage_result_to_json( stage ).find( "\"restored_file_count\"" ) != std::string::npos );
 

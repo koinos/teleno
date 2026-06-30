@@ -414,6 +414,28 @@ node::backup::PublicRestoreOptions cli_public_restore_options( bool emit_json_pr
   return options;
 }
 
+node::backup::RestoreStageProgressCallback cli_restore_stage_progress(
+  bool emit_json_progress,
+  std::string phase )
+{
+  if( !emit_json_progress )
+    return {};
+
+  return [phase = std::move( phase )]( const node::backup::RestoreStageProgress& progress ) {
+    nlohmann::json event;
+    event[ "event" ] = "backup-progress";
+    event[ "phase" ] = phase;
+    event[ "backup_id" ] = progress.backup_id;
+    event[ "completed_batches" ] = progress.completed_files;
+    event[ "total_batches" ] = progress.total_files;
+    event[ "attempt" ] = 1;
+    event[ "file_count" ] = progress.total_files;
+    event[ "completed_bytes" ] = progress.completed_bytes;
+    event[ "total_bytes" ] = progress.total_bytes;
+    std::cerr << event.dump() << std::endl;
+  };
+}
+
 std::string shell_quote( const std::filesystem::path& path )
 {
   std::string value = path.string();
@@ -1029,7 +1051,8 @@ int main( int argc, char** argv )
         cfg.backup.local.directory,
         basedir,
         backup_id == "latest" ? std::string{} : backup_id,
-        output );
+        output,
+        cli_restore_stage_progress( vm.count( BACKUP_JSON_OPTION ) > 0, "public-restore-stage" ) );
       result.activation = node::backup::activate_staged_restore_snapshot(
         result.stage->staging_dir,
         basedir );
@@ -1107,7 +1130,8 @@ int main( int argc, char** argv )
         cfg.backup.local.directory,
         basedir,
         backup_id == "latest" ? std::string{} : backup_id,
-        output );
+        output,
+        cli_restore_stage_progress( vm.count( BACKUP_JSON_OPTION ) > 0, "restore-stage" ) );
       result.activation = node::backup::activate_staged_restore_snapshot(
         result.stage->staging_dir,
         basedir );
@@ -1157,7 +1181,8 @@ int main( int argc, char** argv )
         cfg.backup.local.directory,
         basedir,
         backup_id == "latest" ? std::string{} : backup_id,
-        output );
+        output,
+        cli_restore_stage_progress( vm.count( BACKUP_JSON_OPTION ) > 0, "restore-stage" ) );
       if( vm.count( BACKUP_JSON_OPTION ) )
         std::cout << node::backup::restore_stage_result_to_json( result );
       else
