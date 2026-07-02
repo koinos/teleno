@@ -178,7 +178,9 @@ Do not solve token errors by exposing the admin API or disabling protection.
 
 Rebuild the native binary when:
 
-- source under `node/teleno-node/` changed;
+- source under
+  [`node/teleno-node/`](https://github.com/pgarciagon/koinos-one/tree/main/node/teleno-node)
+  changed;
 - dependency build scripts changed;
 - `teleno_node --help` does not include expected backup flags;
 - packaged verification reports a missing or stale native binary.
