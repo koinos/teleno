@@ -196,6 +196,192 @@ std::optional< libp2p::peer::PeerInfo > peer_info_from_multiaddress( const std::
   return libp2p::peer::PeerInfo{ peer_id.value(), dial_addresses.addresses };
 }
 
+void log_libp2p_async_error( const std::string& operation, const std::string& message )
+{
+  LOG( debug ) << "[p2p/transport] " << operation << " failed: " << message;
+}
+
+void log_libp2p_async_error( const std::string& operation, const std::exception& e )
+{
+  log_libp2p_async_error( operation, e.what() );
+}
+
+void log_libp2p_async_unknown_error( const std::string& operation )
+{
+  log_libp2p_async_error( operation, "unknown exception" );
+}
+
+template< typename T, typename Value >
+void safe_set_promise_value( const std::shared_ptr< std::promise< T > >& promise,
+                             Value&& value,
+                             const std::string& operation )
+{
+  if( !promise )
+    return;
+
+  try
+  {
+    promise->set_value( std::forward< Value >( value ) );
+  }
+  catch( const std::exception& e )
+  {
+    log_libp2p_async_error( operation + " promise completion", e );
+  }
+  catch( ... )
+  {
+    log_libp2p_async_unknown_error( operation + " promise completion" );
+  }
+}
+
+template< typename T >
+void safe_set_promise_exception( const std::shared_ptr< std::promise< T > >& promise,
+                                 const std::string& message,
+                                 const std::string& operation )
+{
+  if( !promise )
+    return;
+
+  try
+  {
+    promise->set_exception( std::make_exception_ptr( std::runtime_error( message ) ) );
+  }
+  catch( const std::exception& e )
+  {
+    log_libp2p_async_error( operation + " promise exception", e );
+  }
+  catch( ... )
+  {
+    log_libp2p_async_unknown_error( operation + " promise exception" );
+  }
+}
+
+void safe_stream_close( const std::shared_ptr< libp2p::connection::Stream >& stream,
+                        const std::string& operation )
+{
+  if( !stream )
+    return;
+
+  try
+  {
+    stream->close( []( auto&& ) {} );
+  }
+  catch( const std::exception& e )
+  {
+    log_libp2p_async_error( operation + " close", e );
+  }
+  catch( ... )
+  {
+    log_libp2p_async_unknown_error( operation + " close" );
+  }
+}
+
+void safe_stream_write_some( const std::shared_ptr< libp2p::connection::Stream >& stream,
+                             const std::shared_ptr< libp2p::Bytes >& bytes,
+                             const std::shared_ptr< std::promise< outcome::result< size_t > > >& promise,
+                             const std::string& operation )
+{
+  if( !stream || !bytes )
+  {
+    safe_set_promise_exception( promise, operation + ": stream or buffer unavailable", operation );
+    return;
+  }
+
+  try
+  {
+    stream->writeSome( *bytes, bytes->size(),
+      [bytes, promise, operation]( outcome::result< size_t > result ) mutable {
+        safe_set_promise_value( promise, std::move( result ), operation );
+      }
+    );
+  }
+  catch( const std::exception& e )
+  {
+    safe_set_promise_exception( promise, operation + ": " + e.what(), operation );
+  }
+  catch( ... )
+  {
+    safe_set_promise_exception( promise, operation + ": unknown exception", operation );
+  }
+}
+
+void safe_stream_read_some( const std::shared_ptr< libp2p::connection::Stream >& stream,
+                            const std::shared_ptr< libp2p::Bytes >& buffer,
+                            const std::shared_ptr< std::promise< outcome::result< size_t > > >& promise,
+                            const std::string& operation )
+{
+  if( !stream || !buffer )
+  {
+    safe_set_promise_exception( promise, operation + ": stream or buffer unavailable", operation );
+    return;
+  }
+
+  try
+  {
+    stream->readSome( *buffer, buffer->size(),
+      [buffer, promise, operation]( outcome::result< size_t > result ) mutable {
+        safe_set_promise_value( promise, std::move( result ), operation );
+      }
+    );
+  }
+  catch( const std::exception& e )
+  {
+    safe_set_promise_exception( promise, operation + ": " + e.what(), operation );
+  }
+  catch( ... )
+  {
+    safe_set_promise_exception( promise, operation + ": unknown exception", operation );
+  }
+}
+
+void safe_stream_write_and_close( const std::shared_ptr< libp2p::connection::Stream >& stream,
+                                  const std::shared_ptr< libp2p::Bytes >& bytes,
+                                  const std::string& operation )
+{
+  if( !stream )
+    return;
+  if( !bytes )
+  {
+    log_libp2p_async_error( operation, "buffer unavailable" );
+    safe_stream_close( stream, operation );
+    return;
+  }
+
+  try
+  {
+    stream->writeSome( *bytes, bytes->size(),
+      [stream, bytes, operation]( outcome::result< size_t > result ) mutable {
+        try
+        {
+          if( !result.has_value() )
+            log_libp2p_async_error( operation, result.error().message() );
+          else if( result.value() == 0 )
+            log_libp2p_async_error( operation, "zero bytes written" );
+        }
+        catch( const std::exception& e )
+        {
+          log_libp2p_async_error( operation + " callback", e );
+        }
+        catch( ... )
+        {
+          log_libp2p_async_unknown_error( operation + " callback" );
+        }
+
+        safe_stream_close( stream, operation );
+      }
+    );
+  }
+  catch( const std::exception& e )
+  {
+    log_libp2p_async_error( operation, e );
+    safe_stream_close( stream, operation );
+  }
+  catch( ... )
+  {
+    log_libp2p_async_unknown_error( operation );
+    safe_stream_close( stream, operation );
+  }
+}
+
 void prepare_libp2p_logging()
 {
   static std::once_flag initialized;
@@ -314,7 +500,18 @@ void Libp2pTransport::start()
   _host->setProtocolHandler(
     { PEER_RPC_PROTOCOL },
     [this]( libp2p::StreamAndProtocol stream_and_proto ) {
-      handle_incoming_rpc( std::move( stream_and_proto.stream ) );
+      try
+      {
+        handle_incoming_rpc( std::move( stream_and_proto.stream ) );
+      }
+      catch( const std::exception& e )
+      {
+        LOG( warning ) << "[p2p/transport] Incoming Peer RPC handler failed: " << e.what();
+      }
+      catch( ... )
+      {
+        LOG( warning ) << "[p2p/transport] Incoming Peer RPC handler failed: unknown exception";
+      }
     }
   );
 
@@ -322,46 +519,68 @@ void Libp2pTransport::start()
   // alive for the subscriptions to remain active.
   _new_connection_subscription = _host->setOnNewConnectionHandler(
     [this]( libp2p::peer::PeerInfo&& peer_info ) {
-      auto id_str = peer_info.id.toBase58();
-      std::string address;
-      if( !peer_info.addresses.empty() )
-        address = with_peer_id_component( std::string( peer_info.addresses.front().getStringAddress() ), id_str );
-      PeerID peer{ id_str, address };
-      bool inserted = false;
+      try
       {
-        std::lock_guard lock( _peers_mutex );
-        auto it = _connected.find( id_str );
-        inserted = it == _connected.end();
-        if( inserted || it->second.address.empty() )
-          _connected[ id_str ] = peer;
-        if( !address.empty() )
-          _known_peers[ id_str ] = peer;
+        auto id_str = peer_info.id.toBase58();
+        std::string address;
+        if( !peer_info.addresses.empty() )
+          address = with_peer_id_component( std::string( peer_info.addresses.front().getStringAddress() ), id_str );
+        PeerID peer{ id_str, address };
+        bool inserted = false;
+        {
+          std::lock_guard lock( _peers_mutex );
+          auto it = _connected.find( id_str );
+          inserted = it == _connected.end();
+          if( inserted || it->second.address.empty() )
+            _connected[ id_str ] = peer;
+          if( !address.empty() )
+            _known_peers[ id_str ] = peer;
+        }
+        if( inserted && _on_connected )
+          _on_connected( peer );
       }
-      if( inserted && _on_connected )
-        _on_connected( peer );
+      catch( const std::exception& e )
+      {
+        LOG( warning ) << "[p2p/transport] New connection callback failed: " << e.what();
+      }
+      catch( ... )
+      {
+        LOG( warning ) << "[p2p/transport] New connection callback failed: unknown exception";
+      }
     }
   );
 
   _peer_disconnected_subscription = _host->getBus()
     .getChannel< libp2p::event::network::OnPeerDisconnectedChannel >()
     .subscribe( [this]( const libp2p::peer::PeerId& peer_id ) {
-      auto id_str = peer_id.toBase58();
-      PeerID peer{ id_str, "" };
-      bool erased = false;
+      try
       {
-        std::lock_guard lock( _peers_mutex );
-        auto it = _connected.find( id_str );
-        if( it != _connected.end() )
+        auto id_str = peer_id.toBase58();
+        PeerID peer{ id_str, "" };
+        bool erased = false;
         {
-          peer = it->second;
-          _connected.erase( it );
-          erased = true;
+          std::lock_guard lock( _peers_mutex );
+          auto it = _connected.find( id_str );
+          if( it != _connected.end() )
+          {
+            peer = it->second;
+            _connected.erase( it );
+            erased = true;
+          }
+          _connecting.erase( id_str );
         }
-        _connecting.erase( id_str );
-      }
 
-      if( erased && _on_disconnected )
-        _on_disconnected( peer );
+        if( erased && _on_disconnected )
+          _on_disconnected( peer );
+      }
+      catch( const std::exception& e )
+      {
+        LOG( warning ) << "[p2p/transport] Peer disconnected callback failed: " << e.what();
+      }
+      catch( ... )
+      {
+        LOG( warning ) << "[p2p/transport] Peer disconnected callback failed: unknown exception";
+      }
     } );
 
   // Create GossipSub
@@ -388,14 +607,25 @@ void Libp2pTransport::start()
   _block_sub = _gossip->subscribe(
     { BLOCK_TOPIC },
     [this]( libp2p::protocol::gossip::Gossip::SubscriptionData msg ) {
-      if( msg )
+      try
       {
-        auto& m = msg.value();
-        auto peer_id = libp2p::peer::PeerId::fromBytes( m.from );
-        if( peer_id.has_value() )
-          on_gossip_message( std::string( m.topic ),
-                             std::string( m.data.begin(), m.data.end() ),
-                             peer_id.value() );
+        if( msg )
+        {
+          auto& m = msg.value();
+          auto peer_id = libp2p::peer::PeerId::fromBytes( m.from );
+          if( peer_id.has_value() )
+            on_gossip_message( std::string( m.topic ),
+                               std::string( m.data.begin(), m.data.end() ),
+                               peer_id.value() );
+        }
+      }
+      catch( const std::exception& e )
+      {
+        LOG( warning ) << "[p2p/transport] Block gossip callback failed: " << e.what();
+      }
+      catch( ... )
+      {
+        LOG( warning ) << "[p2p/transport] Block gossip callback failed: unknown exception";
       }
     }
   );
@@ -404,14 +634,25 @@ void Libp2pTransport::start()
   _tx_sub = _gossip->subscribe(
     { TRANSACTION_TOPIC },
     [this]( libp2p::protocol::gossip::Gossip::SubscriptionData msg ) {
-      if( msg )
+      try
       {
-        auto& m = msg.value();
-        auto peer_id = libp2p::peer::PeerId::fromBytes( m.from );
-        if( peer_id.has_value() )
-          on_gossip_message( std::string( m.topic ),
-                             std::string( m.data.begin(), m.data.end() ),
-                             peer_id.value() );
+        if( msg )
+        {
+          auto& m = msg.value();
+          auto peer_id = libp2p::peer::PeerId::fromBytes( m.from );
+          if( peer_id.has_value() )
+            on_gossip_message( std::string( m.topic ),
+                               std::string( m.data.begin(), m.data.end() ),
+                               peer_id.value() );
+        }
+      }
+      catch( const std::exception& e )
+      {
+        LOG( warning ) << "[p2p/transport] Transaction gossip callback failed: " << e.what();
+      }
+      catch( ... )
+      {
+        LOG( warning ) << "[p2p/transport] Transaction gossip callback failed: unknown exception";
       }
     }
   );
@@ -522,23 +763,47 @@ void Libp2pTransport::start()
 
     libp2p::peer::PeerInfo peer_info{ peer_id.value(), dial_addresses.addresses };
 
-    _host->connect( peer_info, [this, seed, id = peer_id_str.value()]( auto&& result ) {
-      if( result.has_value() )
-      {
-        PeerID peer{ id, seed };
+    try
+    {
+      _host->connect( peer_info, [this, seed, id = peer_id_str.value()]( auto&& result ) {
+        try
         {
-          std::lock_guard lock( _peers_mutex );
-          _connected[ id ] = peer;
-          _known_peers[ id ] = peer;
+          if( result.has_value() )
+          {
+            PeerID peer{ id, seed };
+            {
+              std::lock_guard lock( _peers_mutex );
+              _connected[ id ] = peer;
+              _known_peers[ id ] = peer;
+            }
+            if( _on_connected )
+              _on_connected( peer );
+            LOG( info ) << "[p2p/transport] Connected to seed: " << seed;
+          }
+          else
+            LOG( warning ) << "[p2p/transport] Failed to connect to seed: " << seed
+                           << " error=" << result.error().message();
         }
-        if( _on_connected )
-          _on_connected( peer );
-        LOG( info ) << "[p2p/transport] Connected to seed: " << seed;
-      }
-      else
-        LOG( warning ) << "[p2p/transport] Failed to connect to seed: " << seed
-                       << " error=" << result.error().message();
-    } );
+        catch( const std::exception& e )
+        {
+          LOG( warning ) << "[p2p/transport] Seed connect callback failed: " << e.what();
+        }
+        catch( ... )
+        {
+          LOG( warning ) << "[p2p/transport] Seed connect callback failed: unknown exception";
+        }
+      } );
+    }
+    catch( const std::exception& e )
+    {
+      LOG( warning ) << "[p2p/transport] Failed to start seed connection: "
+                     << seed << " error=" << e.what();
+    }
+    catch( ... )
+    {
+      LOG( warning ) << "[p2p/transport] Failed to start seed connection: "
+                     << seed << " error=unknown exception";
+    }
   }
 
   // cpp-libp2p connection and muxer state is not safe to drive from multiple
@@ -639,40 +904,90 @@ void Libp2pTransport::connect_peer( const PeerID& peer )
 
   libp2p::peer::PeerInfo peer_info{ peer_id.value(), dial_addresses.addresses };
   boost::asio::post( *_io, [this, host = _host, peer, peer_info = std::move( peer_info )]() mutable {
-    host->connect( peer_info, [this, peer]( auto&& result ) {
-      {
-        std::lock_guard lock( _peers_mutex );
-        _connecting.erase( peer.id );
-      }
-
-      if( result.has_value() )
-      {
+    try
+    {
+      host->connect( peer_info, [this, peer]( auto&& result ) {
+        try
         {
-          std::lock_guard lock( _peers_mutex );
-          _connected[ peer.id ] = peer;
-          if( !peer.address.empty() )
-            _known_peers[ peer.id ] = peer;
+          {
+            std::lock_guard lock( _peers_mutex );
+            _connecting.erase( peer.id );
+          }
+
+          if( result.has_value() )
+          {
+            {
+              std::lock_guard lock( _peers_mutex );
+              _connected[ peer.id ] = peer;
+              if( !peer.address.empty() )
+                _known_peers[ peer.id ] = peer;
+            }
+            if( _on_connected )
+              _on_connected( peer );
+          }
+          else
+            LOG( warning ) << "[p2p/transport] Failed to connect to peer: " << peer.address
+                           << " error=" << result.error().message();
         }
-        if( _on_connected )
-          _on_connected( peer );
-      }
-      else
-        LOG( warning ) << "[p2p/transport] Failed to connect to peer: " << peer.address
-                       << " error=" << result.error().message();
-    } );
+        catch( const std::exception& e )
+        {
+          LOG( warning ) << "[p2p/transport] Peer connect callback failed: " << e.what();
+          std::lock_guard lock( _peers_mutex );
+          _connecting.erase( peer.id );
+        }
+        catch( ... )
+        {
+          LOG( warning ) << "[p2p/transport] Peer connect callback failed: unknown exception";
+          std::lock_guard lock( _peers_mutex );
+          _connecting.erase( peer.id );
+        }
+      } );
+    }
+    catch( const std::exception& e )
+    {
+      LOG( warning ) << "[p2p/transport] Failed to start peer connection: "
+                     << peer.address << " error=" << e.what();
+      std::lock_guard lock( _peers_mutex );
+      _connecting.erase( peer.id );
+    }
+    catch( ... )
+    {
+      LOG( warning ) << "[p2p/transport] Failed to start peer connection: "
+                     << peer.address << " error=unknown exception";
+      std::lock_guard lock( _peers_mutex );
+      _connecting.erase( peer.id );
+    }
   } );
 }
 
 void Libp2pTransport::disconnect_peer( const PeerID& peer )
 {
   auto pid = libp2p::peer::PeerId::fromBase58( peer.id );
-  if( pid.has_value() )
-    _host->disconnect( pid.value() );
+  if( pid.has_value() && _host && _io )
+  {
+    boost::asio::post( *_io, [host = _host, peer, pid = pid.value()] {
+      try
+      {
+        host->disconnect( pid );
+      }
+      catch( const std::exception& e )
+      {
+        LOG( debug ) << "[p2p/transport] Disconnect failed for peer "
+                     << peer.id << ": " << e.what();
+      }
+      catch( ... )
+      {
+        LOG( debug ) << "[p2p/transport] Disconnect failed for peer "
+                     << peer.id << ": unknown exception";
+      }
+    } );
+  }
 
   PeerID disconnected_peer = peer;
   bool was_connected       = false;
   {
     std::lock_guard lock( _peers_mutex );
+    _connecting.erase( peer.id );
     auto it = _connected.find( peer.id );
     if( it != _connected.end() )
     {
@@ -683,7 +998,20 @@ void Libp2pTransport::disconnect_peer( const PeerID& peer )
   }
 
   if( was_connected && _on_disconnected )
-    _on_disconnected( disconnected_peer );
+  {
+    try
+    {
+      _on_disconnected( disconnected_peer );
+    }
+    catch( const std::exception& e )
+    {
+      LOG( warning ) << "[p2p/transport] Peer disconnected callback failed: " << e.what();
+    }
+    catch( ... )
+    {
+      LOG( warning ) << "[p2p/transport] Peer disconnected callback failed: unknown exception";
+    }
+  }
 }
 
 uint32_t Libp2pTransport::connected_peer_count() const
@@ -803,7 +1131,20 @@ void Libp2pTransport::publish_block( const protocol::block& block )
 
   std::string data;
   if( block.SerializeToString( &data ) )
-    _gossip->publish( BLOCK_TOPIC, libp2p::Bytes( data.begin(), data.end() ) );
+  {
+    try
+    {
+      _gossip->publish( BLOCK_TOPIC, libp2p::Bytes( data.begin(), data.end() ) );
+    }
+    catch( const std::exception& e )
+    {
+      LOG( warning ) << "[p2p/transport] Failed to publish block gossip: " << e.what();
+    }
+    catch( ... )
+    {
+      LOG( warning ) << "[p2p/transport] Failed to publish block gossip: unknown exception";
+    }
+  }
 }
 
 void Libp2pTransport::publish_transaction( const protocol::transaction& tx )
@@ -813,7 +1154,20 @@ void Libp2pTransport::publish_transaction( const protocol::transaction& tx )
 
   std::string data;
   if( tx.SerializeToString( &data ) )
-    _gossip->publish( TRANSACTION_TOPIC, libp2p::Bytes( data.begin(), data.end() ) );
+  {
+    try
+    {
+      _gossip->publish( TRANSACTION_TOPIC, libp2p::Bytes( data.begin(), data.end() ) );
+    }
+    catch( const std::exception& e )
+    {
+      LOG( warning ) << "[p2p/transport] Failed to publish transaction gossip: " << e.what();
+    }
+    catch( ... )
+    {
+      LOG( warning ) << "[p2p/transport] Failed to publish transaction gossip: unknown exception";
+    }
+  }
 }
 
 void Libp2pTransport::on_gossip_message( const std::string& topic,
@@ -867,19 +1221,31 @@ std::string Libp2pTransport::send_peer_rpc( const PeerID& peer,
   libp2p::peer::PeerInfo peer_info{ pid.value(), dial_addresses.addresses };
 
   const auto timeout = std::chrono::seconds( 6 );
+  const auto open_operation = "open Peer RPC stream to peer " + peer.id;
 
   // Open stream (async — block via promise)
   auto stream_promise = std::make_shared< std::promise< libp2p::StreamAndProtocolOrError > >();
   auto stream_future = stream_promise->get_future();
 
-  boost::asio::post( *_io, [host = _host, peer_info, stream_promise]() {
-    host->newStream(
-      peer_info,
-      { PEER_RPC_PROTOCOL },
-      [stream_promise]( libp2p::StreamAndProtocolOrError result ) {
-        stream_promise->set_value( std::move( result ) );
-      }
-    );
+  boost::asio::post( *_io, [host = _host, peer_info, stream_promise, open_operation]() {
+    try
+    {
+      host->newStream(
+        peer_info,
+        { PEER_RPC_PROTOCOL },
+        [stream_promise, open_operation]( libp2p::StreamAndProtocolOrError result ) mutable {
+          safe_set_promise_value( stream_promise, std::move( result ), open_operation );
+        }
+      );
+    }
+    catch( const std::exception& e )
+    {
+      safe_set_promise_exception( stream_promise, open_operation + ": " + e.what(), open_operation );
+    }
+    catch( ... )
+    {
+      safe_set_promise_exception( stream_promise, open_operation + ": unknown exception", open_operation );
+    }
   } );
 
   if( stream_future.wait_for( timeout ) != std::future_status::ready )
@@ -898,13 +1264,10 @@ std::string Libp2pTransport::send_peer_rpc( const PeerID& peer,
 
   auto write_promise = std::make_shared< std::promise< outcome::result< size_t > > >();
   auto write_future = write_promise->get_future();
+  const auto write_operation = "write Peer RPC request to peer " + peer.id;
 
-  boost::asio::post( *_io, [stream, req_bytes, write_promise]() {
-    stream->writeSome( *req_bytes, req_bytes->size(),
-      [req_bytes, write_promise]( outcome::result< size_t > result ) {
-        write_promise->set_value( std::move( result ) );
-      }
-    );
+  boost::asio::post( *_io, [stream, req_bytes, write_promise, write_operation]() {
+    safe_stream_write_some( stream, req_bytes, write_promise, write_operation );
   } );
 
   if( write_future.wait_for( timeout ) != std::future_status::ready )
@@ -912,7 +1275,9 @@ std::string Libp2pTransport::send_peer_rpc( const PeerID& peer,
 
   auto write_result = write_future.get();
   if( !write_result.has_value() )
-    throw std::runtime_error( "Failed to write RPC request" );
+    throw std::runtime_error( "Failed to write RPC request: " + write_result.error().message() );
+  if( write_result.value() == 0 )
+    throw std::runtime_error( "Failed to write RPC request: zero bytes written" );
 
   // Read response
   std::string response_raw;
@@ -925,13 +1290,10 @@ std::string Libp2pTransport::send_peer_rpc( const PeerID& peer,
     auto response_buf = std::make_shared< libp2p::Bytes >( read_chunk_size );
     auto read_promise = std::make_shared< std::promise< outcome::result< size_t > > >();
     auto read_future = read_promise->get_future();
+    const auto read_operation = "read Peer RPC response from peer " + peer.id;
 
-    boost::asio::post( *_io, [stream, response_buf, read_promise]() {
-      stream->readSome( *response_buf, response_buf->size(),
-        [response_buf, read_promise]( outcome::result< size_t > result ) {
-          read_promise->set_value( std::move( result ) );
-        }
-      );
+    boost::asio::post( *_io, [stream, response_buf, read_promise, read_operation]() {
+      safe_stream_read_some( stream, response_buf, read_promise, read_operation );
     } );
 
     if( read_future.wait_for( timeout ) != std::future_status::ready )
@@ -939,7 +1301,7 @@ std::string Libp2pTransport::send_peer_rpc( const PeerID& peer,
 
     auto read_result = read_future.get();
     if( !read_result.has_value() )
-      throw std::runtime_error( "Failed to read RPC response" );
+      throw std::runtime_error( "Failed to read RPC response: " + read_result.error().message() );
 
     auto bytes_read = read_result.value();
     if( bytes_read == 0 )
@@ -961,8 +1323,8 @@ std::string Libp2pTransport::send_peer_rpc( const PeerID& peer,
     }
   }
 
-  boost::asio::post( *_io, [stream]() {
-    stream->close( []( auto&& ) {} );
+  boost::asio::post( *_io, [stream, peer_id = peer.id]() {
+    safe_stream_close( stream, "close Peer RPC stream to peer " + peer_id );
   } );
 
   if( !decoded_response.header.error.empty() )
@@ -975,61 +1337,89 @@ void Libp2pTransport::handle_incoming_rpc(
   std::shared_ptr< libp2p::connection::Stream > stream )
 {
   auto buf = std::make_shared< libp2p::Bytes >( 64 * 1024 );
-  stream->readSome( *buf, buf->size(),
-    [this, stream, buf]( outcome::result< size_t > read_result ) {
-      if( !read_result.has_value() )
-        return;
-
-      std::string raw( buf->begin(), buf->begin() + read_result.value() );
-      gorpc::DecodedRequest request;
-      try
-      {
-        request = gorpc::decode_request( raw );
-      }
-      catch( const std::exception& e )
-      {
-        gorpc::ServiceID unknown{ "unknown", "unknown" };
-        auto error = gorpc::encode_error_response( unknown, e.what(), gorpc::ErrorType::server );
-        auto error_bytes = std::make_shared< libp2p::Bytes >( error.begin(), error.end() );
-        stream->writeSome( *error_bytes, error_bytes->size(),
-          [stream, error_bytes]( auto&& ) {
-            stream->close( []( auto&& ) {} );
+  try
+  {
+    stream->readSome( *buf, buf->size(),
+      [this, stream, buf]( outcome::result< size_t > read_result ) {
+        try
+        {
+          if( !read_result.has_value() )
+          {
+            log_libp2p_async_error( "read incoming Peer RPC request", read_result.error().message() );
+            safe_stream_close( stream, "read incoming Peer RPC request" );
+            return;
           }
-        );
-        return;
-      }
+          if( read_result.value() == 0 )
+          {
+            log_libp2p_async_error( "read incoming Peer RPC request", "stream closed before request" );
+            safe_stream_close( stream, "read incoming Peer RPC request" );
+            return;
+          }
 
-      LOG( debug ) << "[p2p/transport] Incoming RPC: "
-                   << request.service.name << "." << request.service.method;
+          std::string raw( buf->begin(), buf->begin() + read_result.value() );
+          gorpc::DecodedRequest request;
+          try
+          {
+            request = gorpc::decode_request( raw );
+          }
+          catch( const std::exception& e )
+          {
+            gorpc::ServiceID unknown{ "unknown", "unknown" };
+            auto error = gorpc::encode_error_response( unknown, e.what(), gorpc::ErrorType::server );
+            auto error_bytes = std::make_shared< libp2p::Bytes >( error.begin(), error.end() );
+            safe_stream_write_and_close( stream, error_bytes, "write Peer RPC decode error response" );
+            return;
+          }
 
-      std::string response;
-      try
-      {
-        if( !_on_peer_rpc_request )
-          throw std::runtime_error( "peer RPC handler is not configured" );
+          LOG( debug ) << "[p2p/transport] Incoming RPC: "
+                       << request.service.name << "." << request.service.method;
 
-        auto payload = _on_peer_rpc_request( request.service.name, request.service.method, request.args );
-        response = gorpc::encode_success_response( request.service, payload );
-      }
-      catch( const std::exception& e )
-      {
-        response = gorpc::encode_error_response( request.service, e.what(), gorpc::ErrorType::server );
-      }
-      catch( ... )
-      {
-        response = gorpc::encode_error_response(
-          request.service, "unknown peer RPC handler exception", gorpc::ErrorType::server );
-      }
+          std::string response;
+          try
+          {
+            if( !_on_peer_rpc_request )
+              throw std::runtime_error( "peer RPC handler is not configured" );
 
-      auto resp_bytes = std::make_shared< libp2p::Bytes >( response.begin(), response.end() );
+            auto payload = _on_peer_rpc_request( request.service.name, request.service.method, request.args );
+            response = gorpc::encode_success_response( request.service, payload );
+          }
+          catch( const std::exception& e )
+          {
+            response = gorpc::encode_error_response( request.service, e.what(), gorpc::ErrorType::server );
+          }
+          catch( ... )
+          {
+            response = gorpc::encode_error_response(
+              request.service, "unknown peer RPC handler exception", gorpc::ErrorType::server );
+          }
 
-      stream->writeSome( *resp_bytes, resp_bytes->size(),
-        [stream, resp_bytes]( auto&& ) {
-          stream->close( []( auto&& ) {} );
+          auto resp_bytes = std::make_shared< libp2p::Bytes >( response.begin(), response.end() );
+
+          safe_stream_write_and_close( stream, resp_bytes, "write Peer RPC response" );
         }
-      );
-    }
-  );
+        catch( const std::exception& e )
+        {
+          LOG( warning ) << "[p2p/transport] Incoming Peer RPC callback failed: " << e.what();
+          safe_stream_close( stream, "incoming Peer RPC callback failure" );
+        }
+        catch( ... )
+        {
+          LOG( warning ) << "[p2p/transport] Incoming Peer RPC callback failed: unknown exception";
+          safe_stream_close( stream, "incoming Peer RPC callback failure" );
+        }
+      }
+    );
+  }
+  catch( const std::exception& e )
+  {
+    LOG( warning ) << "[p2p/transport] Failed to start incoming Peer RPC read: " << e.what();
+    safe_stream_close( stream, "start incoming Peer RPC read" );
+  }
+  catch( ... )
+  {
+    LOG( warning ) << "[p2p/transport] Failed to start incoming Peer RPC read: unknown exception";
+    safe_stream_close( stream, "start incoming Peer RPC read" );
+  }
 }
 
 // ---------------------------------------------------------------------------

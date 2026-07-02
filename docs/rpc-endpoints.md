@@ -63,8 +63,9 @@ features:
 ```
 
 Do not enable public gRPC without an explicit access-control and monitoring
-plan. Current implementation notes and parity caveats are tracked in
-`docs/current/monolith/SERVICE_COVERAGE.md`.
+plan. Current implementation notes and parity caveats are tracked in the
+[Monolith Service Coverage](../developers/deeper-references/monolith-service-coverage.md)
+reference.
 
 ## P2P
 

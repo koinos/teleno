@@ -43,10 +43,10 @@ The repository includes operator-oriented templates:
 
 | Template | Purpose |
 | --- | --- |
-| `config/testnet-public-bootstrap-observer.yml` | Testnet observer with public bootstrap settings. |
-| `config/testnet-public-bootstrap-observer.container.yml` | Container testnet observer variant. |
-| `config/mainnet-public-bootstrap-observer.yml` | Mainnet observer with public bootstrap settings. |
-| `config/prodnet-docker-producer.yml` | Guarded Docker producer template. |
+| [`config/testnet-public-bootstrap-observer.yml`](https://github.com/pgarciagon/koinos-one/blob/main/config/testnet-public-bootstrap-observer.yml) | Testnet observer with public bootstrap settings. |
+| [`config/testnet-public-bootstrap-observer.container.yml`](https://github.com/pgarciagon/koinos-one/blob/main/config/testnet-public-bootstrap-observer.container.yml) | Container testnet observer variant. |
+| [`config/mainnet-public-bootstrap-observer.yml`](https://github.com/pgarciagon/koinos-one/blob/main/config/mainnet-public-bootstrap-observer.yml) | Mainnet observer with public bootstrap settings. |
+| [`config/prodnet-docker-producer.yml`](https://github.com/pgarciagon/koinos-one/blob/main/config/prodnet-docker-producer.yml) | Guarded Docker producer template. |
 
 !!! warning "High-risk config write"
     Copying or editing a config file writes local operational policy. Review

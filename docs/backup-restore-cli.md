@@ -6,8 +6,9 @@ snapshots, fetch public bootstrap snapshots, restore, stage, activate, and
 delete selected backups.
 
 Implementation details live in
-`docs/current/backup-restore/NATIVE_BACKUP_CURRENT_IMPLEMENTATION.md` and
-`docs/current/backup-restore/PUBLIC_BOOTSTRAP_RESTORE.md`.
+[`docs/current/backup-restore/NATIVE_BACKUP_CURRENT_IMPLEMENTATION.md`](https://github.com/pgarciagon/koinos-one/blob/main/docs/current/backup-restore/NATIVE_BACKUP_CURRENT_IMPLEMENTATION.md)
+and
+[`docs/current/backup-restore/PUBLIC_BOOTSTRAP_RESTORE.md`](https://github.com/pgarciagon/koinos-one/blob/main/docs/current/backup-restore/PUBLIC_BOOTSTRAP_RESTORE.md).
 
 ## Safety Rules
 
