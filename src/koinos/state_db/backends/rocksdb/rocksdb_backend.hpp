@@ -32,7 +32,7 @@ public:
   void flush();
 
   virtual void start_write_batch() override;
-  virtual void end_write_batch() override;
+  virtual void end_write_batch( write_durability durability = write_durability::default_async ) override;
 
   // Iterators
   virtual iterator begin() override;
@@ -56,6 +56,7 @@ public:
 
 private:
   void load_metadata();
+  void put_metadata_value( const std::string& key, const std::string& value );
 
   using column_handles = std::vector< std::shared_ptr< ::rocksdb::ColumnFamilyHandle > >;
 

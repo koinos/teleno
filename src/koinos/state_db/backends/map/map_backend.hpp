@@ -32,7 +32,7 @@ public:
   virtual iterator lower_bound( const key_type& k ) override;
 
   virtual void start_write_batch() override;
-  virtual void end_write_batch() override;
+  virtual void end_write_batch( write_durability durability = write_durability::default_async ) override;
 
   virtual void store_metadata() override;
 

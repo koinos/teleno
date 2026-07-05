@@ -147,8 +147,8 @@ void state_delta::commit()
   backend->set_merkle_root( merkle_root() );
   backend->store_metadata();
 
-  // End the write batch making the entire merge atomic
-  backend->end_write_batch();
+  // End the write batch making the entire merge atomic and durable.
+  backend->end_write_batch( backends::write_durability::sync );
 
   // Reset local variables to match new status as root delta
   _removed_objects.clear();

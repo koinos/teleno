@@ -7,6 +7,12 @@
 
 namespace koinos::state_db::backends {
 
+enum class write_durability
+{
+  default_async,
+  sync
+};
+
 class abstract_backend
 {
 public:
@@ -44,7 +50,7 @@ public:
   void set_block_header( const protocol::block_header& );
 
   virtual void start_write_batch() = 0;
-  virtual void end_write_batch()   = 0;
+  virtual void end_write_batch( write_durability durability = write_durability::default_async ) = 0;
 
   virtual void store_metadata() = 0;
 
