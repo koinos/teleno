@@ -8,11 +8,15 @@
 
 #include <cassert>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include <sys/wait.h>
+#include <unistd.h>
 
 using namespace koinos;
 
@@ -210,6 +214,97 @@ void test_rocksdb_delete_and_metadata_are_batched()
   backend.close();
 }
 
+void initialize_crash_fixture( const std::filesystem::path& path )
+{
+  std::filesystem::remove_all( path );
+  std::filesystem::create_directories( path );
+
+  state_db::backends::rocksdb::rocksdb_backend backend;
+  backend.open( path );
+  backend.put( "existing-object", "old-value" );
+  backend.set_revision( 1 );
+  backend.store_metadata();
+  backend.close();
+}
+
+void mutate_fixture_then_exit_without_cleanup( const std::filesystem::path& path, bool commit_batch )
+{
+  state_db::backends::rocksdb::rocksdb_backend backend;
+  backend.open( path );
+  backend.start_write_batch();
+  backend.erase( "existing-object" );
+  backend.put( "new-object", "new-value" );
+  backend.set_revision( 2 );
+  backend.store_metadata();
+
+  if( commit_batch )
+    backend.end_write_batch( state_db::backends::write_durability::sync );
+
+  std::_Exit( commit_batch ? 78 : 77 );
+}
+
+void run_child_process_mutation( const std::filesystem::path& path, bool commit_batch )
+{
+  auto pid = fork();
+  assert( pid >= 0 );
+
+  if( pid == 0 )
+  {
+    mutate_fixture_then_exit_without_cleanup( path, commit_batch );
+  }
+
+  int status = 0;
+  assert( waitpid( pid, &status, 0 ) == pid );
+  assert( WIFEXITED( status ) );
+  assert( WEXITSTATUS( status ) == ( commit_batch ? 78 : 77 ) );
+}
+
+void assert_fixture_state( const std::filesystem::path& path,
+                           bool existing_present,
+                           bool new_present,
+                           uint64_t revision )
+{
+  state_db::backends::rocksdb::rocksdb_backend backend;
+  backend.open( path );
+
+  auto existing = backend.get( "existing-object" );
+  auto next     = backend.get( "new-object" );
+
+  assert( static_cast< bool >( existing ) == existing_present );
+  if( existing )
+    assert( *existing == "old-value" );
+
+  assert( static_cast< bool >( next ) == new_present );
+  if( next )
+    assert( *next == "new-value" );
+
+  assert( backend.revision() == revision );
+  assert( backend.size() == 1 );
+  backend.close();
+}
+
+void test_process_crash_before_batch_commit_preserves_previous_state()
+{
+  auto path = unique_temp_dir( "teleno-state-db-crash-before-commit" );
+  initialize_crash_fixture( path );
+
+  run_child_process_mutation( path, false );
+
+  assert_fixture_state( path, true, false, 1 );
+  std::filesystem::remove_all( path );
+}
+
+void test_process_crash_after_sync_batch_commit_preserves_new_state()
+{
+  auto path = unique_temp_dir( "teleno-state-db-crash-after-commit" );
+  initialize_crash_fixture( path );
+
+  run_child_process_mutation( path, true );
+
+  assert_fixture_state( path, false, true, 2 );
+  std::filesystem::remove_all( path );
+}
+
 void test_state_delta_commit_uses_sync_durability()
 {
   auto backend = std::make_shared< recording_backend >();
@@ -233,6 +328,8 @@ void test_state_delta_commit_uses_sync_durability()
 int main()
 {
   test_rocksdb_delete_and_metadata_are_batched();
+  test_process_crash_before_batch_commit_preserves_previous_state();
+  test_process_crash_after_sync_batch_commit_preserves_new_state();
   test_state_delta_commit_uses_sync_durability();
   return 0;
 }
