@@ -54,10 +54,10 @@ these rendered manual references:
 
 Additional engineering source paths outside the manual source tree:
 
-- [`docs/current/backup-restore/NATIVE_BACKUP_CURRENT_IMPLEMENTATION.md`](https://github.com/pgarciagon/koinos-one/blob/main/docs/current/backup-restore/NATIVE_BACKUP_CURRENT_IMPLEMENTATION.md)
-- [`docs/current/backup-restore/PUBLIC_BOOTSTRAP_RESTORE.md`](https://github.com/pgarciagon/koinos-one/blob/main/docs/current/backup-restore/PUBLIC_BOOTSTRAP_RESTORE.md)
-- [`docs/operations/START_TELENO_NODE.md`](https://github.com/pgarciagon/koinos-one/blob/main/docs/operations/START_TELENO_NODE.md)
-- [`docs/operations/TELENO_NODE_CONTAINER.md`](https://github.com/pgarciagon/koinos-one/blob/main/docs/operations/TELENO_NODE_CONTAINER.md)
+- [`docs/current/backup-restore/NATIVE_BACKUP_CURRENT_IMPLEMENTATION.md`](https://github.com/koinos/koinos-one/blob/main/docs/current/backup-restore/NATIVE_BACKUP_CURRENT_IMPLEMENTATION.md)
+- [`docs/current/backup-restore/PUBLIC_BOOTSTRAP_RESTORE.md`](https://github.com/koinos/koinos-one/blob/main/docs/current/backup-restore/PUBLIC_BOOTSTRAP_RESTORE.md)
+- [`docs/operations/START_TELENO_NODE.md`](https://github.com/koinos/koinos-one/blob/main/docs/operations/START_TELENO_NODE.md)
+- [`docs/operations/TELENO_NODE_CONTAINER.md`](https://github.com/koinos/koinos-one/blob/main/docs/operations/TELENO_NODE_CONTAINER.md)
 
 ## Normal Workflow
 

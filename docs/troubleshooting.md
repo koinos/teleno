@@ -179,7 +179,7 @@ Do not solve token errors by exposing the admin API or disabling protection.
 Rebuild the native binary when:
 
 - source under
-  [`node/teleno-node/`](https://github.com/pgarciagon/koinos-one/tree/main/node/teleno-node)
+  [`node/teleno-node/`](https://github.com/koinos/koinos-one/tree/main/node/teleno-node)
   changed;
 - dependency build scripts changed;
 - `teleno_node --help` does not include expected backup flags;

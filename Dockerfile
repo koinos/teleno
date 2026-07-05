@@ -81,7 +81,7 @@ RUN chmod +x /usr/local/bin/teleno-prod-producer
 
 LABEL org.opencontainers.image.title="Teleno Node" \
       org.opencontainers.image.description="Linux container image for the monolithic teleno_node runtime" \
-      org.opencontainers.image.source="https://github.com/pgarciagon/koinos-one" \
+      org.opencontainers.image.source="https://github.com/koinos/koinos-one" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 
