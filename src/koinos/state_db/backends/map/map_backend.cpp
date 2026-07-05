@@ -64,7 +64,7 @@ iterator map_backend::lower_bound( const key_type& k )
 
 void map_backend::start_write_batch() {}
 
-void map_backend::end_write_batch() {}
+void map_backend::end_write_batch( write_durability ) {}
 
 void map_backend::store_metadata() {}
 

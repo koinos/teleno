@@ -510,6 +510,14 @@ if(KOINOS_BUILD_TESTS)
 
   add_test(NAME koinos_rocksdb_manager_test COMMAND koinos_rocksdb_manager_test)
 
+  add_executable(koinos_state_db_durability_test
+    ../tests/storage/state_db_durability_test.cpp)
+
+  target_link_libraries(koinos_state_db_durability_test PRIVATE
+    koinos_state_db_local)
+
+  add_test(NAME koinos_state_db_durability_test COMMAND koinos_state_db_durability_test)
+
   add_executable(koinos_backup_plan_test
     ../tests/backup/backup_plan_test.cpp)
 
