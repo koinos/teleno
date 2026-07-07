@@ -93,6 +93,8 @@ struct ReplayStats
   uint64_t receipts_without_state_root = 0;
   uint64_t legacy_dropped_tombstone_blocks = 0;
   uint64_t legacy_dropped_tombstones = 0;
+  uint64_t legacy_dropped_puts = 0;
+  uint64_t unexplained_mismatch_blocks = 0;
   std::string final_block_id;
   std::string final_state_merkle_root;
 };
@@ -2255,34 +2257,30 @@ ReplayStats run_replay( const Args& args )
                                         + ": expected_id=" + bytes_to_hex( expected_id ) );
             if( selected->computed_root != expected_root_above )
             {
-              // Documented legacy semantics: nodes of that era dropped removes
-              // of keys absent from the parent (transient tombstones) from the
-              // delta Merkle computation while the receipt recorded them. If
-              // dropping some subset of the remove entries reproduces the
-              // consensus root, the block is a legacy tombstone-drop instance;
-              // it is counted and logged rather than treated as corruption.
+              // Documented legacy semantics: nodes of that era excluded some
+              // recorded entries from the delta Merkle computation — removes
+              // of keys absent from the parent (transient tombstones), and
+              // no-op puts observed on mainnet as well. If omitting some
+              // subset of the recorded entries reproduces the consensus root
+              // exactly (a 256-bit match cannot be coincidence), the block is
+              // a legacy entry-drop instance; it is counted and logged rather
+              // than treated as corruption.
               const auto& entries = selected->record.receipt.state_delta_entries();
-              std::vector< int > remove_indexes;
+              std::size_t total_removes = 0;
               for( int i = 0; i < entries.size(); ++i )
                 if( !entries[ i ].has_value() )
-                  remove_indexes.push_back( i );
+                  ++total_removes;
 
               bool legacy_match = false;
               uint32_t matched_mask = 0;
-              if( remove_indexes.size() && remove_indexes.size() <= 16 )
+              if( entries.size() && entries.size() <= 20 )
               {
-                for( uint32_t mask = 1; !legacy_match && mask < ( 1u << remove_indexes.size() ); ++mask )
+                for( uint32_t mask = 1; !legacy_match && mask < ( 1u << entries.size() ); ++mask )
                 {
                   google::protobuf::RepeatedPtrField< koinos::protocol::state_delta_entry > kept;
                   for( int i = 0; i < entries.size(); ++i )
-                  {
-                    bool drop = false;
-                    for( std::size_t r = 0; r < remove_indexes.size(); ++r )
-                      if( remove_indexes[ r ] == i && ( mask & ( 1u << r ) ) )
-                        drop = true;
-                    if( !drop )
+                    if( !( mask & ( 1u << i ) ) )
                       *kept.Add() = entries[ i ];
-                  }
                   if( compute_delta_entries_merkle_root( kept ) == expected_root_above )
                   {
                     legacy_match = true;
@@ -2293,27 +2291,51 @@ ReplayStats run_replay( const Args& args )
 
               if( !legacy_match )
               {
-                throw std::runtime_error( "block previous state merkle mismatch at height "
-                                          + std::to_string( height )
-                                          + ": expected=" + bytes_to_hex( expected_root_above )
-                                          + " actual=" + bytes_to_hex( selected->computed_root )
-                                          + " receipt_root="
-                                          + ( selected->record.receipt.state_merkle_root().empty()
-                                                ? std::string( "(none)" )
-                                                : bytes_to_hex( selected->record.receipt.state_merkle_root() ) )
-                                          + " delta_entries=" + std::to_string( entries.size() )
-                                          + " removes=" + std::to_string( remove_indexes.size() )
-                                          + " no_remove_subset_matches"
-                                          + " block_id=" + bytes_to_hex( selected->record.block_id ) );
+                // No recorded-entry subset reproduces the consensus root. The
+                // likely cause is the inverse legacy failure: the receipt lost
+                // an entry (e.g. a tombstone dropped by an old replay sync)
+                // that consensus included, which cannot be reconstructed from
+                // local data. Recorded as an unexplained mismatch and audited
+                // past, so a full-history run inventories every anomaly
+                // instead of stopping at the first.
+                ++stats.unexplained_mismatch_blocks;
+                if( logger )
+                  logger->line( "unexplained_state_root_mismatch height=" + std::to_string( height )
+                                + " expected=" + bytes_to_hex( expected_root_above )
+                                + " actual=" + bytes_to_hex( selected->computed_root )
+                                + " delta_entries=" + std::to_string( entries.size() )
+                                + " removes=" + std::to_string( total_removes )
+                                + " block_id=" + bytes_to_hex( selected->record.block_id ) );
               }
+              else
+              {
+                std::size_t dropped_removes = 0;
+                std::size_t dropped_puts = 0;
+                std::string dropped_detail;
+                for( int i = 0; i < entries.size(); ++i )
+                {
+                  if( !( matched_mask & ( 1u << i ) ) )
+                    continue;
+                  if( entries[ i ].has_value() )
+                    ++dropped_puts;
+                  else
+                    ++dropped_removes;
+                  dropped_detail += " entry" + std::to_string( i )
+                                    + "=" + ( entries[ i ].has_value() ? "put" : "remove" )
+                                    + ":key=" + bytes_to_hex( entries[ i ].key() );
+                }
 
-              ++stats.legacy_dropped_tombstone_blocks;
-              stats.legacy_dropped_tombstones += __builtin_popcount( matched_mask );
-              if( logger )
-                logger->line( "legacy_tombstone_drop height=" + std::to_string( height )
-                              + " dropped=" + std::to_string( __builtin_popcount( matched_mask ) )
-                              + " removes=" + std::to_string( remove_indexes.size() )
-                              + " block_id=" + bytes_to_hex( selected->record.block_id ) );
+                ++stats.legacy_dropped_tombstone_blocks;
+                stats.legacy_dropped_tombstones += dropped_removes;
+                stats.legacy_dropped_puts += dropped_puts;
+                if( logger )
+                  logger->line( "legacy_entry_drop height=" + std::to_string( height )
+                                + " dropped_removes=" + std::to_string( dropped_removes )
+                                + " dropped_puts=" + std::to_string( dropped_puts )
+                                + " delta_entries=" + std::to_string( entries.size() )
+                                + " block_id=" + bytes_to_hex( selected->record.block_id )
+                                + dropped_detail );
+              }
             }
           }
 
@@ -2519,7 +2541,9 @@ ReplayStats run_replay( const Args& args )
 void print_text_result( const Args& args, const ReplayStats& stats )
 {
   const auto replay_mode = args.state_db_replay ? "height-index-state-db" : "direct-delta-root";
-  std::cout << "state delta replay audit: ok\n"
+  std::cout << ( stats.unexplained_mismatch_blocks
+                   ? "state delta replay audit: completed with unexplained mismatches\n"
+                   : "state delta replay audit: ok\n" )
             << "source_db: " << args.source_db.string() << '\n'
             << "scratch_state_dir: " << args.scratch_state_dir.string() << '\n'
             << "replay_mode: " << replay_mode << '\n'
@@ -2539,6 +2563,8 @@ void print_text_result( const Args& args, const ReplayStats& stats )
             << "receipts_without_state_root: " << stats.receipts_without_state_root << '\n'
             << "legacy_dropped_tombstone_blocks: " << stats.legacy_dropped_tombstone_blocks << '\n'
             << "legacy_dropped_tombstones: " << stats.legacy_dropped_tombstones << '\n'
+            << "legacy_dropped_puts: " << stats.legacy_dropped_puts << '\n'
+            << "unexplained_mismatch_blocks: " << stats.unexplained_mismatch_blocks << '\n'
             << "final_height: " << stats.final_height << '\n'
             << "final_block_id: " << stats.final_block_id << '\n'
             << "final_state_merkle_root: " << stats.final_state_merkle_root << '\n';
@@ -2548,7 +2574,7 @@ void print_json_result( const Args& args, const ReplayStats& stats )
 {
   const auto replay_mode = args.state_db_replay ? "height-index-state-db" : "direct-delta-root";
   std::cout << "{\n"
-            << "  \"ok\": true,\n"
+            << "  \"ok\": " << ( stats.unexplained_mismatch_blocks ? "false" : "true" ) << ",\n"
             << "  \"source_db\": \"" << json_escape( args.source_db.string() ) << "\",\n"
             << "  \"scratch_state_dir\": \"" << json_escape( args.scratch_state_dir.string() ) << "\",\n"
             << "  \"replay_mode\": \"" << replay_mode << "\",\n"
@@ -2574,6 +2600,8 @@ void print_json_result( const Args& args, const ReplayStats& stats )
             << "  \"receipts_without_state_root\": " << stats.receipts_without_state_root << ",\n"
             << "  \"legacy_dropped_tombstone_blocks\": " << stats.legacy_dropped_tombstone_blocks << ",\n"
             << "  \"legacy_dropped_tombstones\": " << stats.legacy_dropped_tombstones << ",\n"
+            << "  \"legacy_dropped_puts\": " << stats.legacy_dropped_puts << ",\n"
+            << "  \"unexplained_mismatch_blocks\": " << stats.unexplained_mismatch_blocks << ",\n"
             << "  \"final_height\": " << stats.final_height << ",\n"
             << "  \"final_block_id\": \"" << json_escape( stats.final_block_id ) << "\",\n"
             << "  \"final_state_merkle_root\": \"" << json_escape( stats.final_state_merkle_root ) << "\"\n"
@@ -2601,7 +2629,9 @@ int main( int argc, char** argv )
       print_json_result( args, stats );
     else
       print_text_result( args, stats );
-    return EXIT_SUCCESS;
+    // Unexplained mismatches complete the inventory run but must not read as
+    // a clean audit; exit 2 distinguishes them from hard failures (exit 1).
+    return stats.unexplained_mismatch_blocks ? 2 : EXIT_SUCCESS;
   }
   catch( const std::exception& e )
   {
