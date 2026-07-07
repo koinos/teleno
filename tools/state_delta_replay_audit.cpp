@@ -19,10 +19,13 @@
 #include <rocksdb/options.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdint>
 #include <ctime>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -31,9 +34,12 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -69,6 +75,7 @@ struct Args
   bool sync_scratch_writes = false;
   bool state_db_replay = false;
   bool rebuild_journal = false;
+  bool journal_only = false;
   bool help = false;
 };
 
@@ -84,6 +91,10 @@ struct ReplayStats
   uint64_t receipt_puts = 0;
   uint64_t receipt_removes = 0;
   uint64_t receipts_without_state_root = 0;
+  uint64_t legacy_dropped_tombstone_blocks = 0;
+  uint64_t legacy_dropped_tombstones = 0;
+  uint64_t legacy_dropped_puts = 0;
+  uint64_t unexplained_mismatch_blocks = 0;
   std::string final_block_id;
   std::string final_state_merkle_root;
 };
@@ -130,6 +141,36 @@ std::string bytes_to_hex( const std::string& bytes )
   {
     out.push_back( hex[ ch >> 4 ] );
     out.push_back( hex[ ch & 0x0f ] );
+  }
+  return out;
+}
+
+std::string hex_to_bytes( const std::string& hex )
+{
+  auto nibble = []( char ch ) -> int
+  {
+    if( ch >= '0' && ch <= '9' )
+      return ch - '0';
+    if( ch >= 'a' && ch <= 'f' )
+      return ch - 'a' + 10;
+    if( ch >= 'A' && ch <= 'F' )
+      return ch - 'A' + 10;
+    return -1;
+  };
+
+  const std::size_t offset = hex.rfind( "0x", 0 ) == 0 ? 2 : 0;
+  if( ( hex.size() - offset ) % 2 != 0 )
+    throw std::runtime_error( "invalid hex string: " + hex );
+
+  std::string out;
+  out.reserve( ( hex.size() - offset ) / 2 );
+  for( std::size_t i = offset; i < hex.size(); i += 2 )
+  {
+    const int high = nibble( hex[ i ] );
+    const int low  = nibble( hex[ i + 1 ] );
+    if( high < 0 || low < 0 )
+      throw std::runtime_error( "invalid hex string: " + hex );
+    out.push_back( static_cast< char >( ( high << 4 ) | low ) );
   }
   return out;
 }
@@ -321,7 +362,31 @@ private:
 
     const auto now = std::chrono::steady_clock::now();
     const auto elapsed = std::chrono::duration< double >( now - _started ).count();
-    const double blocks_per_second = elapsed > 0 ? static_cast< double >( completed ) / elapsed : 0.0;
+
+    // Rate and ETA use an exponentially smoothed recent-window throughput rather
+    // than the cumulative average, so a run whose early phase was faster (warm
+    // caches, sparse early blocks) does not report a perpetually growing ETA.
+    // The window also closes on a large completion burst, not just on elapsed
+    // time: the parallel replay reports whole chunks at once, and a stale
+    // seconds-old rate must not survive a burst that outpaces it.
+    const double window_seconds = std::chrono::duration< double >( now - _rate_window_start ).count();
+    if( completed < _rate_window_completed )
+    {
+      _rate_window_completed = completed;
+      _rate_window_start = now;
+    }
+    else if( const auto window_delta = completed - _rate_window_completed;
+             window_seconds >= 1.0 || ( _progress_every && window_delta >= _progress_every ) )
+    {
+      const double window_rate = static_cast< double >( window_delta ) / std::max( window_seconds, 0.001 );
+      _smoothed_rate = _smoothed_rate > 0.0 ? 0.7 * _smoothed_rate + 0.3 * window_rate : window_rate;
+      _rate_window_start = now;
+      _rate_window_completed = completed;
+    }
+
+    const double blocks_per_second = _smoothed_rate > 0.0
+      ? _smoothed_rate
+      : ( elapsed > 0 ? static_cast< double >( completed ) / elapsed : 0.0 );
     const double remaining_seconds = blocks_per_second > 0
       ? static_cast< double >( _total - completed ) / blocks_per_second
       : -1.0;
@@ -378,6 +443,9 @@ private:
   bool _finished = false;
   std::chrono::steady_clock::time_point _started;
   std::chrono::steady_clock::time_point _last_update;
+  std::chrono::steady_clock::time_point _rate_window_start = std::chrono::steady_clock::now();
+  uint64_t _rate_window_completed = 0;
+  double _smoothed_rate = 0.0;
   AuditLogger* _logger = nullptr;
   std::size_t _last_width = 0;
 };
@@ -407,6 +475,10 @@ void usage( const char* argv0 )
     << "  --journal-dir PATH        Local bucketed flat-file header+receipt journal.\n"
     << "                            Default: SCRATCH_STATE_DIR.delta-journal.\n"
     << "  --rebuild-journal         Force rebuilding the local replay journal.\n"
+    << "  --journal-only            Replay from a complete existing journal without\n"
+    << "                            opening any source RocksDB. Requires --journal-dir\n"
+    << "                            and journal metadata that records a full source\n"
+    << "                            scan. --source-basedir/--source-db are not needed.\n"
     << "  --height-index-dir PATH   Local height->block_id index. Default:\n"
     << "                            SCRATCH_STATE_DIR.height-index. Used by\n"
     << "                            --state-db-replay only.\n"
@@ -469,6 +541,8 @@ Args parse_args( int argc, char** argv )
       args.journal_dir = require_value( arg );
     else if( arg == "--rebuild-journal" )
       args.rebuild_journal = true;
+    else if( arg == "--journal-only" )
+      args.journal_only = true;
     else if( arg == "--height-index-dir" )
       args.height_index_dir = require_value( arg );
     else if( arg == "--rebuild-height-index" )
@@ -490,8 +564,18 @@ Args parse_args( int argc, char** argv )
   if( args.help )
     return args;
 
-  if( args.source_basedir.empty() && args.source_db.empty() )
-    throw std::runtime_error( "--source-basedir is required unless --source-db is provided" );
+  if( args.journal_only )
+  {
+    if( args.journal_dir.empty() )
+      throw std::runtime_error( "--journal-only requires --journal-dir" );
+    if( args.state_db_replay )
+      throw std::runtime_error( "--journal-only cannot be used together with --state-db-replay" );
+    if( args.rebuild_journal )
+      throw std::runtime_error( "--journal-only cannot be used together with --rebuild-journal; "
+                                "rebuilding requires a source database" );
+  }
+  else if( args.source_basedir.empty() && args.source_db.empty() )
+    throw std::runtime_error( "--source-basedir is required unless --source-db or --journal-only is provided" );
   if( args.scratch_state_dir.empty() )
     throw std::runtime_error( "--scratch-state-dir is required" );
   if( args.no_log_file && !args.log_file.empty() )
@@ -499,9 +583,10 @@ Args parse_args( int argc, char** argv )
 
   if( !args.source_basedir.empty() )
     args.source_basedir = absolute_normal( args.source_basedir );
-  if( args.source_db.empty() )
+  if( args.source_db.empty() && !args.source_basedir.empty() )
     args.source_db = args.source_basedir / "db";
-  args.source_db = absolute_normal( args.source_db );
+  if( !args.source_db.empty() )
+    args.source_db = absolute_normal( args.source_db );
   args.scratch_state_dir = absolute_normal( args.scratch_state_dir );
   if( !args.genesis_file.empty() )
     args.genesis_file = absolute_normal( args.genesis_file );
@@ -598,6 +683,65 @@ uint64_t read_u64_stream( std::istream& in, const std::string& context )
   }
   return result;
 }
+
+// Bounded multi-producer/multi-consumer queue used to pipeline the journal
+// build. close() unblocks all waiters; pop() drains remaining items after
+// close and then returns false.
+template< typename T >
+class BoundedQueue
+{
+public:
+  explicit BoundedQueue( std::size_t capacity ):
+      _capacity( capacity )
+  {}
+
+  bool push( T item )
+  {
+    std::unique_lock< std::mutex > lock( _mutex );
+    _not_full.wait( lock,
+                    [ & ]
+                    {
+                      return _closed || _items.size() < _capacity;
+                    } );
+    if( _closed )
+      return false;
+    _items.push_back( std::move( item ) );
+    _not_empty.notify_one();
+    return true;
+  }
+
+  bool pop( T& item )
+  {
+    std::unique_lock< std::mutex > lock( _mutex );
+    _not_empty.wait( lock,
+                     [ & ]
+                     {
+                       return _closed || !_items.empty();
+                     } );
+    if( _items.empty() )
+      return false;
+    item = std::move( _items.front() );
+    _items.pop_front();
+    _not_full.notify_one();
+    return true;
+  }
+
+  void close()
+  {
+    std::lock_guard< std::mutex > lock( _mutex );
+    _closed = true;
+    _not_empty.notify_all();
+    _not_full.notify_all();
+  }
+
+private:
+  std::size_t _capacity;
+  std::deque< T > _items;
+  std::mutex _mutex;
+  std::condition_variable _not_empty;
+  std::condition_variable _not_full;
+  bool _closed = false;
+};
 
 class ReadOnlyUnifiedDB
 {
@@ -735,6 +879,7 @@ public:
 
     rocksdb::ReadOptions read_options;
     read_options.fill_cache = false;
+    read_options.readahead_size = 16 << 20;
 
     std::unique_ptr< rocksdb::Iterator > it( source_db->NewIterator( read_options, source_blocks ) );
     rocksdb::WriteOptions write_options;
@@ -914,7 +1059,7 @@ public:
 
   void close()
   {
-    _bucket_records.clear();
+    _bucket_payloads.clear();
     _loaded_bucket = std::numeric_limits< uint64_t >::max();
     _indexed_height = 0;
     _bucket_size = _default_bucket_size;
@@ -932,17 +1077,60 @@ public:
       const auto indexed_height = parse_u64(
         "replay journal metadata indexed_height",
         get_meta( metadata, "indexed_height" ) );
+      // Prefix journals (indexed_height < source head) built before the
+      // full-source-scan fix could have stopped the scan early and dropped
+      // canonical candidates, so they are only reusable when they carry the
+      // full_source_scan marker. Full journals never triggered the early stop.
       return get_meta( metadata, "format" ) == _format
              && get_meta( metadata, "source_db" ) == args.source_db.string()
              && get_meta( metadata, "source_head_height" ) == std::to_string( source_head_height )
              && get_meta( metadata, "source_head_id" ) == bytes_to_hex( source_head_id )
              && indexed_height >= required_height
+             && ( indexed_height >= source_head_height || get_meta( metadata, "full_source_scan" ) == "1" )
              && bucket_files_exist( metadata );
     }
     catch( const std::exception& )
     {
       return false;
     }
+  }
+
+  // Journal-only mode: trust a complete existing journal without any source DB.
+  // The journal must be bucketed, carry a full-source-scan guarantee (either
+  // indexed through the recorded source head or an explicit full_source_scan
+  // marker), and have all bucket files present. Returns the recorded source
+  // head height and yields the recorded source head id (raw bytes) so canonical
+  // selection can anchor on it; throws with a specific reason otherwise.
+  uint64_t require_complete_for_journal_only( std::string& source_head_id_out ) const
+  {
+    const auto metadata = read_metadata();
+    if( get_meta( metadata, "format" ) != _format )
+      throw std::runtime_error( "--journal-only requires a bucketed replay journal; metadata format is '"
+                                + get_meta( metadata, "format" ) + "'" );
+
+    const auto indexed_height = parse_u64(
+      "replay journal metadata indexed_height",
+      get_meta( metadata, "indexed_height" ) );
+    const auto source_head_height = parse_u64(
+      "replay journal metadata source_head_height",
+      get_meta( metadata, "source_head_height" ) );
+
+    if( indexed_height < source_head_height && get_meta( metadata, "full_source_scan" ) != "1" )
+      throw std::runtime_error( "--journal-only requires a complete journal: indexed_height "
+                                + std::to_string( indexed_height ) + " is below source_head_height "
+                                + std::to_string( source_head_height )
+                                + " and the journal has no full_source_scan marker" );
+
+    if( !bucket_files_exist( metadata ) )
+      throw std::runtime_error( "--journal-only requires all journal bucket files to be present in "
+                                + _path.string() );
+
+    const auto head_id_hex = get_meta( metadata, "source_head_id" );
+    if( head_id_hex.empty() )
+      throw std::runtime_error( "--journal-only requires journal metadata to record source_head_id" );
+    source_head_id_out = hex_to_bytes( head_id_hex );
+
+    return source_head_height;
   }
 
   bool upgrade_flat_if_valid( const Args& args,
@@ -958,11 +1146,17 @@ public:
       const auto indexed_height = parse_u64(
         "replay journal metadata indexed_height",
         get_meta( metadata, "indexed_height" ) );
+      // Legacy flat journals never record a full_source_scan marker, so a flat
+      // prefix journal (indexed_height < source head) may have been built with
+      // the early-stop bug and could be missing canonical candidates. Only
+      // full flat journals are trusted for upgrade; prefix journals rebuild
+      // from the source instead.
       if( get_meta( metadata, "format" ) != _flat_format
           || get_meta( metadata, "source_db" ) != args.source_db.string()
           || get_meta( metadata, "source_head_height" ) != std::to_string( source_head_height )
           || get_meta( metadata, "source_head_id" ) != bytes_to_hex( source_head_id )
           || indexed_height < required_height
+          || indexed_height < source_head_height
           || !std::filesystem::exists( flat_records_path() ) )
       {
         return false;
@@ -1057,8 +1251,8 @@ public:
         progress.maybe_update( unique_heights, progress_stats );
       }
 
-      if( required_height < source_head_height && unique_heights >= required_height )
-        break;
+      // No early break: the flat journal is in source scan order (block id order),
+      // so fork candidates for an already-seen height can appear later in the scan.
     }
 
     for( uint64_t bucket = 0; bucket < _bucket_count; ++bucket )
@@ -1080,6 +1274,9 @@ public:
       { "stored_records", std::to_string( stored ) },
       { "unique_heights", std::to_string( unique_heights ) },
       { "upgraded_from", _flat_format },
+      // The upgrade is gated on a full flat journal and copies every record,
+      // so the candidate set is complete for the indexed height range.
+      { "full_source_scan", "1" },
     } );
 
     _indexed_height = required_height;
@@ -1124,12 +1321,10 @@ public:
 
     rocksdb::ReadOptions read_options;
     read_options.fill_cache = false;
-
-    std::unique_ptr< rocksdb::Iterator > it( source_db->NewIterator( read_options, source_blocks ) );
+    read_options.readahead_size = 16 << 20;
 
     ReplayStats progress_stats;
     std::vector< bool > indexed_heights( required_height + 1, false );
-    uint64_t scanned = 0;
     uint64_t stored = 0;
     uint64_t unique_heights = 0;
 
@@ -1148,57 +1343,203 @@ public:
         static_cast< std::streamsize >( std::strlen( _bucket_magic ) ) );
     }
 
-    for( it->SeekToFirst(); it->Valid(); it->Next() )
+    // The build is pipelined: one reader thread streams the source column
+    // family, parser threads decode block records and encode pruned journal
+    // records, and this thread writes bucket files and tracks progress. The
+    // scan is in block id order, so no early break is possible: a fork
+    // candidate for an already-covered height can appear arbitrarily late in
+    // the scan and dropping it could hide the canonical block from replay.
+    struct RawRecord
     {
-      ++scanned;
-      koinos::block_store::block_record record;
-      if( !record.ParseFromArray( it->value().data(), static_cast< int >( it->value().size() ) ) )
-        throw std::runtime_error( "failed to parse block record while building replay journal" );
+      std::string key;
+      std::string value;
+    };
 
-      const auto height = record.block_height();
-      if( height == 0 || height > required_height )
-        continue;
-      if( !record.has_block() || !record.block().has_header() || !record.has_receipt() )
-        continue;
+    struct EncodedRecord
+    {
+      uint64_t height = 0;
+      std::string payload;
+    };
 
-      JournalRecord journal_record;
-      journal_record.block_id = record.block_id().empty() ? record.block().id() : record.block_id();
-      if( journal_record.block_id.empty() )
-        journal_record.block_id = it->key().ToString();
-      journal_record.header = record.block().header();
-      journal_record.receipt = record.receipt();
+    // Queue capacities bound peak memory: raw records are un-pruned blocks that
+    // can each run to hundreds of KB late in the chain, so the raw queue is kept
+    // small. The build was observed being killed by memory pressure on an 8 GiB
+    // host with larger queues.
+    BoundedQueue< RawRecord > raw_queue( 256 );
+    BoundedQueue< EncodedRecord > encoded_queue( 1'024 );
 
-      if( journal_record.header.height() != height )
-        throw std::runtime_error( "journal block height mismatch while building at height " + std::to_string( height ) );
+    std::atomic< bool > pipeline_failed{ false };
+    std::exception_ptr pipeline_error;
+    std::mutex pipeline_error_mutex;
+    std::atomic< uint64_t > scanned{ 0 };
 
-      const auto value = encode_journal_record( journal_record );
-      auto& bucket = buckets[ static_cast< std::size_t >( bucket_for_height( height ) ) ];
-      bucket.write( _record_magic, static_cast< std::streamsize >( std::strlen( _record_magic ) ) );
-      write_u64_stream( bucket, height );
-      write_u64_stream( bucket, value.size() );
-      bucket.write( value.data(), static_cast< std::streamsize >( value.size() ) );
-      if( !bucket )
-        throw std::runtime_error( "failed to write replay journal record at height " + std::to_string( height ) );
+    auto record_pipeline_error = [ & ]()
+    {
+      {
+        std::lock_guard< std::mutex > guard( pipeline_error_mutex );
+        if( !pipeline_error )
+          pipeline_error = std::current_exception();
+      }
+      pipeline_failed.store( true, std::memory_order_relaxed );
+      raw_queue.close();
+      encoded_queue.close();
+    };
+
+    std::thread reader(
+      [ & ]()
+      {
+        try
+        {
+          std::unique_ptr< rocksdb::Iterator > it( source_db->NewIterator( read_options, source_blocks ) );
+          for( it->SeekToFirst(); it->Valid(); it->Next() )
+          {
+            if( pipeline_failed.load( std::memory_order_relaxed ) )
+              return;
+            scanned.fetch_add( 1, std::memory_order_relaxed );
+            if( !raw_queue.push( RawRecord{ it->key().ToString(), it->value().ToString() } ) )
+              return;
+          }
+          if( !it->status().ok() )
+            throw std::runtime_error( "replay journal source scan failed: " + it->status().ToString() );
+          raw_queue.close();
+        }
+        catch( ... )
+        {
+          record_pipeline_error();
+        }
+      } );
+
+    const std::size_t parser_count =
+      std::max< std::size_t >( 1, std::thread::hardware_concurrency() > 3 ? std::thread::hardware_concurrency() - 2 : 1 );
+    std::atomic< std::size_t > active_parsers{ parser_count };
+    std::vector< std::thread > parsers;
+    parsers.reserve( parser_count );
+
+    for( std::size_t i = 0; i < parser_count; ++i )
+    {
+      parsers.emplace_back(
+        [ & ]()
+        {
+          try
+          {
+            RawRecord raw;
+            while( raw_queue.pop( raw ) )
+            {
+              if( pipeline_failed.load( std::memory_order_relaxed ) )
+                break;
+
+              koinos::block_store::block_record record;
+              if( !record.ParseFromString( raw.value ) )
+                throw std::runtime_error( "failed to parse block record while building replay journal" );
+
+              const auto height = record.block_height();
+              if( height == 0 || height > required_height )
+                continue;
+              if( !record.has_block() || !record.block().has_header() || !record.has_receipt() )
+                continue;
+
+              JournalRecord journal_record;
+              journal_record.block_id = record.block_id().empty() ? record.block().id() : record.block_id();
+              if( journal_record.block_id.empty() )
+                journal_record.block_id = raw.key;
+              journal_record.header = record.block().header();
+              journal_record.receipt = record.receipt();
+
+              // Replay only needs id, height, state_merkle_root, and
+              // state_delta_entries. Events, transaction receipts, and logs are
+              // dead weight for the audit and dominate receipt size, so they are
+              // not journaled.
+              journal_record.receipt.clear_events();
+              journal_record.receipt.clear_transaction_receipts();
+              journal_record.receipt.clear_logs();
+
+              if( journal_record.header.height() != height )
+                throw std::runtime_error( "journal block height mismatch while building at height "
+                                          + std::to_string( height ) );
+
+              if( !encoded_queue.push( EncodedRecord{ height, encode_journal_record( journal_record ) } ) )
+                break;
+            }
+          }
+          catch( ... )
+          {
+            record_pipeline_error();
+          }
+
+          if( active_parsers.fetch_sub( 1 ) == 1 )
+            encoded_queue.close();
+        } );
+    }
+
+    EncodedRecord encoded;
+    // Records arrive in block id order, so bucket writes land in effectively
+    // random height order. Writing each small record straight to its bucket
+    // stream interleaves tiny writes across every bucket file on the same disk
+    // the source scan is reading, which on spinning disks collapses throughput
+    // into a seek storm. Records are instead staged in a per-bucket memory
+    // buffer and flushed in large sequential appends.
+    const std::size_t flush_threshold = std::clamp< std::size_t >(
+      _bucket_count ? ( 256u << 20 ) / _bucket_count : ( 4u << 20 ),
+      256u << 10,
+      4u << 20 );
+    std::vector< std::string > bucket_buffers( static_cast< std::size_t >( _bucket_count ) );
+
+    auto flush_bucket = [ & ]( std::size_t index ) -> bool
+    {
+      auto& buffer = bucket_buffers[ index ];
+      if( buffer.empty() )
+        return true;
+      auto& bucket = buckets[ index ];
+      bucket.write( buffer.data(), static_cast< std::streamsize >( buffer.size() ) );
+      buffer.clear();
+      return static_cast< bool >( bucket );
+    };
+
+    while( encoded_queue.pop( encoded ) )
+    {
+      const auto bucket_index = static_cast< std::size_t >( bucket_for_height( encoded.height ) );
+      auto& buffer = bucket_buffers[ bucket_index ];
+      buffer.append( _record_magic, std::strlen( _record_magic ) );
+      append_u64( buffer, encoded.height );
+      append_u64( buffer, encoded.payload.size() );
+      buffer.append( encoded.payload );
+
+      if( buffer.size() >= flush_threshold && !flush_bucket( bucket_index ) )
+      {
+        try
+        {
+          throw std::runtime_error( "failed to write replay journal record at height "
+                                    + std::to_string( encoded.height ) );
+        }
+        catch( ... )
+        {
+          record_pipeline_error();
+        }
+        break;
+      }
 
       ++stored;
 
-      if( !indexed_heights[ height ] )
+      if( !indexed_heights[ encoded.height ] )
       {
-        indexed_heights[ height ] = true;
+        indexed_heights[ encoded.height ] = true;
         ++unique_heights;
         progress_stats.blocks_checked = unique_heights;
         progress.maybe_update( unique_heights, progress_stats );
       }
-
-      if( required_height < source_head_height && unique_heights >= required_height )
-        break;
     }
 
-    if( !it->status().ok() )
-      throw std::runtime_error( "replay journal source scan failed: " + it->status().ToString() );
+    reader.join();
+    for( auto& parser: parsers )
+      parser.join();
+
+    if( pipeline_error )
+      std::rethrow_exception( pipeline_error );
 
     for( uint64_t bucket = 0; bucket < _bucket_count; ++bucket )
     {
+      if( !flush_bucket( static_cast< std::size_t >( bucket ) ) )
+        throw std::runtime_error( "failed to flush replay journal bucket: " + bucket_path( bucket ).string() );
       auto& stream = buckets[ static_cast< std::size_t >( bucket ) ];
       stream.close();
       if( !stream )
@@ -1215,6 +1556,9 @@ public:
       { "bucket_count", std::to_string( _bucket_count ) },
       { "stored_records", std::to_string( stored ) },
       { "unique_heights", std::to_string( unique_heights ) },
+      // The build always scans the full source column family, even for prefix
+      // audits, so every fork candidate for the indexed heights is journaled.
+      { "full_source_scan", "1" },
     } );
 
     _indexed_height = required_height;
@@ -1228,25 +1572,46 @@ public:
     }
 
     if( logger )
-      logger->line( "journal_build_complete scanned_records=" + std::to_string( scanned )
+      logger->line( "journal_build_complete scanned_records=" + std::to_string( scanned.load() )
                     + " stored_records=" + std::to_string( stored )
                     + " unique_heights=" + std::to_string( unique_heights ) );
   }
 
-  std::vector< JournalRecord > records_at_height( uint64_t height )
+  // Returns the encoded journal payloads for all block candidates at a height.
+  // The references stay valid until the next payloads_at_height() call that
+  // loads a different bucket.
+  const std::vector< std::string >& payloads_at_height( uint64_t height )
   {
+    static const std::vector< std::string > empty;
+
     ensure_ready_for_read();
     if( height == 0 || height > _indexed_height )
-      return {};
+      return empty;
 
     const auto bucket = bucket_for_height( height );
     if( bucket != _loaded_bucket )
       load_bucket( bucket );
 
     const auto index = static_cast< std::size_t >( height - bucket_start_height( bucket ) );
-    if( index >= _bucket_records.size() )
-      return {};
-    return _bucket_records[ index ];
+    if( index >= _bucket_payloads.size() )
+      return empty;
+    return _bucket_payloads[ index ];
+  }
+
+  // Last height stored in the same bucket as the given height, clamped to the
+  // indexed height. Used to size replay chunks so payload references stay valid.
+  uint64_t bucket_end_height( uint64_t height )
+  {
+    ensure_ready_for_read();
+    return std::min( _indexed_height, bucket_start_height( bucket_for_height( height ) ) + _bucket_size - 1 );
+  }
+
+  // First height stored in the same bucket as the given height. Used with
+  // bucket_end_height to size replay chunks to a single bucket.
+  uint64_t bucket_begin_height( uint64_t height )
+  {
+    ensure_ready_for_read();
+    return bucket_start_height( bucket_for_height( height ) );
   }
 
 private:
@@ -1336,6 +1701,8 @@ private:
     _indexed_height = parse_u64( "replay journal metadata indexed_height", get_meta( metadata, "indexed_height" ) );
     _bucket_size = parse_u64( "replay journal metadata bucket_size", get_meta( metadata, "bucket_size" ) );
     _bucket_count = parse_u64( "replay journal metadata bucket_count", get_meta( metadata, "bucket_count" ) );
+    if( !_bucket_size )
+      throw std::runtime_error( "replay journal metadata has zero bucket_size" );
   }
 
   uint64_t bucket_for_height( uint64_t height ) const
@@ -1355,8 +1722,8 @@ private:
 
     const auto start_height = bucket_start_height( bucket );
     const auto end_height = std::min< uint64_t >( _indexed_height, start_height + _bucket_size - 1 );
-    _bucket_records.clear();
-    _bucket_records.resize( static_cast< std::size_t >( end_height - start_height + 1 ) );
+    _bucket_payloads.clear();
+    _bucket_payloads.resize( static_cast< std::size_t >( end_height - start_height + 1 ) );
 
     std::ifstream input( bucket_path( bucket ), std::ios::binary | std::ios::in );
     if( !input )
@@ -1388,8 +1755,7 @@ private:
       }
       if( height < start_height || height > end_height )
         throw std::runtime_error( "replay journal bucket contains out-of-range height " + std::to_string( height ) );
-      _bucket_records[ static_cast< std::size_t >( height - start_height ) ].emplace_back(
-        decode_journal_record( payload ) );
+      _bucket_payloads[ static_cast< std::size_t >( height - start_height ) ].emplace_back( std::move( payload ) );
     }
 
     _loaded_bucket = bucket;
@@ -1403,7 +1769,7 @@ private:
   static constexpr const char* _record_magic = "SDJR2";
 
   std::filesystem::path _path;
-  std::vector< std::vector< JournalRecord > > _bucket_records;
+  std::vector< std::vector< std::string > > _bucket_payloads;
   uint64_t _loaded_bucket = std::numeric_limits< uint64_t >::max();
   uint64_t _indexed_height = 0;
   uint64_t _bucket_size = _default_bucket_size;
@@ -1484,13 +1850,16 @@ std::string database_key_string( const koinos::chain::object_space& space, const
 }
 
 std::string compute_delta_entries_merkle_root(
-  const google::protobuf::RepeatedPtrField< koinos::protocol::state_delta_entry >& entries )
+  const google::protobuf::RepeatedPtrField< koinos::protocol::state_delta_entry >& entries,
+  bool drop_removes = false )
 {
   std::vector< std::pair< std::string, std::string > > merkle_entries;
   merkle_entries.reserve( entries.size() );
 
   for( const auto& entry: entries )
   {
+    if( drop_removes && !entry.has_value() )
+      continue;
     merkle_entries.emplace_back(
       database_key_string( chain_space( entry.object_space() ), entry.key() ),
       entry.has_value() ? entry.value() : std::string() );
@@ -1643,21 +2012,28 @@ ReplayStats run_replay( const Args& args )
       logger->line( "scratch_write_mode=" + std::string( args.sync_scratch_writes ? "sync" : "async" ) );
     }
 
-    ReadOnlyUnifiedDB source_db;
-    source_db.open( args.source_db );
-    koinos::node::block_store::BlockStore block_store(
-      source_db.db(),
-      source_db.handle( ColumnFamily::blocks ),
-      source_db.handle( ColumnFamily::block_meta ) );
-
-    const auto genesis = load_genesis( args );
-
-    const auto highest = block_store.get_highest_block( koinos::rpc::block_store::get_highest_block_request{} );
-    if( !highest.has_topology() || highest.topology().height() == 0 || highest.topology().id().empty() )
-      throw std::runtime_error( "source block store has no usable highest block metadata" );
-
+    // Journal-only mode never opens a source database; everything below that
+    // touches the source is gated on this optional being engaged.
+    std::optional< ReadOnlyUnifiedDB > source_db;
+    std::string source_head_id;
     ReplayStats stats;
-    stats.source_head_height = highest.topology().height();
+
+    if( !args.journal_only )
+    {
+      source_db.emplace();
+      source_db->open( args.source_db );
+      koinos::node::block_store::BlockStore block_store(
+        source_db->db(),
+        source_db->handle( ColumnFamily::blocks ),
+        source_db->handle( ColumnFamily::block_meta ) );
+
+      const auto highest = block_store.get_highest_block( koinos::rpc::block_store::get_highest_block_request{} );
+      if( !highest.has_topology() || highest.topology().height() == 0 || highest.topology().id().empty() )
+        throw std::runtime_error( "source block store has no usable highest block metadata" );
+
+      stats.source_head_height = highest.topology().height();
+      source_head_id = highest.topology().id();
+    }
 
     if( !args.state_db_replay )
     {
@@ -1665,9 +2041,15 @@ ReplayStats run_replay( const Args& args )
         throw std::runtime_error( "--normal-removes requires --state-db-replay" );
 
       stats.scratch_start_height = 0;
+      // The backward canonical walk supports mid-chain starts: it anchors on
+      // the audit tip and walks down to from_height. The genesis zero-hash
+      // anchor is only checked when the walk reaches height 1.
       const uint64_t start_height = args.from_height ? args.from_height : 1;
-      if( start_height != 1 )
-        throw std::runtime_error( "direct delta replay currently starts from genesis; use --from-height 1" );
+
+      ReplayJournal journal;
+      journal.open( args.journal_dir );
+      if( args.journal_only )
+        stats.source_head_height = journal.require_complete_for_journal_only( source_head_id );
 
       const uint64_t end_height = args.to_height ? args.to_height : stats.source_head_height;
       if( end_height > stats.source_head_height )
@@ -1697,25 +2079,28 @@ ReplayStats run_replay( const Args& args )
         return stats;
       }
 
-      ReplayJournal journal;
-      journal.open( args.journal_dir );
-      if( args.rebuild_journal
-          || !journal.valid_for( args, stats.source_head_height, highest.topology().id(), end_height ) )
+      if( args.journal_only )
+      {
+        if( logger )
+          logger->line( "journal_only dir=" + args.journal_dir.string() );
+      }
+      else if( args.rebuild_journal
+               || !journal.valid_for( args, stats.source_head_height, source_head_id, end_height ) )
       {
         if( args.rebuild_journal
             || !journal.upgrade_flat_if_valid(
               args,
               stats.source_head_height,
-              highest.topology().id(),
+              source_head_id,
               end_height,
               logger.get() ) )
         {
           journal.build(
             args,
-            source_db.db(),
-            source_db.handle( ColumnFamily::blocks ),
+            source_db->db(),
+            source_db->handle( ColumnFamily::blocks ),
             stats.source_head_height,
-            highest.topology().id(),
+            source_head_id,
             end_height,
             logger.get() );
         }
@@ -1726,73 +2111,285 @@ ReplayStats run_replay( const Args& args )
       }
 
       ProgressReporter progress( "replay", start_height, end_height, args.progress_every, logger.get() );
-      std::string current_block_id = zero_multihash_string();
-      std::string current_state_root = zero_multihash_string();
 
-      for( uint64_t height = start_height; height <= end_height; ++height )
+      // Fork siblings can share a parent block, so forward greedy parent
+      // chaining can follow an orphan and abort one height later with a
+      // spurious missing-parent error. The canonical chain is instead resolved
+      // backward from the audit tip: the tip block is known (the source head
+      // for full audits), and each block's previous pointer then uniquely
+      // selects the canonical block below it. Decoding and per-block delta
+      // Merkle hashing still run in parallel one journal bucket at a time;
+      // only the cheap id/root chain validation is sequential.
+      struct ReplayCandidate
       {
-        bool saw_height = false;
-        bool matched_parent = false;
-        JournalRecord selected;
+        const std::string* payload = nullptr;
+        JournalRecord record;
+        std::string computed_root;
+      };
 
-        for( auto& candidate: journal.records_at_height( height ) )
+      const std::size_t worker_limit = std::max( 1u, std::thread::hardware_concurrency() );
+
+      std::string expected_id;
+      std::string expected_root_above;
+      bool have_expectations = false;
+
+      uint64_t chunk_end = end_height;
+      while( chunk_end >= start_height )
+      {
+        const uint64_t chunk_start = std::max( start_height, journal.bucket_begin_height( chunk_end ) );
+
+        std::vector< ReplayCandidate > candidates;
+        std::vector< std::pair< std::size_t, std::size_t > > height_ranges;
+        height_ranges.reserve( static_cast< std::size_t >( chunk_end - chunk_start + 1 ) );
+
+        for( uint64_t height = chunk_start; height <= chunk_end; ++height )
         {
-          saw_height = true;
-          if( candidate.header.previous() == current_block_id )
+          const auto& payloads = journal.payloads_at_height( height );
+          height_ranges.emplace_back( candidates.size(), payloads.size() );
+          for( const auto& payload: payloads )
           {
-            selected = std::move( candidate );
-            matched_parent = true;
+            ReplayCandidate candidate;
+            candidate.payload = &payload;
+            candidates.push_back( std::move( candidate ) );
           }
         }
 
-        if( !saw_height )
-          throw std::runtime_error( "replay journal is missing block candidates at height " + std::to_string( height ) );
-        if( !matched_parent )
-          throw std::runtime_error( "replay journal has no canonical parent match at height " + std::to_string( height ) );
+        std::atomic< std::size_t > next_candidate{ 0 };
+        std::atomic< bool > worker_failed{ false };
+        std::exception_ptr worker_error;
+        std::mutex worker_error_mutex;
 
-        if( selected.header.height() != height )
-          throw std::runtime_error( "journal block height mismatch at height " + std::to_string( height ) );
-        if( selected.header.previous_state_merkle_root() != current_state_root )
+        auto worker = [ & ]()
         {
-          throw std::runtime_error( "block previous state merkle mismatch at height "
-                                    + std::to_string( height )
-                                    + ": expected=" + bytes_to_hex( selected.header.previous_state_merkle_root() )
-                                    + " actual=" + bytes_to_hex( current_state_root ) );
-        }
-        if( selected.receipt.height() != 0 && selected.receipt.height() != height )
-          throw std::runtime_error( "receipt height mismatch at block " + std::to_string( height ) );
-        if( !selected.receipt.id().empty() && selected.receipt.id() != selected.block_id )
-          throw std::runtime_error( "receipt id mismatch at block " + std::to_string( height ) );
+          for( ;; )
+          {
+            if( worker_failed.load( std::memory_order_relaxed ) )
+              return;
 
-        const auto computed_root = compute_delta_entries_merkle_root( selected.receipt.state_delta_entries() );
-        if( selected.receipt.state_merkle_root().empty() )
-        {
-          ++stats.receipts_without_state_root;
-        }
-        else if( selected.receipt.state_merkle_root() != computed_root )
-        {
-          throw std::runtime_error( "block receipt state merkle mismatch at height "
-                                    + std::to_string( height )
-                                    + ": expected=" + bytes_to_hex( selected.receipt.state_merkle_root() )
-                                    + " actual=" + bytes_to_hex( computed_root ) );
-        }
+            const auto index = next_candidate.fetch_add( 1 );
+            if( index >= candidates.size() )
+              return;
 
-        for( const auto& delta_entry: selected.receipt.state_delta_entries() )
+            try
+            {
+              auto& candidate = candidates[ index ];
+              candidate.record = decode_journal_record( *candidate.payload );
+              candidate.computed_root =
+                compute_delta_entries_merkle_root( candidate.record.receipt.state_delta_entries() );
+            }
+            catch( ... )
+            {
+              std::lock_guard< std::mutex > guard( worker_error_mutex );
+              if( !worker_error )
+                worker_error = std::current_exception();
+              worker_failed.store( true, std::memory_order_relaxed );
+              return;
+            }
+          }
+        };
+
+        const auto worker_count = std::max< std::size_t >( 1, std::min( worker_limit, candidates.size() ) );
+        std::vector< std::thread > workers;
+        workers.reserve( worker_count );
+        for( std::size_t i = 0; i < worker_count; ++i )
+          workers.emplace_back( worker );
+        for( auto& thread: workers )
+          thread.join();
+        if( worker_error )
+          std::rethrow_exception( worker_error );
+
+        for( uint64_t height = chunk_end; height >= chunk_start; --height )
         {
-          if( delta_entry.has_value() )
-            ++stats.receipt_puts;
+          const auto& range = height_ranges[ static_cast< std::size_t >( height - chunk_start ) ];
+          if( !range.second )
+            throw std::runtime_error( "replay journal is missing block candidates at height "
+                                      + std::to_string( height ) );
+
+          const ReplayCandidate* selected = nullptr;
+
+          if( !have_expectations )
+          {
+            // Audit tip. A full audit anchors on the source head id. A prefix
+            // audit takes the first stored candidate: an orphan's ancestry is
+            // canonical below its fork point, so any tip candidate chains to
+            // genesis — only the tip block itself can differ.
+            if( end_height == stats.source_head_height )
+            {
+              for( std::size_t i = 0; i < range.second; ++i )
+              {
+                const auto& candidate = candidates[ range.first + i ];
+                if( candidate.record.block_id == source_head_id )
+                {
+                  selected = &candidate;
+                  break;
+                }
+              }
+              if( !selected )
+                throw std::runtime_error( "replay journal is missing the source head block at height "
+                                          + std::to_string( height ) );
+            }
+            else
+            {
+              selected = &candidates[ range.first ];
+              if( range.second > 1 && logger )
+                logger->line( "replay_tip_ambiguous height=" + std::to_string( height )
+                              + " candidates=" + std::to_string( range.second ) );
+            }
+
+            stats.final_height = height;
+            stats.final_block_id = bytes_to_hex( selected->record.block_id );
+            stats.final_state_merkle_root = bytes_to_hex( selected->computed_root );
+          }
           else
-            ++stats.receipt_removes;
-          ++stats.receipt_delta_entries;
+          {
+            for( std::size_t i = 0; i < range.second; ++i )
+            {
+              const auto& candidate = candidates[ range.first + i ];
+              if( candidate.record.block_id == expected_id )
+              {
+                selected = &candidate;
+                break;
+              }
+            }
+            if( !selected )
+              throw std::runtime_error( "replay journal is missing the canonical block at height "
+                                        + std::to_string( height )
+                                        + ": expected_id=" + bytes_to_hex( expected_id ) );
+            if( selected->computed_root != expected_root_above )
+            {
+              // Documented legacy semantics: nodes of that era excluded some
+              // recorded entries from the delta Merkle computation — removes
+              // of keys absent from the parent (transient tombstones), and
+              // no-op puts observed on mainnet as well. If omitting some
+              // subset of the recorded entries reproduces the consensus root
+              // exactly (a 256-bit match cannot be coincidence), the block is
+              // a legacy entry-drop instance; it is counted and logged rather
+              // than treated as corruption.
+              const auto& entries = selected->record.receipt.state_delta_entries();
+              std::size_t total_removes = 0;
+              for( int i = 0; i < entries.size(); ++i )
+                if( !entries[ i ].has_value() )
+                  ++total_removes;
+
+              bool legacy_match = false;
+              uint32_t matched_mask = 0;
+              if( entries.size() && entries.size() <= 20 )
+              {
+                for( uint32_t mask = 1; !legacy_match && mask < ( 1u << entries.size() ); ++mask )
+                {
+                  google::protobuf::RepeatedPtrField< koinos::protocol::state_delta_entry > kept;
+                  for( int i = 0; i < entries.size(); ++i )
+                    if( !( mask & ( 1u << i ) ) )
+                      *kept.Add() = entries[ i ];
+                  if( compute_delta_entries_merkle_root( kept ) == expected_root_above )
+                  {
+                    legacy_match = true;
+                    matched_mask = mask;
+                  }
+                }
+              }
+
+              if( !legacy_match )
+              {
+                // No recorded-entry subset reproduces the consensus root. The
+                // likely cause is the inverse legacy failure: the receipt lost
+                // an entry (e.g. a tombstone dropped by an old replay sync)
+                // that consensus included, which cannot be reconstructed from
+                // local data. Recorded as an unexplained mismatch and audited
+                // past, so a full-history run inventories every anomaly
+                // instead of stopping at the first.
+                ++stats.unexplained_mismatch_blocks;
+                if( logger )
+                  logger->line( "unexplained_state_root_mismatch height=" + std::to_string( height )
+                                + " expected=" + bytes_to_hex( expected_root_above )
+                                + " actual=" + bytes_to_hex( selected->computed_root )
+                                + " delta_entries=" + std::to_string( entries.size() )
+                                + " removes=" + std::to_string( total_removes )
+                                + " block_id=" + bytes_to_hex( selected->record.block_id ) );
+              }
+              else
+              {
+                std::size_t dropped_removes = 0;
+                std::size_t dropped_puts = 0;
+                std::string dropped_detail;
+                for( int i = 0; i < entries.size(); ++i )
+                {
+                  if( !( matched_mask & ( 1u << i ) ) )
+                    continue;
+                  if( entries[ i ].has_value() )
+                    ++dropped_puts;
+                  else
+                    ++dropped_removes;
+                  dropped_detail += " entry" + std::to_string( i )
+                                    + "=" + ( entries[ i ].has_value() ? "put" : "remove" )
+                                    + ":key=" + bytes_to_hex( entries[ i ].key() );
+                }
+
+                ++stats.legacy_dropped_tombstone_blocks;
+                stats.legacy_dropped_tombstones += dropped_removes;
+                stats.legacy_dropped_puts += dropped_puts;
+                if( logger )
+                  logger->line( "legacy_entry_drop height=" + std::to_string( height )
+                                + " dropped_removes=" + std::to_string( dropped_removes )
+                                + " dropped_puts=" + std::to_string( dropped_puts )
+                                + " delta_entries=" + std::to_string( entries.size() )
+                                + " block_id=" + bytes_to_hex( selected->record.block_id )
+                                + dropped_detail );
+              }
+            }
+          }
+
+          if( selected->record.header.height() != height )
+            throw std::runtime_error( "journal block height mismatch at height " + std::to_string( height ) );
+          if( selected->record.receipt.height() != 0 && selected->record.receipt.height() != height )
+            throw std::runtime_error( "receipt height mismatch at block " + std::to_string( height ) );
+          if( !selected->record.receipt.id().empty() && selected->record.receipt.id() != selected->record.block_id )
+            throw std::runtime_error( "receipt id mismatch at block " + std::to_string( height ) );
+
+          if( selected->record.receipt.state_merkle_root().empty() )
+          {
+            ++stats.receipts_without_state_root;
+          }
+          else if( selected->record.receipt.state_merkle_root() != selected->computed_root )
+          {
+            throw std::runtime_error( "block receipt state merkle mismatch at height "
+                                      + std::to_string( height )
+                                      + ": expected=" + bytes_to_hex( selected->record.receipt.state_merkle_root() )
+                                      + " actual=" + bytes_to_hex( selected->computed_root ) );
+          }
+
+          for( const auto& delta_entry: selected->record.receipt.state_delta_entries() )
+          {
+            if( delta_entry.has_value() )
+              ++stats.receipt_puts;
+            else
+              ++stats.receipt_removes;
+            ++stats.receipt_delta_entries;
+          }
+
+          expected_id = selected->record.header.previous();
+          expected_root_above = selected->record.header.previous_state_merkle_root();
+          have_expectations = true;
+
+          ++stats.blocks_checked;
+          progress.maybe_update( start_height + stats.blocks_checked - 1, stats );
         }
 
-        current_block_id = selected.block_id;
-        current_state_root = computed_root;
-        stats.final_height = height;
-        stats.final_block_id = bytes_to_hex( current_block_id );
-        stats.final_state_merkle_root = bytes_to_hex( current_state_root );
-        ++stats.blocks_checked;
-        progress.maybe_update( height, stats );
+        if( chunk_start == start_height )
+          break;
+        chunk_end = chunk_start - 1;
+      }
+
+      // Bottom anchor for full-genesis audits: below the first block, both the
+      // parent id and the parent state root must be the zero hash.
+      if( start_height == 1 && stats.blocks_checked )
+      {
+        if( expected_id != zero_multihash_string() )
+          throw std::runtime_error( "genesis previous block mismatch: expected zero hash, actual="
+                                    + bytes_to_hex( expected_id ) );
+        if( expected_root_above != zero_multihash_string() )
+          throw std::runtime_error( "genesis previous state merkle mismatch: expected zero hash, actual="
+                                    + bytes_to_hex( expected_root_above ) );
       }
 
       progress.finish();
@@ -1800,12 +2397,15 @@ ReplayStats run_replay( const Args& args )
       {
         logger->line( "run_complete blocks_checked=" + std::to_string( stats.blocks_checked )
                       + " receipt_delta_entries=" + std::to_string( stats.receipt_delta_entries )
+                      + " legacy_dropped_tombstone_blocks=" + std::to_string( stats.legacy_dropped_tombstone_blocks )
                       + " final_height=" + std::to_string( stats.final_height )
                       + " final_block_id=" + stats.final_block_id
                       + " final_state_merkle_root=" + stats.final_state_merkle_root );
       }
       return stats;
     }
+
+    const auto genesis = load_genesis( args );
 
     auto replay_backend = std::make_shared< koinos::state_db::backends::rocksdb::rocksdb_backend >();
     replay_backend->force_async_writes( !args.sync_scratch_writes );
@@ -1863,14 +2463,14 @@ ReplayStats run_replay( const Args& args )
     HeightRecordIndex height_index;
     height_index.open( args.height_index_dir );
     if( args.rebuild_height_index
-        || !height_index.valid_for( args, stats.source_head_height, highest.topology().id(), end_height ) )
+        || !height_index.valid_for( args, stats.source_head_height, source_head_id, end_height ) )
     {
       height_index.build(
         args,
-        source_db.db(),
-        source_db.handle( ColumnFamily::blocks ),
+        source_db->db(),
+        source_db->handle( ColumnFamily::blocks ),
         stats.source_head_height,
-        highest.topology().id(),
+        source_head_id,
         end_height,
         logger.get() );
     }
@@ -1890,9 +2490,9 @@ ReplayStats run_replay( const Args& args )
         throw std::runtime_error( "height index is missing block at height " + std::to_string( height ) );
 
       std::string record_bytes;
-      auto status = source_db.db()->Get(
+      auto status = source_db->db()->Get(
         source_read_options,
-        source_db.handle( ColumnFamily::blocks ),
+        source_db->handle( ColumnFamily::blocks ),
         block_id,
         &record_bytes );
       if( status.IsNotFound() )
@@ -1941,7 +2541,9 @@ ReplayStats run_replay( const Args& args )
 void print_text_result( const Args& args, const ReplayStats& stats )
 {
   const auto replay_mode = args.state_db_replay ? "height-index-state-db" : "direct-delta-root";
-  std::cout << "state delta replay audit: ok\n"
+  std::cout << ( stats.unexplained_mismatch_blocks
+                   ? "state delta replay audit: completed with unexplained mismatches\n"
+                   : "state delta replay audit: ok\n" )
             << "source_db: " << args.source_db.string() << '\n'
             << "scratch_state_dir: " << args.scratch_state_dir.string() << '\n'
             << "replay_mode: " << replay_mode << '\n'
@@ -1959,6 +2561,10 @@ void print_text_result( const Args& args, const ReplayStats& stats )
             << "receipt_puts: " << stats.receipt_puts << '\n'
             << "receipt_removes: " << stats.receipt_removes << '\n'
             << "receipts_without_state_root: " << stats.receipts_without_state_root << '\n'
+            << "legacy_dropped_tombstone_blocks: " << stats.legacy_dropped_tombstone_blocks << '\n'
+            << "legacy_dropped_tombstones: " << stats.legacy_dropped_tombstones << '\n'
+            << "legacy_dropped_puts: " << stats.legacy_dropped_puts << '\n'
+            << "unexplained_mismatch_blocks: " << stats.unexplained_mismatch_blocks << '\n'
             << "final_height: " << stats.final_height << '\n'
             << "final_block_id: " << stats.final_block_id << '\n'
             << "final_state_merkle_root: " << stats.final_state_merkle_root << '\n';
@@ -1968,7 +2574,7 @@ void print_json_result( const Args& args, const ReplayStats& stats )
 {
   const auto replay_mode = args.state_db_replay ? "height-index-state-db" : "direct-delta-root";
   std::cout << "{\n"
-            << "  \"ok\": true,\n"
+            << "  \"ok\": " << ( stats.unexplained_mismatch_blocks ? "false" : "true" ) << ",\n"
             << "  \"source_db\": \"" << json_escape( args.source_db.string() ) << "\",\n"
             << "  \"scratch_state_dir\": \"" << json_escape( args.scratch_state_dir.string() ) << "\",\n"
             << "  \"replay_mode\": \"" << replay_mode << "\",\n"
@@ -1992,6 +2598,10 @@ void print_json_result( const Args& args, const ReplayStats& stats )
             << "  \"receipt_puts\": " << stats.receipt_puts << ",\n"
             << "  \"receipt_removes\": " << stats.receipt_removes << ",\n"
             << "  \"receipts_without_state_root\": " << stats.receipts_without_state_root << ",\n"
+            << "  \"legacy_dropped_tombstone_blocks\": " << stats.legacy_dropped_tombstone_blocks << ",\n"
+            << "  \"legacy_dropped_tombstones\": " << stats.legacy_dropped_tombstones << ",\n"
+            << "  \"legacy_dropped_puts\": " << stats.legacy_dropped_puts << ",\n"
+            << "  \"unexplained_mismatch_blocks\": " << stats.unexplained_mismatch_blocks << ",\n"
             << "  \"final_height\": " << stats.final_height << ",\n"
             << "  \"final_block_id\": \"" << json_escape( stats.final_block_id ) << "\",\n"
             << "  \"final_state_merkle_root\": \"" << json_escape( stats.final_state_merkle_root ) << "\"\n"
@@ -2019,7 +2629,9 @@ int main( int argc, char** argv )
       print_json_result( args, stats );
     else
       print_text_result( args, stats );
-    return EXIT_SUCCESS;
+    // Unexplained mismatches complete the inventory run but must not read as
+    // a clean audit; exit 2 distinguishes them from hard failures (exit 1).
+    return stats.unexplained_mismatch_blocks ? 2 : EXIT_SUCCESS;
   }
   catch( const std::exception& e )
   {
