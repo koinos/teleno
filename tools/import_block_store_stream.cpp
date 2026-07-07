@@ -191,13 +191,20 @@ int main( int argc, char** argv )
   options.max_background_jobs = 4;
   options.bytes_per_sync = 1048576;
 
+  // Full unified column-family set from storage::ColumnFamily, so tools that
+  // open the imported store as a unified DB (e.g. the state delta replay
+  // auditor) find every family they expect. Only blocks/block_meta receive
+  // rows; the rest stay empty.
   std::vector< rocksdb::ColumnFamilyDescriptor > descriptors = {
     { rocksdb::kDefaultColumnFamilyName, rocksdb::ColumnFamilyOptions() },
     { "blocks", rocksdb::ColumnFamilyOptions() },
     { "block_meta", rocksdb::ColumnFamilyOptions() },
     { "contract_meta", rocksdb::ColumnFamilyOptions() },
     { "transaction_index", rocksdb::ColumnFamilyOptions() },
-    { "account_history", rocksdb::ColumnFamilyOptions() }
+    { "account_history", rocksdb::ColumnFamilyOptions() },
+    { "chain_state", rocksdb::ColumnFamilyOptions() },
+    { "chain_metadata", rocksdb::ColumnFamilyOptions() },
+    { "storage_metadata", rocksdb::ColumnFamilyOptions() }
   };
 
   rocksdb::DB* raw_db = nullptr;
