@@ -30,6 +30,7 @@ public:
              ::rocksdb::ColumnFamilyHandle& metadata_handle );
   void close();
   void flush();
+  void force_async_writes( bool force );
 
   virtual void start_write_batch() override;
   virtual void end_write_batch( write_durability durability = write_durability::default_async ) override;
@@ -65,6 +66,7 @@ private:
   column_handles _handles;
   bool _borrowed = false;
   ::rocksdb::WriteOptions _wopts;
+  bool _force_async_writes = false;
   std::shared_ptr< ::rocksdb::ReadOptions > _ropts;
   mutable std::shared_ptr< object_cache > _cache;
   size_type _size = 0;
