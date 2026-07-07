@@ -245,6 +245,11 @@ void rocksdb_backend::flush()
   _db->Flush( flush_options, &*_handles[ constants::metadata_column_index ] );
 }
 
+void rocksdb_backend::force_async_writes( bool force )
+{
+  _force_async_writes = force;
+}
+
 void rocksdb_backend::start_write_batch()
 {
   KOINOS_ASSERT( !_write_batch, rocksdb_session_in_progress, "session already in progress" );
@@ -256,7 +261,7 @@ void rocksdb_backend::end_write_batch( write_durability durability )
   if( _write_batch )
   {
     auto write_options = _wopts;
-    if( durability == write_durability::sync )
+    if( durability == write_durability::sync && !_force_async_writes )
       write_options.sync = true;
 
     auto status = _db->Write( write_options, &*_write_batch );

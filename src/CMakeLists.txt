@@ -761,6 +761,24 @@ target_link_libraries(
       protobuf::libprotobuf
       nlohmann_json::nlohmann_json)
 
+add_executable(koinos_state_delta_replay_audit
+  ../tools/state_delta_replay_audit.cpp)
+
+target_link_libraries(
+  koinos_state_delta_replay_audit
+    PRIVATE
+      koinos_block_store_lib
+      koinos_storage_lib
+      koinos_state_db_local
+      chain
+      Koinos::log
+      Koinos::proto
+      Koinos::crypto
+      Koinos::util
+      Koinos::exception
+      RocksDB::rocksdb
+      protobuf::libprotobuf)
+
 if(COMMAND koinos_install)
   koinos_install(TARGETS teleno_node)
 else()
