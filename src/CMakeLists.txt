@@ -779,6 +779,16 @@ target_link_libraries(
       RocksDB::rocksdb
       protobuf::libprotobuf)
 
+add_executable(koinos_import_block_store_stream
+  ../tools/import_block_store_stream.cpp)
+
+target_link_libraries(
+  koinos_import_block_store_stream
+    PRIVATE
+      koinos_storage_lib
+      RocksDB::rocksdb
+      OpenSSL::Crypto)
+
 if(COMMAND koinos_install)
   koinos_install(TARGETS teleno_node)
 else()

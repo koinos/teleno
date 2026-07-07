@@ -143,6 +143,36 @@ std::string bytes_to_hex( const std::string& bytes )
   return out;
 }
 
+std::string hex_to_bytes( const std::string& hex )
+{
+  auto nibble = []( char ch ) -> int
+  {
+    if( ch >= '0' && ch <= '9' )
+      return ch - '0';
+    if( ch >= 'a' && ch <= 'f' )
+      return ch - 'a' + 10;
+    if( ch >= 'A' && ch <= 'F' )
+      return ch - 'A' + 10;
+    return -1;
+  };
+
+  const std::size_t offset = hex.rfind( "0x", 0 ) == 0 ? 2 : 0;
+  if( ( hex.size() - offset ) % 2 != 0 )
+    throw std::runtime_error( "invalid hex string: " + hex );
+
+  std::string out;
+  out.reserve( ( hex.size() - offset ) / 2 );
+  for( std::size_t i = offset; i < hex.size(); i += 2 )
+  {
+    const int high = nibble( hex[ i ] );
+    const int low  = nibble( hex[ i + 1 ] );
+    if( high < 0 || low < 0 )
+      throw std::runtime_error( "invalid hex string: " + hex );
+    out.push_back( static_cast< char >( ( high << 4 ) | low ) );
+  }
+  return out;
+}
+
 std::string multihash_string( const koinos::crypto::multihash& value )
 {
   return koinos::util::converter::as< std::string >( value );
@@ -1067,8 +1097,9 @@ public:
   // The journal must be bucketed, carry a full-source-scan guarantee (either
   // indexed through the recorded source head or an explicit full_source_scan
   // marker), and have all bucket files present. Returns the recorded source
-  // head height; throws with a specific reason otherwise.
-  uint64_t require_complete_for_journal_only() const
+  // head height and yields the recorded source head id (raw bytes) so canonical
+  // selection can anchor on it; throws with a specific reason otherwise.
+  uint64_t require_complete_for_journal_only( std::string& source_head_id_out ) const
   {
     const auto metadata = read_metadata();
     if( get_meta( metadata, "format" ) != _format )
@@ -1091,6 +1122,11 @@ public:
     if( !bucket_files_exist( metadata ) )
       throw std::runtime_error( "--journal-only requires all journal bucket files to be present in "
                                 + _path.string() );
+
+    const auto head_id_hex = get_meta( metadata, "source_head_id" );
+    if( head_id_hex.empty() )
+      throw std::runtime_error( "--journal-only requires journal metadata to record source_head_id" );
+    source_head_id_out = hex_to_bytes( head_id_hex );
 
     return source_head_height;
   }
@@ -2011,7 +2047,7 @@ ReplayStats run_replay( const Args& args )
       ReplayJournal journal;
       journal.open( args.journal_dir );
       if( args.journal_only )
-        stats.source_head_height = journal.require_complete_for_journal_only();
+        stats.source_head_height = journal.require_complete_for_journal_only( source_head_id );
 
       const uint64_t end_height = args.to_height ? args.to_height : stats.source_head_height;
       if( end_height > stats.source_head_height )
