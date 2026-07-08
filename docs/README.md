@@ -1,7 +1,9 @@
 # Teleno Node CLI Guide
 
 This section documents the native `teleno_node` binary for operators who run it
-outside the Koinos One GUI. It is written for observer-first operation: start
+outside the Koinos One GUI. `teleno_node` is a community-driven monolithic
+rewrite of the Koinos node; the official reference implementation remains the
+microservices-based stack. It is written for observer-first operation: start
 safe, verify the node, then enable higher-risk behavior only after the required
 checks pass.
 
