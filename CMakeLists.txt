@@ -15,7 +15,7 @@ if(POLICY CMP0167)
 endif()
 
 project(koinos_node
-  VERSION 0.1.0
+  VERSION 1.1.0
   DESCRIPTION "Koinos monolithic node"
   LANGUAGES CXX C)
 
