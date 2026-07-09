@@ -205,13 +205,14 @@ rm -rf "$KOINOS_NODE_HUNTER_SOURCE"
 mkdir -p "$KOINOS_NODE_HUNTER_SOURCE"
 # NODE_DIR is the repo root; exclude VCS data, dependency builds (which may
 # live inside the repo), and build output so the copy cannot recurse into
-# itself.
-rsync -a \
-  --exclude '.git' \
-  --exclude '.deps' \
-  --exclude 'build' \
-  --exclude 'build-*' \
-  "$NODE_DIR/" "$KOINOS_NODE_HUNTER_SOURCE/"
+# itself. tar is used instead of rsync so the copy also works in minimal
+# container build environments.
+(cd "$NODE_DIR" && tar cf - \
+  --exclude './.git' \
+  --exclude './.deps' \
+  --exclude './build' \
+  --exclude './build-*' \
+  .) | tar xf - -C "$KOINOS_NODE_HUNTER_SOURCE"
 cp "$KOINOS_NODE_HUNTER_SOURCE/CMakeLists.hunter.txt" "$KOINOS_NODE_HUNTER_SOURCE/CMakeLists.txt"
 
 echo "==> Building Teleno node Hunter dependency set"
