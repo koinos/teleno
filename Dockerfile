@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     KOINOS_DEPS_ROOT=/opt/teleno-deps \
-    KOINOS_NODE_BUILD_DIR=/src/node/teleno-node/build
+    KOINOS_NODE_BUILD_DIR=/src/build
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -81,7 +81,7 @@ RUN chmod +x /usr/local/bin/teleno-prod-producer
 
 LABEL org.opencontainers.image.title="Teleno Node" \
       org.opencontainers.image.description="Linux container image for the monolithic teleno_node runtime" \
-      org.opencontainers.image.source="https://github.com/koinos/koinos-one" \
+      org.opencontainers.image.source="https://github.com/koinos/teleno" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 

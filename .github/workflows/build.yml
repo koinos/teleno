@@ -1,0 +1,53 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake build-essential ca-certificates cmake curl \
+            file git libssl-dev libtool make ninja-build perl pkg-config \
+            python3 tar xz-utils zlib1g-dev
+
+      - name: Cache native dependencies
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: teleno-deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakeLists.hunter.txt', 'scripts/build-*.sh') }}
+          restore-keys: |
+            teleno-deps-${{ runner.os }}-
+
+      - name: Build teleno_node
+        run: ./scripts/build-cpp-libp2p-koinos.sh
+
+      - name: Report version
+        run: ./build/teleno_node --version
+
+      - name: Smoke test CLI surface
+        run: |
+          ./build/teleno_node --help >/tmp/teleno-node-help.txt
+          grep -q -- "--backup-public-list" /tmp/teleno-node-help.txt
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
