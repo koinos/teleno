@@ -56,7 +56,8 @@ See [docs/operations/container.md](docs/operations/container.md).
 The native runtime version comes from the `VERSION` file at the repo root
 (SemVer, no build metadata). Builds report
 `teleno_node <version>+<git-commit>[-dirty]` via `--version`. Release tags use
-the form `teleno-node-v<version>`.
+the form `teleno-node-v<version>`. Between releases the tree carries a `-dev`
+prerelease segment. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Documentation
 
