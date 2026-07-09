@@ -25,11 +25,17 @@ build identity.
 ## Run
 
 ```bash
-mkdir -p ~/teleno-basedir/chain
-cp config/example/config.yml ~/teleno-basedir/config.yml
-cp config/example/genesis_data.json ~/teleno-basedir/chain/genesis_data.json
-./build/teleno_node --basedir ~/teleno-basedir
+export BASEDIR="$HOME/.koinos-one/testnet-observer"
+mkdir -p "$BASEDIR/chain"
+cp config/example/harbinger/genesis_data.json "$BASEDIR/chain/genesis_data.json"
+./build/teleno_node \
+  --basedir "$BASEDIR" \
+  --config config/testnet-public-bootstrap-observer.yml \
+  --disable block_producer grpc
 ```
+
+Network config templates live in `config/` and per-network genesis data in
+`config/example/` (mainnet, harbinger testnet).
 
 Start with [docs/quickstart.md](docs/quickstart.md), then
 [docs/running-observer-node.md](docs/running-observer-node.md) and

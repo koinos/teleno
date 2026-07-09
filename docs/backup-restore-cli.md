@@ -29,7 +29,7 @@ and
 SSH:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-dry-run
@@ -38,7 +38,7 @@ SSH:
 Machine-readable output:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-dry-run \
@@ -54,7 +54,7 @@ Machine-readable output:
     backup service.
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-create-local \
@@ -65,7 +65,7 @@ Create the configured backup and upload to private SFTP when
 `backup.remote.enabled=true`:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-create \
@@ -77,7 +77,7 @@ Create the configured backup and upload to private SFTP when
 Local repository:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-list \
@@ -87,7 +87,7 @@ Local repository:
 Private SFTP remote metadata:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-list-remote \
@@ -105,7 +105,7 @@ native backup repository before staging and activation.
 List public testnet metadata:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config config/testnet-public-bootstrap-observer.yml \
   --backup-public-list \
@@ -116,7 +116,7 @@ List public testnet metadata:
 Fetch metadata and missing objects without activation:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config config/testnet-public-bootstrap-observer.yml \
   --backup-public-fetch \
@@ -133,7 +133,7 @@ Fetch metadata and missing objects without activation:
 Restore public testnet bootstrap:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-public-restore \
@@ -151,7 +151,7 @@ before starting long-running operation.
 Preflight local restore:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-restore-preflight \
@@ -162,7 +162,7 @@ Preflight local restore:
 Fetch private SFTP remote snapshot into the local repository:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-restore-fetch \
@@ -176,7 +176,7 @@ Fetch private SFTP remote snapshot into the local repository:
     selected backup ID, and available disk space.
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-restore \
@@ -187,7 +187,7 @@ Fetch private SFTP remote snapshot into the local repository:
 After restore, start as an observer:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --disable block_producer
@@ -198,7 +198,7 @@ After restore, start as an observer:
 Delete is dry-run by default:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-delete \
@@ -213,7 +213,7 @@ Delete is dry-run by default:
 Execute deletion:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-delete \

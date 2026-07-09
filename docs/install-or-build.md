@@ -8,13 +8,7 @@ installation, a staged bundle, or the Linux container image.
 Run commands from the repository root:
 
 ```bash
-cd /path/to/koinos-one
-```
-
-Initialize submodules when the native dependencies have not been prepared:
-
-```bash
-npm run submodules:init
+cd /path/to/teleno
 ```
 
 Build the native node and its C++ dependency stack:
@@ -23,17 +17,17 @@ Build the native node and its C++ dependency stack:
 ./scripts/build-cpp-libp2p-koinos.sh
 ```
 
-When `node/teleno-node/build/` already exists, a focused rebuild is faster:
+When `build/` already exists, a focused rebuild is faster:
 
 ```bash
-cmake --build node/teleno-node/build --target teleno_node --parallel
+cmake --build build --target teleno_node --parallel
 ```
 
 Verify the binary and command surface:
 
 ```bash
-./node/teleno-node/build/teleno_node --version
-./node/teleno-node/build/teleno_node --help
+./build/teleno_node --version
+./build/teleno_node --help
 ```
 
 ## Packaged App Binary

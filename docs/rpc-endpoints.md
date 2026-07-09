@@ -64,7 +64,7 @@ features:
 
 Do not enable public gRPC without an explicit access-control and monitoring
 plan. Current implementation notes and parity caveats are tracked in the
-[Monolith Service Coverage](../developers/deeper-references/monolith-service-coverage.md)
+[Monolith Service Coverage](https://github.com/koinos/koinos-one/blob/main/docs/manual/developers/deeper-references/monolith-service-coverage.md)
 reference.
 
 ## P2P

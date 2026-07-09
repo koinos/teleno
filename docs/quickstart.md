@@ -9,7 +9,13 @@ Create a basedir outside the repository:
 
 ```bash
 export BASEDIR="$HOME/.koinos-one/testnet-observer"
-mkdir -p "$BASEDIR"
+mkdir -p "$BASEDIR/chain"
+```
+
+Stage the testnet genesis data into the basedir:
+
+```bash
+cp config/example/harbinger/genesis_data.json "$BASEDIR/chain/genesis_data.json"
 ```
 
 !!! warning "Local state write"
@@ -19,7 +25,7 @@ mkdir -p "$BASEDIR"
 Start the node with the bundled testnet observer config:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config config/testnet-public-bootstrap-observer.yml \
   --jsonrpc-listen 127.0.0.1:18122 \
@@ -74,9 +80,10 @@ keep block production disabled:
 
 ```bash
 export BASEDIR="$HOME/.koinos-one/mainnet-observer"
-mkdir -p "$BASEDIR"
+mkdir -p "$BASEDIR/chain"
+cp config/example/mainnet/genesis_data.json "$BASEDIR/chain/genesis_data.json"
 
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config config/mainnet-public-bootstrap-observer.yml \
   --jsonrpc-listen 127.0.0.1:8080 \

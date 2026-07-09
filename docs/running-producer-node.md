@@ -90,7 +90,7 @@ ls -l /absolute/path/to/producer-hot-private.key
 Start once as an observer using the same basedir and config:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --log-level info \
@@ -114,7 +114,7 @@ Stop the observer cleanly and review logs before producer start.
     producer setup. Run it only after the activation gate passes.
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --log-level info

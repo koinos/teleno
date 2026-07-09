@@ -28,7 +28,7 @@ Look for:
 
 ```bash
 mkdir -p "$BASEDIR/logs"
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --log-level info \
@@ -58,7 +58,7 @@ Run it more than once to confirm the head advances while syncing.
 family estimates, then exits:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --storage-report
@@ -72,7 +72,7 @@ selection, and column family estimates.
 Validate backup config without opening RocksDB or connecting to SSH:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-dry-run \
@@ -82,7 +82,7 @@ Validate backup config without opening RocksDB or connecting to SSH:
 List local snapshots without opening RocksDB:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-list \
@@ -119,7 +119,7 @@ creation.
 List the configured public source:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config config/testnet-public-bootstrap-observer.yml \
   --backup-public-list \

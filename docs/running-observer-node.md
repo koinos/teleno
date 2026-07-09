@@ -21,7 +21,7 @@ diagnostics, and public RPC backends.
     Starting an observer writes local chain and runtime state under `$BASEDIR`.
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --log-level info \
@@ -38,7 +38,7 @@ session, redirect logs explicitly:
 
 ```bash
 mkdir -p "$BASEDIR/logs"
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --log-level info \
@@ -128,7 +128,7 @@ Run diagnostics with the node stopped unless the command is explicitly a
 runtime API call:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --storage-report

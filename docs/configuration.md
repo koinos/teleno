@@ -29,7 +29,7 @@ Important rules:
 Run with an explicit basedir and config path:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml"
 ```
@@ -43,10 +43,10 @@ The repository includes operator-oriented templates:
 
 | Template | Purpose |
 | --- | --- |
-| [`config/testnet-public-bootstrap-observer.yml`](https://github.com/koinos/koinos-one/blob/main/config/testnet-public-bootstrap-observer.yml) | Testnet observer with public bootstrap settings. |
-| [`config/testnet-public-bootstrap-observer.container.yml`](https://github.com/koinos/koinos-one/blob/main/config/testnet-public-bootstrap-observer.container.yml) | Container testnet observer variant. |
-| [`config/mainnet-public-bootstrap-observer.yml`](https://github.com/koinos/koinos-one/blob/main/config/mainnet-public-bootstrap-observer.yml) | Mainnet observer with public bootstrap settings. |
-| [`config/prodnet-docker-producer.yml`](https://github.com/koinos/koinos-one/blob/main/config/prodnet-docker-producer.yml) | Guarded Docker producer template. |
+| [`config/testnet-public-bootstrap-observer.yml`](../config/testnet-public-bootstrap-observer.yml) | Testnet observer with public bootstrap settings. |
+| [`config/testnet-public-bootstrap-observer.container.yml`](../config/testnet-public-bootstrap-observer.container.yml) | Container testnet observer variant. |
+| [`config/mainnet-public-bootstrap-observer.yml`](../config/mainnet-public-bootstrap-observer.yml) | Mainnet observer with public bootstrap settings. |
+| [`config/prodnet-docker-producer.yml`](../config/prodnet-docker-producer.yml) | Guarded Docker producer template. |
 
 !!! warning "High-risk config write"
     Copying or editing a config file writes local operational policy. Review
@@ -82,7 +82,7 @@ Default feature state in the current binary:
 Use CLI disables for safe observer starts:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --disable block_producer grpc
@@ -173,7 +173,7 @@ backup:
 Validate backup config before relying on it:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-dry-run

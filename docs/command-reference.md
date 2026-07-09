@@ -6,8 +6,8 @@ and current operations docs. Replace paths with local values before running.
 ## Binary
 
 ```bash
-./node/teleno-node/build/teleno_node --version
-./node/teleno-node/build/teleno_node --help
+./build/teleno_node --version
+./build/teleno_node --help
 ```
 
 ## Safe Observer Start
@@ -16,7 +16,7 @@ and current operations docs. Replace paths with local values before running.
     Writes node state under `$BASEDIR`.
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --jsonrpc-listen 127.0.0.1:18122 \
@@ -37,7 +37,7 @@ curl -sS http://127.0.0.1:18122/ \
 Validate backup config:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-dry-run \
@@ -47,7 +47,7 @@ Validate backup config:
 List local backups:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-list \
@@ -57,7 +57,7 @@ List local backups:
 Create local backup:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-create-local \
@@ -67,7 +67,7 @@ Create local backup:
 Public restore list:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config config/testnet-public-bootstrap-observer.yml \
   --backup-public-list \
@@ -79,7 +79,7 @@ Public restore list:
     The restore command stages and activates database contents under `$BASEDIR`.
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-restore \
@@ -92,7 +92,7 @@ Public restore list:
 Print storage report:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --storage-report
@@ -102,7 +102,7 @@ Print storage report:
     Compaction changes local RocksDB files. Run with the node stopped.
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --compact-db \
@@ -115,7 +115,7 @@ Print storage report:
     This can sign and produce blocks when producer config is enabled and valid.
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --log-level info

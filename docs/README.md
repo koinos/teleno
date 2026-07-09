@@ -28,6 +28,8 @@ checks pass.
   option notes.
 - [Troubleshooting](troubleshooting.md) - failure modes and recovery-first
   actions.
+- [Release Builds](release-builds.md) - native release build identity and
+  versioning.
 
 ## Safety Model
 
@@ -51,15 +53,15 @@ bearer-token protected.
 The manual keeps workflows concise. For implementation details, start with
 these rendered manual references:
 
-- [Current Monolithic Node Architecture](../developers/deeper-references/monolith-architecture.md)
-- [Monolith Service Coverage](../developers/deeper-references/monolith-service-coverage.md)
+- [Current Monolithic Node Architecture](https://github.com/koinos/koinos-one/blob/main/docs/manual/developers/deeper-references/monolith-architecture.md)
+- [Monolith Service Coverage](https://github.com/koinos/koinos-one/blob/main/docs/manual/developers/deeper-references/monolith-service-coverage.md)
 
 Additional engineering source paths outside the manual source tree:
 
 - [`docs/current/backup-restore/NATIVE_BACKUP_CURRENT_IMPLEMENTATION.md`](https://github.com/koinos/koinos-one/blob/main/docs/current/backup-restore/NATIVE_BACKUP_CURRENT_IMPLEMENTATION.md)
 - [`docs/current/backup-restore/PUBLIC_BOOTSTRAP_RESTORE.md`](https://github.com/koinos/koinos-one/blob/main/docs/current/backup-restore/PUBLIC_BOOTSTRAP_RESTORE.md)
-- [`docs/operations/START_TELENO_NODE.md`](https://github.com/koinos/koinos-one/blob/main/docs/operations/START_TELENO_NODE.md)
-- [`docs/operations/TELENO_NODE_CONTAINER.md`](https://github.com/koinos/koinos-one/blob/main/docs/operations/TELENO_NODE_CONTAINER.md)
+- [`docs/operations/start-node.md`](operations/start-node.md)
+- [`docs/operations/container.md`](operations/container.md)
 
 ## Normal Workflow
 

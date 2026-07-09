@@ -8,7 +8,7 @@ enable production as the first response to a failure.
 Check repository build output:
 
 ```bash
-ls -l node/teleno-node/build/teleno_node
+ls -l build/teleno_node
 ```
 
 If it is missing, build:
@@ -20,7 +20,7 @@ If it is missing, build:
 For a focused rebuild:
 
 ```bash
-cmake --build node/teleno-node/build --target teleno_node --parallel
+cmake --build build --target teleno_node --parallel
 ```
 
 ## Wrong Config Or Basedir
@@ -35,7 +35,7 @@ Startup logs print the resolved paths:
 If the wrong config is loaded, stop the node and restart with explicit paths:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --disable block_producer
@@ -87,7 +87,7 @@ Check:
 Run:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --backup-dry-run \
@@ -117,7 +117,7 @@ Do not retry by deleting the active DB. Check:
 Fetch public objects without activation to isolate transport issues:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config config/testnet-public-bootstrap-observer.yml \
   --backup-public-fetch \
@@ -151,7 +151,7 @@ state merkle mismatch:
 Stop immediately and return to observer mode:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir "$BASEDIR" \
   --config "$BASEDIR/config.yml" \
   --disable block_producer
@@ -178,9 +178,7 @@ Do not solve token errors by exposing the admin API or disabling protection.
 
 Rebuild the native binary when:
 
-- source under
-  [`node/teleno-node/`](https://github.com/koinos/koinos-one/tree/main/node/teleno-node)
-  changed;
+- node source (`src/`, `cmake/`, `CMakeLists*`) changed;
 - dependency build scripts changed;
 - `teleno_node --help` does not include expected backup flags;
 - packaged verification reports a missing or stale native binary.
@@ -188,5 +186,5 @@ Rebuild the native binary when:
 Use:
 
 ```bash
-cmake --build node/teleno-node/build --target teleno_node --parallel
+cmake --build build --target teleno_node --parallel
 ```

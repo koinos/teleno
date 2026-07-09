@@ -8,7 +8,7 @@ Run all commands from the repository root:
 cd /Users/pgarcgo/code/koinos-one
 ```
 
-Build the node first if `node/teleno-node/build/teleno_node` does not exist:
+Build the node first if `build/teleno_node` does not exist:
 
 ```bash
 ./scripts/build-cpp-libp2p-koinos.sh
@@ -25,7 +25,7 @@ The prepared local testnet basedir is:
 Start testnet as an observer:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir /Users/pgarcgo/.kcli/teleno-testnet-producer/basedir \
   --log-level info \
   --enable p2p jsonrpc \
@@ -37,7 +37,7 @@ The current prepared testnet config has `features.block_producer: true`. Keep `-
 For an intentional testnet producer run:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir /Users/pgarcgo/.kcli/teleno-testnet-producer/basedir \
   --log-level info \
   --enable p2p jsonrpc
@@ -75,7 +75,7 @@ The restored mainnet basedir is:
 Start mainnet as an observer:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir /Volumes/external/knodel-monolith-restore/basedir \
   --config /Volumes/external/knodel-monolith-restore/basedir/config.yml \
   --log-level info \
@@ -95,7 +95,7 @@ curl -sS http://127.0.0.1:8080/ \
 To override the mainnet JSON-RPC port at launch:
 
 ```bash
-./node/teleno-node/build/teleno_node \
+./build/teleno_node \
   --basedir /Volumes/external/knodel-monolith-restore/basedir \
   --config /Volumes/external/knodel-monolith-restore/basedir/config.yml \
   --jsonrpc-listen 127.0.0.1:18122 \
