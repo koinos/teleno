@@ -3,7 +3,7 @@ set -euo pipefail
 export LC_ALL=C
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEPS_ROOT="${KOINOS_DEPS_ROOT:-$ROOT_DIR/.deps/teleno-node}"
+DEPS_ROOT="${KOINOS_DEPS_ROOT:-$ROOT_DIR/.deps}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
 
 GMP_VERSION="${GMP_VERSION:-6.3.0}"

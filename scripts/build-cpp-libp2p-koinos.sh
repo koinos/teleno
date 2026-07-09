@@ -3,8 +3,8 @@ set -euo pipefail
 export LC_ALL=C
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NODE_DIR="${NODE_DIR:-$ROOT_DIR/node/teleno-node}"
-DEPS_ROOT="${KOINOS_DEPS_ROOT:-$ROOT_DIR/.deps/teleno-node}"
+NODE_DIR="${NODE_DIR:-$ROOT_DIR}"
+DEPS_ROOT="${KOINOS_DEPS_ROOT:-$ROOT_DIR/.deps}"
 HUNTER_ROOT="${HUNTER_ROOT:-$DEPS_ROOT/hunter}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
 
