@@ -1,0 +1,11 @@
+# Native build artifacts
+build/
+build*/
+build-win/
+*.exe
+
+# Dependency builds
+.deps/
+
+# OS noise
+.DS_Store
