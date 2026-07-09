@@ -11,12 +11,47 @@ FetchContent_MakeAvailable(koinos_cmake)
 
 include("${koinos_cmake_SOURCE_DIR}/Koinos.cmake")
 
+file(READ "${CMAKE_CURRENT_LIST_DIR}/VERSION" TELENO_NODE_VERSION)
+string(STRIP "${TELENO_NODE_VERSION}" TELENO_NODE_VERSION)
+if(NOT TELENO_NODE_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$")
+  message(FATAL_ERROR "VERSION must contain SemVer without build metadata, got: ${TELENO_NODE_VERSION}")
+endif()
+string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" TELENO_NODE_CMAKE_VERSION "${TELENO_NODE_VERSION}")
+
 project(koinos_node
-  VERSION 0.1.0
+  VERSION ${TELENO_NODE_CMAKE_VERSION}
   DESCRIPTION "Koinos monolithic node — single binary replacing 12 microservices"
   LANGUAGES CXX C)
 
 koinos_define_version()
+
+set(KOINOS_NODE_GIT_COMMIT "unknown")
+set(KOINOS_NODE_DIRTY_SUFFIX "")
+find_package(Git QUIET)
+if(GIT_FOUND)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" rev-parse --short=12 HEAD
+    OUTPUT_VARIABLE KOINOS_NODE_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" status --porcelain
+    OUTPUT_VARIABLE KOINOS_NODE_GIT_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(KOINOS_NODE_GIT_STATUS)
+    set(KOINOS_NODE_DIRTY_SUFFIX "-dirty")
+  endif()
+endif()
+
+set(KOINOS_NODE_BUILD_VERSION "${TELENO_NODE_VERSION}+${KOINOS_NODE_GIT_COMMIT}${KOINOS_NODE_DIRTY_SUFFIX}")
+file(WRITE "${CMAKE_BINARY_DIR}/generated/git_version.h"
+  "#pragma once\n"
+  "#define KOINOS_NODE_VERSION \"${TELENO_NODE_VERSION}\"\n"
+  "#define KOINOS_NODE_RELEASE_TAG \"teleno-node-v${TELENO_NODE_VERSION}\"\n"
+  "#define KOINOS_NODE_GIT_COMMIT \"${KOINOS_NODE_GIT_COMMIT}\"\n"
+  "#define KOINOS_NODE_BUILD_VERSION \"${KOINOS_NODE_BUILD_VERSION}\"\n"
+  "static const char* git_version = KOINOS_NODE_BUILD_VERSION;\n")
 
 # ── Dependencies ──
 # Mirrors the monolith runtime deps. AMQP-only packages are intentionally
