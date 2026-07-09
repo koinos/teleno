@@ -39,6 +39,8 @@ jobs:
             teleno-deps-${{ runner.os }}-
 
       - name: Build teleno_node
+        env:
+          KOINOS_BUILD_TESTS: 'ON'
         run: ./scripts/build-cpp-libp2p-koinos.sh
 
       - name: Report version
@@ -48,6 +50,9 @@ jobs:
         run: |
           ./build/teleno_node --help >/tmp/teleno-node-help.txt
           grep -q -- "--backup-public-list" /tmp/teleno-node-help.txt
+
+      - name: Build tests
+        run: cmake --build build --parallel 4
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure

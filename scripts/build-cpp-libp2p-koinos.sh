@@ -342,7 +342,7 @@ cmake --install "$CPP_LIBP2P_BUILD_DIR"
 echo "==> Configuring teleno-node with cpp-libp2p"
 cmake -S "$NODE_DIR" -B "$KOINOS_NODE_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
-  -DKOINOS_BUILD_TESTS=OFF \
+  -DKOINOS_BUILD_TESTS="${KOINOS_BUILD_TESTS:-OFF}" \
   -DKOINOS_ENABLE_LIBP2P=ON \
   -DCMAKE_PROJECT_INCLUDE="$NODE_DIR/cmake/cpp-libp2p-koinos-prelude.cmake" \
   -DOPENSSL_ROOT_DIR="$KOINOS_HUNTER_PREFIX" \
