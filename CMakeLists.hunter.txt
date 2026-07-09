@@ -25,6 +25,11 @@ project(koinos_node
 
 koinos_define_version()
 
+option(KOINOS_BUILD_TESTS "Build koinos-node tests" ON)
+if(KOINOS_BUILD_TESTS)
+  enable_testing()
+endif()
+
 set(KOINOS_NODE_GIT_COMMIT "unknown")
 set(KOINOS_NODE_DIRTY_SUFFIX "")
 find_package(Git QUIET)
