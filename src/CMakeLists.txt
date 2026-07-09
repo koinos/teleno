@@ -458,6 +458,13 @@ if(KOINOS_ENABLE_LIBP2P)
       set_property(TARGET secp256k1-vrf::secp256k1-vrf PROPERTY
         INTERFACE_LINK_LIBRARIES "${GMP_LIBRARY}")
     endif()
+    # The libsecp256k1 import location is redirected to the VRF build above,
+    # which requires GMP; propagate it so static link order stays correct for
+    # every consumer (e.g. the libp2p live test executables on Linux).
+    if(TARGET libsecp256k1::secp256k1)
+      set_property(TARGET libsecp256k1::secp256k1 APPEND PROPERTY
+        INTERFACE_LINK_LIBRARIES "${GMP_LIBRARY}")
+    endif()
     target_link_libraries(koinos_p2p_lib PUBLIC "${GMP_LIBRARY}")
   endif()
 
