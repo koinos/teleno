@@ -1,5 +1,22 @@
 # Command Reference
 
+## Performance Benchmarks
+
+The transaction TPS harness is dry-run by default and consumes unique,
+pre-signed JSONL transactions:
+
+```bash
+python3 scripts/benchmark-transaction-tps.py \
+  --workload /path/to/workload.jsonl \
+  --concurrency 8 \
+  --target-tps 100 \
+  --max-transactions 500
+```
+
+See [Transaction TPS Benchmark](performance/transaction-tps-benchmark.md) for
+live-submission safety gates, inclusion verification, workload requirements,
+and result interpretation.
+
 These commands are validated against the current `teleno_node --help` surface
 and current operations docs. Replace paths with local values before running.
 

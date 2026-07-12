@@ -51,6 +51,9 @@ jobs:
           ./build/teleno_node --help >/tmp/teleno-node-help.txt
           grep -q -- "--backup-public-list" /tmp/teleno-node-help.txt
 
+      - name: Test transaction TPS benchmark
+        run: python3 -m unittest -v tests/scripts/benchmark_transaction_tps_test.py
+
       - name: Build tests
         run: cmake --build build --parallel 4
 

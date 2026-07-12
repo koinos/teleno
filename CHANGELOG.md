@@ -6,7 +6,12 @@ truth is the `VERSION` file at the repository root.
 
 ## [1.2.0-dev.0] - Unreleased
 
-Nothing yet.
+### Added
+
+- A dependency-free transaction TPS benchmark with bounded concurrent load,
+  target-rate pacing, admission and inclusion throughput, latency percentiles,
+  explicit chain-ID and confirmation gates, secret-free signed-workload input,
+  owner-only JSON/Markdown reports, and a simulated RPC test suite.
 
 ## [1.1.0] - 2026-07-09
 

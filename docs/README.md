@@ -30,6 +30,9 @@ checks pass.
   actions.
 - [Release Builds](release-builds.md) - native release build identity and
   versioning.
+- [Transaction TPS Benchmark](performance/transaction-tps-benchmark.md) -
+  safe, reproducible transaction admission and block-inclusion throughput
+  measurement.
 
 ## Safety Model
 
