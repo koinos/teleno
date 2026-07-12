@@ -33,6 +33,9 @@ checks pass.
 - [Transaction TPS Benchmark](performance/transaction-tps-benchmark.md) -
   safe, reproducible transaction admission and block-inclusion throughput
   measurement.
+- [TPS Optimization Assessment](performance/tps-optimization-assessment.md) -
+  measured bottlenecks, current-architecture optimization opportunities, and
+  the boundary where parallel execution would require a redesign.
 
 ## Safety Model
 

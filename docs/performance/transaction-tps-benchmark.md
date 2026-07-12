@@ -200,3 +200,7 @@ python3 -m unittest -v tests/scripts/benchmark_transaction_tps_test.py
 
 It covers dry-run isolation, concurrent accepted/confirmed TPS, secret and
 duplicate rejection, exact confirmation, and chain-ID mismatch blocking.
+
+See [TPS Optimization Assessment](tps-optimization-assessment.md) for the
+results of the first private-network execution and the resulting optimization
+priorities.
