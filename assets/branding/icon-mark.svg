@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Teleno mark</title>
+  <desc id="desc">Teleno monolithic node icon mark.</desc>
+  <rect width="1024" height="1024" fill="none"/>
+  <g transform="translate(188 242)" fill="none" stroke-linecap="butt" stroke-linejoin="miter">
+    <path d="M 139 225 A 185 185 0 0 1 509 225" stroke="#7f95aa" stroke-width="30"/>
+    <path d="M 35 452 L 324 160 L 613 452" stroke="#071625" stroke-width="56"/>
+  </g>
+</svg>

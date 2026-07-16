@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Teleno light icon</title>
+  <desc id="desc">Teleno app icon on a light rounded square.</desc>
+  <rect x="72" y="72" width="880" height="880" rx="116" fill="#ffffff"/>
+  <rect x="72" y="72" width="880" height="880" rx="116" fill="none" stroke="#edf2f6" stroke-width="2"/>
+  <g transform="translate(226 278)" fill="none" stroke-linecap="butt" stroke-linejoin="miter">
+    <path d="M 118 198 A 168 168 0 0 1 454 198" stroke="#7f95aa" stroke-width="28"/>
+    <path d="M 32 410 L 286 154 L 540 410" stroke="#071625" stroke-width="48"/>
+  </g>
+</svg>

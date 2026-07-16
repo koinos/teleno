@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Teleno dark icon</title>
+  <desc id="desc">Teleno app icon on a dark rounded square.</desc>
+  <defs>
+    <linearGradient id="bg" x1="120" y1="90" x2="880" y2="920" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#14283b"/>
+      <stop offset="1" stop-color="#06111c"/>
+    </linearGradient>
+  </defs>
+  <rect x="72" y="72" width="880" height="880" rx="116" fill="url(#bg)"/>
+  <g transform="translate(226 278)" fill="none" stroke-linecap="butt" stroke-linejoin="miter">
+    <path d="M 118 198 A 168 168 0 0 1 454 198" stroke="#c9d7e3" stroke-width="28"/>
+    <path d="M 32 410 L 286 154 L 540 410" stroke="#ffffff" stroke-width="48"/>
+  </g>
+</svg>

@@ -66,6 +66,8 @@ prerelease segment. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 - [docs/backup-restore-cli.md](docs/backup-restore-cli.md) — native backup/restore
 - [docs/rpc-endpoints.md](docs/rpc-endpoints.md) — JSON-RPC and gRPC surface
 - [docs/logs-and-diagnostics.md](docs/logs-and-diagnostics.md)
+- [assets/branding/README.md](assets/branding/README.md) — original Teleno logo,
+  icon variants, and visual identity notes
 
 ## Relationship to Koinos One
 
