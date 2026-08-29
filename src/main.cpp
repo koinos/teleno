@@ -39,6 +39,7 @@
 #include "core/config.hpp"
 #include "core/event_bus.hpp"
 #include "core/node_version.hpp"
+#include "core/restore_startup.hpp"
 #include "core/service_registry.hpp"
 
 #include "interfaces/i_block_store.hpp"
@@ -1549,20 +1550,27 @@ int main( int argc, char** argv )
       );
     }
 
-    // Backup restore detection — temporarily force verify-blocks
-    auto backup_marker = basedir / ".backup-just-restored";
-    bool force_verify  = false;
-    if( std::filesystem::exists( backup_marker ) )
+    // Backup restore detection keeps the first start observer-only. The
+    // configured verification mode remains authoritative: checked fast replay
+    // is safe for an explicitly selected verify-blocks=false profile.
+    const bool explicit_producer_activation =
+      std::find( enables.begin(), enables.end(), "block_producer" ) != enables.end();
+    const auto restore_policy =
+      node::apply_restore_startup_policy( cfg, basedir, explicit_producer_activation );
+    if( restore_policy.restore_marker_found )
     {
-      LOG( info ) << "[chain] Backup restore detected — enabling verify-blocks for merkle correction";
-      if( cfg.is_enabled( "block_producer" ) )
-        LOG( warning ) << "[block_producer] Backup restore first start detected — disabling block production for observer recovery";
-      cfg.features[ "block_producer" ] = false;
-      force_verify = true;
-      std::filesystem::remove( backup_marker );
+      LOG( info ) << "[chain] Backup restore detected — preserving configured verify-blocks="
+                  << ( restore_policy.verify_blocks ? "true" : "false" ) << " for observer recovery";
     }
+    if( restore_policy.producer_recovery_hold_active )
+      LOG( warning )
+        << "[block_producer] Restore recovery hold active — block production remains disabled; validate the observer, "
+           "then restart with --enable block_producer to release the hold";
+    else if( restore_policy.producer_recovery_hold_released )
+      LOG( warning )
+        << "[block_producer] Restore recovery hold released by explicit --enable block_producer";
 
-    bool effective_verify = cfg.verify_blocks || force_verify;
+    const bool effective_verify = cfg.verify_blocks;
 
     // Register chain component
     if( cfg.is_enabled( "chain" ) )
@@ -2069,14 +2077,36 @@ int main( int argc, char** argv )
       {
         chain::indexer idx( chain_ioc, controller, monolith_client, effective_verify );
         auto future = idx.index();
-        if( future.get() )
-          LOG( info ) << "[chain] Indexing complete";
-        else
-          LOG( warning ) << "[chain] Indexing returned false";
+        std::vector< std::thread > chain_workers;
+        chain_workers.reserve( std::max< uint64_t >( 1, cfg.chain_jobs ) );
+        bool indexing_complete = false;
+        try
+        {
+          for( uint64_t i = 0; i < std::max< uint64_t >( 1, cfg.chain_jobs ); ++i )
+            chain_workers.emplace_back( [ &chain_ioc ]() { chain_ioc.run(); } );
+          indexing_complete = future.get();
+        }
+        catch( ... )
+        {
+          chain_ioc.stop();
+          for( auto& worker: chain_workers )
+            worker.join();
+          throw;
+        }
+        chain_ioc.stop();
+        for( auto& worker: chain_workers )
+          worker.join();
+
+        if( !indexing_complete )
+          throw std::runtime_error( "indexing stopped before reaching the block-store head" );
+
+        LOG( info ) << "[chain] Indexing complete";
       }
       catch( const std::exception& e )
       {
-        LOG( warning ) << "[chain] Indexer: " << e.what();
+        LOG( error ) << "[chain] Indexer failed; refusing to enter ready state: " << e.what();
+        registry.stop_all();
+        return EXIT_FAILURE;
       }
     }
 

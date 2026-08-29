@@ -53,7 +53,7 @@ void test_open_initializes_metadata()
     assert( manager.column_family_count() == 9 );
     assert( manager.handle( ColumnFamily::blocks ) != nullptr );
     assert( manager.read_metadata( "layout.version" ) == "1" );
-    assert( manager.read_metadata( "layout.chain_storage" ) == "legacy" );
+    assert( manager.read_metadata( "layout.chain_storage" ) == "unified" );
     assert( manager.read_metadata( "layout.network" ) == "unknown" );
     assert( !manager.read_metadata( "layout.created_at" ).empty() );
     assert( !manager.read_metadata( "layout.created_by" ).empty() );
@@ -74,7 +74,7 @@ void test_open_initializes_metadata()
     manager.open( dir, test_config() );
 
     assert( manager.column_family_count() == 9 );
-    assert( manager.read_metadata( "layout.chain_storage" ) == "legacy" );
+    assert( manager.read_metadata( "layout.chain_storage" ) == "unified" );
     assert( manager.read_metadata( "test.marker" ) == "ok" );
   }
 

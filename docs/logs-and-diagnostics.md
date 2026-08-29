@@ -17,6 +17,11 @@ Look for:
 | `[runtime] Thread topology:` | Effective worker counts. |
 | `[chain] State DB opened` | Chain state storage opened. |
 | `[chain] Indexing complete` | Startup indexing finished. |
+| `[chain] Indexer failed; refusing to enter ready state:` | Startup catch-up was cancelled or failed validation. Components stop and the process exits non-zero without logging ready. |
+| `delta_replay_fallback height=... id=...` | A stored receipt failed its successor-root check and the block is being fully re-executed once. |
+| `Delta replay re-execution fallbacks: ...` | Number of controlled fallbacks during a completed fast-index run. |
+| `[block_producer] Restore recovery hold active ...` | Production is disabled until observer validation passes and a later explicit activation releases the hold. |
+| `[block_producer] Restore recovery hold released ...` | A post-validation restart explicitly requested `--enable block_producer`. |
 | `[node] teleno_node ready` | Runtime is ready for normal operation. |
 | `[metrics] head_height=...` | Periodic head, peer, mempool, and RSS metrics. |
 | `[node] teleno_node shutdown complete` | Clean shutdown completed. |
@@ -51,6 +56,23 @@ curl -sS http://127.0.0.1:18122/ \
 ```
 
 Run it more than once to confirm the head advances while syncing.
+
+When `verify-blocks: false`, a successful run may report the known controlled
+fallback at historical block 30,504,202. The exact historical signed-root scar
+at block 32,789,377 is accepted only for its immutable block/root triple and
+does not require fallback. The validated archive also contains 70,730 receipts
+from 34,686,822 through 35,526,515 whose duplicate key cannot be reconstructed
+by receipt replay; each is therefore fully re-executed once. Compare fallback
+counts and heights with the committed validation report. Any unclassified
+fallback, failed re-execution, or state-Merkle mismatch must be investigated
+before release or producer activation.
+
+If startup indexing is cancelled or fails, Teleno does not enter ready state.
+Preserve the state database and investigate the first indexer error; do not
+use the absence of a ready log as a reason to clear chain state.
+
+After restore, the `.backup-observer-recovery` file and the corresponding hold
+log line are expected. Their presence is a safety state, not a producer error.
 
 ## Storage Report
 

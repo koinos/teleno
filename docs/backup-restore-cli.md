@@ -193,6 +193,20 @@ After restore, start as an observer:
   --disable block_producer
 ```
 
+The restore marker preserves the configured `chain.verify-blocks` value. With
+`verify-blocks: false`, catch-up uses checked receipt replay with one-block
+lookahead and at most one full re-execution for a receipt that cannot reproduce
+the successor's signed root. With `verify-blocks: true`, every indexed block is
+fully executed. Neither mode repairs a bad state node that was already
+finalized inside the restored database.
+
+The first startup consumes `.backup-just-restored` and creates a persistent
+`.backup-observer-recovery` hold. While that hold exists, block production is
+disabled even if the restored config enables it. After the observer is caught
+up and every producer activation check passes, stop the node and explicitly
+restart with `--enable block_producer` to release the hold. That command is a
+high-risk production action; do not run it as part of restore automation.
+
 ## Delete Backups
 
 Delete is dry-run by default:
@@ -242,5 +256,22 @@ After restore:
 4. Wait for `[node] teleno_node ready`.
 5. Query `chain.get_head_info`.
 6. Confirm head height advances.
-7. Only then consider producer checks, if this basedir is intended for
-   production.
+7. Restart the observer and repeat the head and peer checks.
+8. Only then consider the full producer activation gate, if this basedir is
+   intended for production. The recovery hold remains active until an explicit
+   `--enable block_producer` restart.
+
+## Healthy Upgrade Versus Existing Corruption
+
+A healthy node can upgrade the binary in place. Preserve its database, start
+as an observer, and verify that it crosses the historical replay boundaries
+and continues advancing. No state deletion or forced resync is part of the
+upgrade.
+
+If an older binary already finalized incorrect state and the node still halts
+with a persistent state-Merkle mismatch after the upgrade, preserve the
+database and diagnostics. Start the corrected binary as an observer and use
+the documented recovery-first checks. If validation-based recovery cannot
+continue, rebuild chain state from the retained block store or restore a
+known-good backup. Moving or deleting state remains a separate operator action
+requiring explicit approval.

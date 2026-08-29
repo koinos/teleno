@@ -75,8 +75,9 @@ The Linux container workflow publishes the independent runtime image:
 ghcr.io/koinos/teleno
 ```
 
-The image is labelled with `org.opencontainers.image.version` from
-`VERSION`. The container smoke test runs:
+The native binary version comes from `VERSION`. The workflow adds standard OCI
+metadata labels from the Git ref/tag set, while the Dockerfile records the
+exact `VCS_REF` revision and `BUILD_DATE`. The container smoke test runs:
 
 ```bash
 docker run --rm teleno-node:ci --version
@@ -93,13 +94,20 @@ ghcr.io/koinos/teleno:beta
 
 The `beta` tag continues to track `main`.
 
-For local Docker builds that should carry the same OCI version label, pass the
-version file as a build argument:
+For local Docker builds, pass the exact Git revision so the binary build
+identity and the OCI revision label agree. The OCI version tag still comes
+from `VERSION`:
 
 ```bash
 TELENO_NODE_VERSION="$(tr -d '[:space:]' < VERSION)"
-docker build --build-arg TELENO_NODE_VERSION="$TELENO_NODE_VERSION" -t "teleno-node:${TELENO_NODE_VERSION}" .
+TELENO_COMMIT="$(git rev-parse HEAD)"
+docker build \
+  --build-arg VCS_REF="$TELENO_COMMIT" \
+  -t "teleno-node:${TELENO_NODE_VERSION}" .
 ```
+
+Use `--build-arg JOBS=1` on memory-constrained builders. The limit applies to
+the main build and nested Hunter dependency builds.
 
 ## Release Safety
 
@@ -113,6 +121,18 @@ their blast radius.
 - Confirm `VERSION` is the intended native SemVer.
 - Run focused native tests for changed components and broader CTest when shared
   behavior changed.
+- For replay-correctness releases, record checked and full historical replay
+  across blocks 30,504,202 and 32,789,377-32,789,378, the fallback count, exact
+  exception behavior, the audited duplicate-key receipt range, restart
+  checkpoints, and differential roots against the tagged reference
+  implementation.
+- For restore changes, verify that the persistent producer recovery hold
+  survives a restart, cannot be released on the first post-restore startup,
+  and is removed only by a later explicit `--enable block_producer` restart.
+- For this replay-correctness release, use the
+  [authorization-gated canary and handoff checklist](release-chain-v1.5.2-fast-replay-checklist.md).
+  Preparing that checklist does not authorize its deployment, publication,
+  producer, or Koinos One commands.
 - Confirm `teleno_node --version` matches `VERSION` plus the
   intended Git revision.
 - Confirm `teleno_node --help` exposes expected CLI surfaces.

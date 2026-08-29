@@ -1,0 +1,15 @@
+{
+ "id": "EiDwynE7SUkP9g9WNuKEj0insxyV9YMHSjDOfjyzXRVFJA==",
+ "header": {
+  "previous": "EiB7cfWfMI1eokMeSpGjmLrweGd+wEgVBjuCuEIrgaVLNg==",
+  "height": "30504202",
+  "timestamp": "1761911881080",
+  "previous_state_merkle_root": "EiDXC4CiywXCh5d7XBP2IPjHInMJUUOGutnB6eWLo7Eumw==",
+  "transaction_merkle_root": "EiDjsMRCmPwcFJr79MiZb7kkJ65B5GSbk0yklZkbeFK4VQ==",
+  "signer": "AOH6zwx+vZRrqq4RQwlXyXbo1YAyrWpOSw==",
+  "approved_proposals": [
+   "EiC/NbF5BlrYLRzRWo5yy0DRetxvqOd2OImDy+s1kNFJAw=="
+  ]
+ },
+ "signature": "ClEDQ3DsxPqGsEI7T9gSj7Nb9l4IGXNaF5MFMguiooetuwPmSKwHjX30r4MkaE+qtPNAJwXmuVO0FTHwZ11lF24lMOxOrvy5E9I6EoW1sKDjD70SIhIgACpPEN9lIvHRAvyUU3U2+tsl5QHaYUY1RSrPxtQtPOgaQR/hzK2seJzKiJ04cusEDz9VgKg+DhHoc6jyMCNRWoLg6nk0nDjoL7IxOjD2fcdFwmb876nughGAuNeb7S9zA/o2"
+}

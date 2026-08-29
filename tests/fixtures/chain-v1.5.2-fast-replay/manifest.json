@@ -1,0 +1,106 @@
+{
+  "format": 1,
+  "network": "Koinos mainnet",
+  "source": {
+    "rpc": "https://api.koinos.io",
+    "method": "block_store.get_blocks_by_height",
+    "retrieved_utc": "2026-08-28",
+    "note": "Public canonical data, cross-checked against the public RPC. The block fixtures are emitted directly from an archived block store opened read-only. The 30,504,202 receipt payload deliberately keeps only the first eight entries to reproduce the legacy persisted receipt before the two rectification writes were appended."
+  },
+  "receipts": [
+    {
+      "height": 30504202,
+      "block_id": "0x1220f0ca713b49490ff60f5636e2848f48a7b31c95f583074a30ce7e3cb35d154524",
+      "file": "block-30504202-incomplete-receipt.pb.base64",
+      "serialized_bytes": 1009,
+      "sha256": "c7013c114379dac717add9e5c350283715aa78ae389d8f113e8d44e0ab77d69c",
+      "entry_count": 8,
+      "put_count": 8,
+      "remove_count": 0,
+      "computed_root": "0x12207fb526273e706238cef899350facfd1ddcfa5e19ae352284be53e68d5c516f45",
+      "successor_height": 30504203,
+      "successor_block_id": "0x12208f0ab558a8d90c0abfd1075bc602b96658df29d088f075a396e7fcf21735cc5a",
+      "successor_signed_root": "0x12209d2d9592ddf831e892a5d4d38e93324f6834e255f84509b5e1c907ccfaa685e6",
+      "expected_action": "one full block reexecution"
+    },
+    {
+      "height": 32789377,
+      "block_id": "0x1220a97d7b0567ad55e3b04446a2bef447335cfd676668b069544b04a4719146d586",
+      "file": "block-32789377-honest-receipt.pb.base64",
+      "serialized_bytes": 2242,
+      "sha256": "2a4ad905226bcc119926c53e6521fed671cd10b1c54550ad90ee4c6e487a348a",
+      "entry_count": 12,
+      "put_count": 10,
+      "remove_count": 2,
+      "computed_root": "0x12203a22d59290a838dd49c87f57fe80319636950948f6b9aaf02287c03bb36e5f68",
+      "successor_height": 32789378,
+      "successor_block_id": "0x122086d9090d82fceb9900293bd3f870c4d2ac769682a85f997fd847f4f716a96344",
+      "successor_signed_root": "0x12209948b54dee01acd8528cf15dec02366b76e7739aedaf4487859bf6d0d182d690",
+      "expected_action": "accept exact consensus scar without fallback"
+    }
+  ],
+  "blocks": [
+    {
+      "height": 30504202,
+      "block_id": "0x1220f0ca713b49490ff60f5636e2848f48a7b31c95f583074a30ce7e3cb35d154524",
+      "file": "block-30504202.json",
+      "serialized_bytes": 768,
+      "sha256": "b8fa5b5fbb356d97cdce683e2908ef362565d673b4d4dc283ab02101d507468c",
+      "previous_block_id": "0x12207b71f59f308d5ea2431e4a91a398baf078677ec04815063b82b8422b81a54b36",
+      "previous_state_merkle_root": "0x1220d70b80a2cb05c287977b5c13f620f8c7227309514386bad9c1e9e58ba3b12e9b",
+      "purpose": "canonical block whose incomplete persisted receipt requires one full reexecution"
+    },
+    {
+      "height": 30504203,
+      "block_id": "0x12208f0ab558a8d90c0abfd1075bc602b96658df29d088f075a396e7fcf21735cc5a",
+      "file": "block-30504203.json",
+      "serialized_bytes": 768,
+      "sha256": "8c4268893525e09ae0d39e3fa8e1b8522169f4eec7eae3612dac0456d8d727fe",
+      "previous_block_id": "0x1220f0ca713b49490ff60f5636e2848f48a7b31c95f583074a30ce7e3cb35d154524",
+      "previous_state_merkle_root": "0x12209d2d9592ddf831e892a5d4d38e93324f6834e255f84509b5e1c907ccfaa685e6",
+      "purpose": "signed one-block lookahead expectation for block 30,504,202"
+    },
+    {
+      "height": 32789377,
+      "block_id": "0x1220a97d7b0567ad55e3b04446a2bef447335cfd676668b069544b04a4719146d586",
+      "file": "block-32789377.json",
+      "serialized_bytes": 683,
+      "sha256": "7ee7f986a89103fe9a753b9ae6fbe233b4d628883766b1e7e943b403c09999fb",
+      "previous_block_id": "0x122044622d4cade292dfbf1cc24ba069cd385107997e03fbc7475c5d89069a03a661",
+      "previous_state_merkle_root": "0x1220e4a6e321d41acff12f3d26fee110c53d92a9efb331547d1fd0d300c6c5d02dac",
+      "purpose": "canonical block whose honest receipt is the exact consensus scar"
+    },
+    {
+      "height": 32789378,
+      "block_id": "0x122086d9090d82fceb9900293bd3f870c4d2ac769682a85f997fd847f4f716a96344",
+      "file": "block-32789378.json",
+      "serialized_bytes": 683,
+      "sha256": "8e4086a9d37cadad6964a96d0c1653225d99de54b6d72e3b600c7807f5df189a",
+      "previous_block_id": "0x1220a97d7b0567ad55e3b04446a2bef447335cfd676668b069544b04a4719146d586",
+      "previous_state_merkle_root": "0x12209948b54dee01acd8528cf15dec02366b76e7739aedaf4487859bf6d0d182d690",
+      "purpose": "signed one-block lookahead expectation for block 32,789,377"
+    }
+  ],
+  "normal_neighbors": [
+    {
+      "height": 30504201,
+      "block_id": "0x12207b71f59f308d5ea2431e4a91a398baf078677ec04815063b82b8422b81a54b36",
+      "computed_and_signed_root": "0x1220d70b80a2cb05c287977b5c13f620f8c7227309514386bad9c1e9e58ba3b12e9b"
+    },
+    {
+      "height": 30504203,
+      "block_id": "0x12208f0ab558a8d90c0abfd1075bc602b96658df29d088f075a396e7fcf21735cc5a",
+      "computed_and_signed_root": "0x1220f73169eb40a9977cefbf0e64e95a07f12a1a4050bed0e765ed84e63d9606f088"
+    },
+    {
+      "height": 32789376,
+      "block_id": "0x122044622d4cade292dfbf1cc24ba069cd385107997e03fbc7475c5d89069a03a661",
+      "computed_and_signed_root": "0x1220e4a6e321d41acff12f3d26fee110c53d92a9efb331547d1fd0d300c6c5d02dac"
+    },
+    {
+      "height": 32789378,
+      "block_id": "0x122086d9090d82fceb9900293bd3f870c4d2ac769682a85f997fd847f4f716a96344",
+      "computed_and_signed_root": "0x1220fcbb38c16543c8c9b3ceb3a06b5ddf944d8574262df11f0e6dd8c9a53c68bdb2"
+    }
+  ]
+}

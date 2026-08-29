@@ -9,6 +9,8 @@ add_library(koinos_node_core
   core/config.hpp
   core/event_bus.hpp
   core/node_version.hpp
+  core/restore_startup.cpp
+  core/restore_startup.hpp
   core/rpc_access_policy.hpp
   core/service_registry.hpp)
 
@@ -509,6 +511,27 @@ if(KOINOS_BUILD_TESTS)
 
   add_test(NAME koinos_controller_delta_test COMMAND koinos_controller_delta_test)
 
+  add_executable(koinos_indexer_lookahead_test
+    ../tests/chain/indexer_lookahead_test.cpp)
+
+  target_link_libraries(koinos_indexer_lookahead_test PRIVATE
+    chain)
+
+  add_test(NAME koinos_indexer_lookahead_test COMMAND koinos_indexer_lookahead_test)
+
+  add_executable(koinos_historical_fast_replay_fixture_test
+    ../tests/chain/historical_fast_replay_fixture_test.cpp)
+
+  target_compile_definitions(koinos_historical_fast_replay_fixture_test PRIVATE
+    TELENO_FAST_REPLAY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../tests/fixtures/chain-v1.5.2-fast-replay")
+
+  target_link_libraries(koinos_historical_fast_replay_fixture_test PRIVATE
+    chain
+    nlohmann_json::nlohmann_json)
+
+  add_test(NAME koinos_historical_fast_replay_fixture_test
+    COMMAND koinos_historical_fast_replay_fixture_test)
+
   add_executable(koinos_rocksdb_manager_test
     ../tests/storage/rocksdb_manager_test.cpp)
 
@@ -524,6 +547,14 @@ if(KOINOS_BUILD_TESTS)
     koinos_state_db_local)
 
   add_test(NAME koinos_state_db_durability_test COMMAND koinos_state_db_durability_test)
+
+  add_executable(koinos_state_db_pending_root_test
+    ../tests/storage/state_db_pending_root_test.cpp)
+
+  target_link_libraries(koinos_state_db_pending_root_test PRIVATE
+    koinos_state_db_local)
+
+  add_test(NAME koinos_state_db_pending_root_test COMMAND koinos_state_db_pending_root_test)
 
   add_executable(koinos_backup_plan_test
     ../tests/backup/backup_plan_test.cpp)
@@ -647,6 +678,44 @@ if(KOINOS_BUILD_TESTS)
     target_link_libraries(koinos_libp2p_gossip_live_test PRIVATE
       koinos_p2p_lib)
   endif()
+
+  # The repository's native tests use assert() for their executable checks.
+  # Release configurations define NDEBUG globally, so explicitly re-enable
+  # assertions for test binaries only; production targets retain NDEBUG.
+  set(_teleno_asserting_test_targets
+    koinos_config_test
+    koinos_service_registry_test
+    koinos_controller_delta_test
+    koinos_indexer_lookahead_test
+    koinos_historical_fast_replay_fixture_test
+    koinos_rocksdb_manager_test
+    koinos_state_db_durability_test
+    koinos_state_db_pending_root_test
+    koinos_backup_plan_test
+    koinos_backup_checkpoint_test
+    koinos_backup_snapshot_test
+    koinos_backup_sftp_test
+    koinos_backup_public_restore_test
+    koinos_backup_service_test
+    koinos_backup_admin_server_test
+    koinos_gorpc_codec_test
+    koinos_p2p_one_peer_sync_test
+    koinos_block_producer_test
+    koinos_mempool_adapter_test
+    koinos_grpc_server_test)
+  if(KOINOS_ENABLE_LIBP2P)
+    list(APPEND _teleno_asserting_test_targets
+      koinos_libp2p_peer_rpc_live_test
+      koinos_libp2p_one_peer_sync_live_test
+      koinos_libp2p_gossip_live_test)
+  endif()
+  foreach(_teleno_test_target IN LISTS _teleno_asserting_test_targets)
+    if(MSVC)
+      target_compile_options(${_teleno_test_target} PRIVATE /UNDEBUG)
+    else()
+      target_compile_options(${_teleno_test_target} PRIVATE -UNDEBUG)
+    endif()
+  endforeach()
 endif()
 
 # ── Contract Meta Store library (Phase 4) ──
@@ -783,6 +852,21 @@ target_link_libraries(
       Koinos::crypto
       Koinos::util
       Koinos::exception
+      RocksDB::rocksdb
+      protobuf::libprotobuf)
+
+add_executable(koinos_historical_indexing_validator
+  ../tools/historical_indexing_validator.cpp)
+
+target_link_libraries(
+  koinos_historical_indexing_validator
+    PRIVATE
+      chain
+      koinos_block_store_lib
+      koinos_storage_lib
+      Koinos::log
+      Koinos::proto
+      Koinos::util
       RocksDB::rocksdb
       protobuf::libprotobuf)
 

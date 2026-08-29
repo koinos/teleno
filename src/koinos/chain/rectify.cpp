@@ -117,4 +117,27 @@ void maybe_rectify_state( execution_context& ctx, const protocol::block& block, 
   }
 }
 
+bool acceptable_rectified_previous_root( const std::string& parent_block_id,
+                                         const std::string& computed_parent_root,
+                                         const std::string& claimed_previous_root )
+{
+  // Mainnet block 32,789,377 has an honest 12-entry state delta, but block
+  // 32,789,378 permanently signed the 11-entry root produced by the legacy
+  // tombstone-dropping replay behavior. Keep the honest state and accept only
+  // this immutable (parent id, computed root, signed root) triple.
+  if( parent_block_id
+      == util::from_hex< std::string >(
+        "0x1220a97d7b0567ad55e3b04446a2bef447335cfd676668b069544b04a4719146d586" ) )
+  {
+    return computed_parent_root
+             == util::from_hex< std::string >(
+               "0x12203a22d59290a838dd49c87f57fe80319636950948f6b9aaf02287c03bb36e5f68" )
+        && claimed_previous_root
+             == util::from_hex< std::string >(
+               "0x12209948b54dee01acd8528cf15dec02366b76e7739aedaf4487859bf6d0d182d690" );
+  }
+
+  return false;
+}
+
 } // namespace koinos::chain

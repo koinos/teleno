@@ -99,6 +99,7 @@ global:
 
 chain:
   verify-blocks: true
+  jobs: 2
 
 p2p:
   listen: /ip4/0.0.0.0/tcp/18888
@@ -130,6 +131,29 @@ Common sections:
 | `backup` | native backup, local repository, SFTP, public restore, scheduler, admin API. |
 | `rocksdb` | cache, compression, block size, and background job tuning. |
 | `features` | component enablement. |
+
+`chain.jobs` selects the number of workers used by the dedicated startup
+indexing `io_context`. The default is `2`; `1` is supported and retains bounded
+nonblocking backpressure for block-store responses larger than the consumer
+queue.
+
+### Chain verification modes
+
+`chain.verify-blocks: true` re-executes every indexed block and remains the
+maximum-validation mode. `chain.verify-blocks: false` replays stored receipt
+deltas, but the fast path is still checked: block H remains pending until H+1
+provides the consensus-signed expectation for H's state-delta root. A receipt
+that cannot reproduce that expectation is discarded while still writable and
+the block is re-executed exactly once. Any mismatch after re-execution stops
+indexing.
+
+The repository profiles continue to select `verify-blocks: true`. After a
+native restore, `.backup-just-restored` establishes the persistent
+`.backup-observer-recovery` production hold. The hold keeps block production
+disabled across restarts without overriding the explicitly configured
+verification mode. After the observer validation gate passes, a deliberate
+restart with `--enable block_producer` releases the hold. The first startup
+after restore cannot release it.
 
 ## Ports And Listeners
 

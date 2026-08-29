@@ -68,6 +68,7 @@ public:
   std::timed_mutex& cv_mutex();
 
   crypto::multihash merkle_root() const;
+  crypto::multihash calculate_merkle_root() const;
   std::vector< protocol::state_delta_entry > get_delta_entries() const;
 
   const state_node_id& id() const;

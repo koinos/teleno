@@ -1,6 +1,7 @@
 #include <koinos/chain/indexer.hpp>
 
 #include <algorithm>
+#include <stdexcept>
 
 #include <koinos/chain/exceptions.hpp>
 #include <koinos/exception.hpp>
@@ -20,7 +21,8 @@ indexer::indexer( boost::asio::io_context& ioc, controller& c, std::shared_ptr< 
     _verify_blocks( verify_blocks ),
     _signals( ioc ),
     _request_queue( request_queue_size ),
-    _block_queue( block_queue_size )
+    _block_queue( block_queue_size ),
+    _block_queue_retry( ioc )
 {
   _signals.add( SIGINT );
   _signals.add( SIGTERM );
@@ -29,26 +31,41 @@ indexer::indexer( boost::asio::io_context& ioc, controller& c, std::shared_ptr< 
 #endif // defined(SIGQUIT)
 
   _signals.async_wait(
-    [ & ]( const boost::system::error_code& err, int num )
+    [ this ]( const boost::system::error_code& error, int )
     {
-      _stopped = true;
-
-      if( _complete.has_value() )
-      {
-        _complete->set_value( false );
-        _complete.reset();
-      }
-
-      _request_queue.close();
-      _block_queue.close();
+      if( !error )
+        stop();
     } );
+}
+
+void indexer::stop()
+{
+  std::lock_guard< std::mutex > lock( _completion_mutex );
+  if( _stopped.exchange( true ) )
+    return;
+
+  if( _complete )
+  {
+    _complete->set_value( false );
+    _complete.reset();
+  }
+
+  _request_queue.close();
+  _block_queue.close();
+  boost::system::error_code ignored;
+  {
+    std::lock_guard< std::mutex > retry_lock( _block_queue_retry_mutex );
+    _block_queue_retry.cancel( ignored );
+  }
 }
 
 void indexer::handle_error( const std::string& msg )
 {
-  _stopped = true;
+  std::lock_guard< std::mutex > lock( _completion_mutex );
+  if( _stopped.exchange( true ) )
+    return;
 
-  if( _complete.has_value() )
+  if( _complete )
   {
     _complete->set_exception( std::make_exception_ptr( indexer_failure_exception( msg ) ) );
     _complete.reset();
@@ -56,12 +73,24 @@ void indexer::handle_error( const std::string& msg )
 
   _request_queue.close();
   _block_queue.close();
+  boost::system::error_code ignored;
+  {
+    std::lock_guard< std::mutex > retry_lock( _block_queue_retry_mutex );
+    _block_queue_retry.cancel( ignored );
+  }
 }
 
 std::future< bool > indexer::index()
 {
-  boost::asio::post( std::bind( &indexer::prepare_index, this ) );
-  return _complete->get_future();
+  std::future< bool > result;
+  {
+    std::lock_guard< std::mutex > lock( _completion_mutex );
+    if( !_complete )
+      throw std::logic_error( "indexer cannot be started more than once" );
+    result = _complete->get_future();
+  }
+  boost::asio::post( _ioc, std::bind( &indexer::prepare_index, this ) );
+  return result;
 }
 
 void indexer::prepare_index()
@@ -98,14 +127,22 @@ void indexer::prepare_index()
     {
       LOG( info ) << "Indexing to target block - Height: " << _target_head.height()
                   << ", ID: " << util::to_hex( _target_head.id() );
-      boost::asio::post( std::bind( &indexer::send_requests, this, _start_head_info.head_topology().height(), 50 ) );
-      boost::asio::post( std::bind( &indexer::process_block, this ) );
+      boost::asio::post( _ioc,
+                         std::bind( &indexer::send_requests,
+                                    this,
+                                    _start_head_info.head_topology().height(),
+                                    50 ) );
+      boost::asio::post( _ioc, std::bind( &indexer::process_block, this ) );
     }
     else
     {
       LOG( info ) << "Chain state is synchronized with block store";
-      _complete->set_value( true );
-      _complete.reset();
+      std::lock_guard< std::mutex > lock( _completion_mutex );
+      if( _complete && !_stopped )
+      {
+        _complete->set_value( true );
+        _complete.reset();
+      }
     }
   }
   catch( const std::exception& e )
@@ -125,7 +162,7 @@ void indexer::send_requests( uint64_t last_height, uint64_t batch_size )
     if( _stopped )
       return;
 
-    if( last_height <= _target_head.height() )
+    if( last_height < _target_head.height() )
     {
       rpc::block_store::block_store_request req;
       auto* by_height_req = req.mutable_get_blocks_by_height();
@@ -148,7 +185,11 @@ void indexer::send_requests( uint64_t last_height, uint64_t batch_size )
       _requests_complete = true;
     }
 
-    boost::asio::dispatch( std::bind( &indexer::process_requests, this, last_height, batch_size ) );
+    boost::asio::dispatch( _ioc,
+                           std::bind( &indexer::process_requests,
+                                      this,
+                                      last_height,
+                                      batch_size ) );
   }
   catch( boost::sync_queue_is_closed& )
   {
@@ -191,13 +232,20 @@ void indexer::process_requests( uint64_t last_height, uint64_t batch_size )
     if( !resp.has_get_blocks_by_height() )
       return handle_error( "unexpected block store response" );
 
-    for( uint64_t i = 0; i < resp.get_blocks_by_height().block_items_size(); i++ )
-      _block_queue.push( std::move( *resp.mutable_get_blocks_by_height()->mutable_block_items( i ) ) );
+    {
+      std::lock_guard< std::mutex > response_lock( _response_mutex );
+      if( _response_active || !_response_blocks.empty() )
+        return handle_error( "block response staging invariant violated" );
 
-    boost::asio::post( std::bind( &indexer::send_requests,
-                                  this,
-                                  last_height + batch_size,
-                                  std::min( batch_size * 2, uint64_t( 1'000 ) ) ) );
+      _response_active     = true;
+      _response_height     = last_height;
+      _response_batch_size = batch_size;
+      for( uint64_t i = 0; i < resp.get_blocks_by_height().block_items_size(); i++ )
+        _response_blocks.push_back(
+          std::move( *resp.mutable_get_blocks_by_height()->mutable_block_items( i ) ) );
+    }
+
+    drain_response_blocks();
   }
   catch( boost::sync_queue_is_closed& )
   {
@@ -213,6 +261,45 @@ void indexer::process_requests( uint64_t last_height, uint64_t batch_size )
   }
 }
 
+void indexer::drain_response_blocks()
+{
+  std::optional< std::pair< uint64_t, uint64_t > > next_request;
+  {
+    std::lock_guard< std::mutex > response_lock( _response_mutex );
+    if( !_response_active )
+      return;
+
+    while( !_response_blocks.empty() )
+    {
+      const auto status = _block_queue.try_push_back( std::move( _response_blocks.front() ) );
+      if( status == boost::concurrent::queue_op_status::success )
+      {
+        _response_blocks.pop_front();
+        continue;
+      }
+      if( status == boost::concurrent::queue_op_status::full )
+        return;
+      if( status == boost::concurrent::queue_op_status::closed )
+        return;
+      throw std::runtime_error( "unexpected block queue status while staging a response" );
+    }
+
+    next_request = std::make_pair(
+      _response_height + _response_batch_size,
+      std::min( _response_batch_size * 2, uint64_t( 1'000 ) ) );
+    _response_active = false;
+  }
+
+  if( !_stopped && next_request )
+  {
+    boost::asio::post( _ioc,
+                       std::bind( &indexer::send_requests,
+                                  this,
+                                  next_request->first,
+                                  next_request->second ) );
+  }
+}
+
 void indexer::process_block()
 {
   try
@@ -222,17 +309,72 @@ void indexer::process_block()
 
     if( _request_processing_complete && _block_queue.empty() )
     {
+      // Linearize cancellation and the final lookahead commit. If stop() wins
+      // the completion lock, the pending block cannot advance the head.
+      std::lock_guard< std::mutex > completion_lock( _completion_mutex );
+      if( _stopped )
+        return;
+
+      if( _pending_item )
+      {
+        // The requested target has no successor in this batch. Apply it once
+        // without an expected root; the next live block checks its root.
+        _controller.apply_block_delta( _pending_item->block(), _pending_item->receipt(), _target_head.height() );
+        _pending_item.reset();
+      }
+
       const auto new_head_info                       = _controller.get_head_info();
       const std::chrono::duration< double > duration = std::chrono::system_clock::now() - _start_time;
       LOG( info ) << "Finished indexing "
                   << new_head_info.head_topology().height() - _start_head_info.head_topology().height()
                   << " blocks, took " << duration.count() << " seconds";
-      _complete->set_value( true );
-      _complete.reset();
+      if( !_verify_blocks )
+        LOG( info ) << "Delta replay re-execution fallbacks: " << _fallback_count;
+      if( _complete && !_stopped )
+      {
+        _complete->set_value( true );
+        _complete.reset();
+      }
       return;
     }
 
-    auto block_item = _block_queue.pull();
+    block_store::block_item block_item;
+    const auto queue_status = _block_queue.try_pull_front( block_item );
+    if( queue_status == boost::concurrent::queue_op_status::empty )
+    {
+      // Never block an io_context worker while the request pipeline is still
+      // filling the queue. A bounded asynchronous delay also avoids the hot
+      // repost loop that would otherwise consume every chain worker during a
+      // slow block-store read.
+      {
+        std::lock_guard< std::mutex > retry_lock( _block_queue_retry_mutex );
+        if( _stopped )
+          return;
+        _block_queue_retry.expires_after( std::chrono::milliseconds( 5 ) );
+        _block_queue_retry.async_wait(
+          [ this ]( const boost::system::error_code& error )
+          {
+            if( !error )
+              process_block();
+          } );
+      }
+      return;
+    }
+    if( queue_status == boost::concurrent::queue_op_status::closed )
+      return;
+    if( queue_status != boost::concurrent::queue_op_status::success )
+      return handle_error( "unexpected block queue status" );
+
+    // A successful pull created capacity for a block staged from the current
+    // response. This call never blocks and schedules the next request only
+    // after the staged response has been transferred in full.
+    drain_response_blocks();
+
+    // Serialize block application with stop(). An in-flight block may finish
+    // before stop() returns, but no block starts after cancellation wins.
+    std::lock_guard< std::mutex > completion_lock( _completion_mutex );
+    if( _stopped )
+      return;
 
     if( _verify_blocks )
     {
@@ -241,9 +383,20 @@ void indexer::process_block()
       _controller.submit_block( submit_block, _target_head.height() );
     }
     else
-      _controller.apply_block_delta( block_item.block(), block_item.receipt(), _target_head.height() );
+    {
+      if( _pending_item )
+      {
+        if( _controller.apply_block_delta_checked( _pending_item->block(),
+                                                   _pending_item->receipt(),
+                                                   block_item.block().header().previous_state_merkle_root(),
+                                                   _target_head.height() ) )
+          ++_fallback_count;
+      }
 
-    boost::asio::post( std::bind( &indexer::process_block, this ) );
+      _pending_item = std::move( block_item );
+    }
+
+    boost::asio::post( _ioc, std::bind( &indexer::process_block, this ) );
   }
   catch( boost::sync_queue_is_closed& )
   {

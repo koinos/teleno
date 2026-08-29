@@ -1,5 +1,6 @@
 #include "block_store/block_store.hpp"
 #include "koinos/chain/chain.pb.h"
+#include "koinos/chain/rectify.hpp"
 #include "koinos/chain/state.hpp"
 #include "koinos/state_db/backends/rocksdb/rocksdb_backend.hpp"
 #include "koinos/state_db/state_db.hpp"
@@ -33,9 +34,11 @@
 #include <iostream>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -91,6 +94,17 @@ struct ReplayStats
   uint64_t receipt_puts = 0;
   uint64_t receipt_removes = 0;
   uint64_t receipts_without_state_root = 0;
+  uint64_t ordinary_matching_blocks = 0;
+  uint64_t known_replayable_tombstone_blocks = 0;
+  uint64_t known_incomplete_receipt_fallback_blocks = 0;
+  uint64_t duplicate_key_receipt_blocks = 0;
+  uint64_t duplicate_key_receipt_keys = 0;
+  uint64_t duplicate_key_receipt_entries = 0;
+  uint64_t duplicate_key_replay_fallback_blocks = 0;
+  uint64_t first_duplicate_key_replay_fallback_height = 0;
+  uint64_t last_duplicate_key_replay_fallback_height = 0;
+  uint64_t exact_consensus_scar_blocks = 0;
+  uint64_t known_constant_mismatch_blocks = 0;
   uint64_t legacy_dropped_tombstone_blocks = 0;
   uint64_t legacy_dropped_tombstones = 0;
   uint64_t legacy_dropped_puts = 0;
@@ -183,6 +197,82 @@ std::string multihash_string( const koinos::crypto::multihash& value )
 std::string zero_multihash_string()
 {
   return multihash_string( koinos::crypto::multihash::zero( koinos::crypto::multicodec::sha2_256 ) );
+}
+
+enum class historical_case_kind
+{
+  replayable_tombstone,
+  incomplete_receipt,
+  consensus_scar
+};
+
+struct historical_case
+{
+  uint64_t height;
+  historical_case_kind kind;
+  const char* block_id;
+  const char* computed_root;
+  const char* signed_root;
+};
+
+const std::vector< historical_case >& historical_cases()
+{
+  // These values are immutable mainnet fingerprints. The three ordinary
+  // tombstone cases prove that preserved receipt removals reproduce the
+  // signed root. The remaining two are the only Chain v1.5.2 exceptions.
+  static const std::vector< historical_case > cases = {
+    { 30'488'259,
+      historical_case_kind::replayable_tombstone,
+      "0x1220b3b40956db24054353baceb370f2511325aa980fcfb95fb38bdec54593df5672",
+      "0x1220dde31efe92102c0ee09d39ae4784972defa9b9fe8b97aa9812cda91ba4367eeb",
+      "0x1220dde31efe92102c0ee09d39ae4784972defa9b9fe8b97aa9812cda91ba4367eeb" },
+    { 30'504'202,
+      historical_case_kind::incomplete_receipt,
+      "0x1220f0ca713b49490ff60f5636e2848f48a7b31c95f583074a30ce7e3cb35d154524",
+      "0x12207fb526273e706238cef899350facfd1ddcfa5e19ae352284be53e68d5c516f45",
+      "0x12209d2d9592ddf831e892a5d4d38e93324f6834e255f84509b5e1c907ccfaa685e6" },
+    { 32'770'789,
+      historical_case_kind::replayable_tombstone,
+      "0x1220e71404cefd0058f9d24fbad2b99c0606903029cfe819ce3b1bd2f103e4d510d1",
+      "0x12201b4e673db58a8662addc8ac081531e887f7b26b862eb0f194ab40195732103e7",
+      "0x12201b4e673db58a8662addc8ac081531e887f7b26b862eb0f194ab40195732103e7" },
+    { 32'789'377,
+      historical_case_kind::consensus_scar,
+      "0x1220a97d7b0567ad55e3b04446a2bef447335cfd676668b069544b04a4719146d586",
+      "0x12203a22d59290a838dd49c87f57fe80319636950948f6b9aaf02287c03bb36e5f68",
+      "0x12209948b54dee01acd8528cf15dec02366b76e7739aedaf4487859bf6d0d182d690" },
+    { 32'900'350,
+      historical_case_kind::replayable_tombstone,
+      "0x1220a85e1705c62c836a9fee421b0e8a88b5b1bd0c80efb1a0a44fabca5badd5e47d",
+      "0x1220f16bdb1e818fd47a8a7efd4d9be68b5185f01566ae989545f57ea4825be4cbb6",
+      "0x1220f16bdb1e818fd47a8a7efd4d9be68b5185f01566ae989545f57ea4825be4cbb6" }
+  };
+  return cases;
+}
+
+const historical_case* historical_case_at( uint64_t height )
+{
+  const auto& cases = historical_cases();
+  const auto it = std::find_if( cases.begin(), cases.end(),
+                                [ height ]( const auto& value ) { return value.height == height; } );
+  return it == cases.end() ? nullptr : &*it;
+}
+
+bool exact_historical_fingerprint( const historical_case& historical,
+                                   const std::string& block_id,
+                                   const std::string& computed_root,
+                                   const std::string& signed_root )
+{
+  return block_id == hex_to_bytes( historical.block_id )
+      && computed_root == hex_to_bytes( historical.computed_root )
+      && signed_root == hex_to_bytes( historical.signed_root );
+}
+
+bool audit_has_failures( const ReplayStats& stats )
+{
+  return stats.known_constant_mismatch_blocks
+      || stats.legacy_dropped_tombstone_blocks
+      || stats.unexplained_mismatch_blocks;
 }
 
 uint64_t parse_u64( const std::string& name, const std::string& value )
@@ -1885,6 +1975,95 @@ std::string compute_delta_entries_merkle_root(
     koinos::crypto::merkle_tree( koinos::crypto::multicodec::sha2_256, merkle_leafs ).root()->hash() );
 }
 
+struct replayed_delta_analysis
+{
+  std::string merkle_root;
+  uint64_t duplicate_keys = 0;
+  uint64_t duplicate_entries = 0;
+};
+
+replayed_delta_analysis analyze_replayed_delta_entries(
+  const google::protobuf::RepeatedPtrField< koinos::protocol::state_delta_entry >& entries,
+  const std::string* serialized_root = nullptr )
+{
+  // Model state_delta exactly. A put does not clear an earlier tombstone, while
+  // a preserved remove erases the pending value and records a tombstone. Most
+  // importantly, replaying a serialized receipt cannot reconstruct the
+  // duplicate key emitted when the original execution removed and then put the
+  // same key: both serialized entries contain the final value and collapse to
+  // one pending put during replay.
+  std::set< std::string > seen_keys;
+  std::set< std::string > duplicate_keys;
+  uint64_t duplicate_entries = 0;
+
+  for( const auto& entry: entries )
+  {
+    const auto key = database_key_string( chain_space( entry.object_space() ), entry.key() );
+    if( !seen_keys.insert( key ).second )
+    {
+      duplicate_keys.insert( key );
+      ++duplicate_entries;
+    }
+  }
+
+  if( duplicate_keys.empty() )
+  {
+    return {
+      .merkle_root = serialized_root ? *serialized_root : compute_delta_entries_merkle_root( entries ),
+      .duplicate_keys = 0,
+      .duplicate_entries = 0
+    };
+  }
+
+  std::map< std::string, std::string > pending_values;
+  std::set< std::string > pending_removes;
+  for( const auto& entry: entries )
+  {
+    const auto key = database_key_string( chain_space( entry.object_space() ), entry.key() );
+
+    if( entry.has_value() )
+      pending_values[ key ] = entry.value();
+    else
+    {
+      pending_values.erase( key );
+      pending_removes.insert( key );
+    }
+  }
+
+  google::protobuf::RepeatedPtrField< koinos::protocol::state_delta_entry > replayed_entries;
+  for( const auto& [ key, value ]: pending_values )
+  {
+    koinos::chain::database_key db_key;
+    if( !db_key.ParseFromString( key ) )
+      throw std::runtime_error( "could not decode replayed database key" );
+    auto* entry = replayed_entries.Add();
+    entry->mutable_object_space()->set_system( db_key.space().system() );
+    entry->mutable_object_space()->set_zone( db_key.space().zone() );
+    entry->mutable_object_space()->set_id( db_key.space().id() );
+    entry->set_key( db_key.key() );
+    entry->set_value( value );
+  }
+  for( const auto& key: pending_removes )
+  {
+    koinos::chain::database_key db_key;
+    if( !db_key.ParseFromString( key ) )
+      throw std::runtime_error( "could not decode replayed tombstone key" );
+    auto* entry = replayed_entries.Add();
+    entry->mutable_object_space()->set_system( db_key.space().system() );
+    entry->mutable_object_space()->set_zone( db_key.space().zone() );
+    entry->mutable_object_space()->set_id( db_key.space().id() );
+    entry->set_key( db_key.key() );
+    if( const auto value = pending_values.find( key ); value != pending_values.end() )
+      entry->set_value( value->second );
+  }
+
+  return {
+    .merkle_root = compute_delta_entries_merkle_root( replayed_entries ),
+    .duplicate_keys = duplicate_keys.size(),
+    .duplicate_entries = duplicate_entries
+  };
+}
+
 void prepare_scratch_dir( const Args& args )
 {
   const auto legacy_chain_dir = args.source_basedir.empty()
@@ -1933,7 +2112,9 @@ void apply_block_receipt( koinos::state_db::database& replay_db,
   }
 
   const auto parent_root = multihash_string( parent_node->merkle_root() );
-  if( block.header().previous_state_merkle_root() != parent_root )
+  if( block.header().previous_state_merkle_root() != parent_root
+      && !koinos::chain::acceptable_rectified_previous_root(
+        block.header().previous(), parent_root, block.header().previous_state_merkle_root() ) )
   {
     throw std::runtime_error( "block previous state merkle mismatch at height "
                               + std::to_string( block.header().height() )
@@ -2125,6 +2306,9 @@ ReplayStats run_replay( const Args& args )
         const std::string* payload = nullptr;
         JournalRecord record;
         std::string computed_root;
+        std::string replayed_root;
+        uint64_t duplicate_keys = 0;
+        uint64_t duplicate_entries = 0;
       };
 
       const std::size_t worker_limit = std::max( 1u, std::thread::hardware_concurrency() );
@@ -2176,6 +2360,12 @@ ReplayStats run_replay( const Args& args )
               candidate.record = decode_journal_record( *candidate.payload );
               candidate.computed_root =
                 compute_delta_entries_merkle_root( candidate.record.receipt.state_delta_entries() );
+              const auto replayed =
+                analyze_replayed_delta_entries(
+                  candidate.record.receipt.state_delta_entries(), &candidate.computed_root );
+              candidate.replayed_root = replayed.merkle_root;
+              candidate.duplicate_keys = replayed.duplicate_keys;
+              candidate.duplicate_entries = replayed.duplicate_entries;
             }
             catch( ... )
             {
@@ -2238,7 +2428,7 @@ ReplayStats run_replay( const Args& args )
 
             stats.final_height = height;
             stats.final_block_id = bytes_to_hex( selected->record.block_id );
-            stats.final_state_merkle_root = bytes_to_hex( selected->computed_root );
+            stats.final_state_merkle_root = bytes_to_hex( selected->replayed_root );
           }
           else
           {
@@ -2255,7 +2445,136 @@ ReplayStats run_replay( const Args& args )
               throw std::runtime_error( "replay journal is missing the canonical block at height "
                                         + std::to_string( height )
                                         + ": expected_id=" + bytes_to_hex( expected_id ) );
-            if( selected->computed_root != expected_root_above )
+          }
+
+          const auto* historical = historical_case_at( height );
+          if( selected->duplicate_keys )
+          {
+            ++stats.duplicate_key_receipt_blocks;
+            stats.duplicate_key_receipt_keys += selected->duplicate_keys;
+            stats.duplicate_key_receipt_entries += selected->duplicate_entries;
+          }
+
+          bool known_id_matches = true;
+          if( historical && selected->record.block_id != hex_to_bytes( historical->block_id ) )
+          {
+            known_id_matches = false;
+            ++stats.known_constant_mismatch_blocks;
+            if( logger )
+              logger->line( "known_history_constant_mismatch height=" + std::to_string( height )
+                            + " field=block_id"
+                            + " expected=" + historical->block_id
+                            + " actual=" + bytes_to_hex( selected->record.block_id ) );
+          }
+
+          if( have_expectations )
+          {
+            if( selected->replayed_root == expected_root_above )
+            {
+              if( historical && historical->kind == historical_case_kind::replayable_tombstone )
+              {
+                if( exact_historical_fingerprint( *historical,
+                                                  selected->record.block_id,
+                                                  selected->replayed_root,
+                                                  expected_root_above ) )
+                {
+                  ++stats.known_replayable_tombstone_blocks;
+                  if( logger )
+                    logger->line( "known_replayable_tombstone height=" + std::to_string( height )
+                                  + " block_id=" + bytes_to_hex( selected->record.block_id )
+                                  + " root=" + bytes_to_hex( selected->replayed_root ) );
+                }
+                else if( known_id_matches )
+                {
+                  ++stats.known_constant_mismatch_blocks;
+                  if( logger )
+                    logger->line( "known_history_constant_mismatch height=" + std::to_string( height )
+                                  + " field=matching_root"
+                                  + " expected=" + historical->computed_root
+                                  + " actual=" + bytes_to_hex( selected->replayed_root ) );
+                }
+              }
+              else if( historical && historical->kind == historical_case_kind::consensus_scar )
+              {
+                // The scar must keep the honest 12-entry root while its child
+                // keeps the different legacy root. Equality here means the
+                // fixture/source no longer represents the immutable triple.
+                if( known_id_matches )
+                {
+                  ++stats.known_constant_mismatch_blocks;
+                  if( logger )
+                    logger->line( "known_history_constant_mismatch height=" + std::to_string( height )
+                                  + " field=consensus_scar_roots_unexpectedly_equal"
+                                  + " actual=" + bytes_to_hex( selected->replayed_root ) );
+                }
+              }
+              else if( historical && historical->kind == historical_case_kind::incomplete_receipt )
+              {
+                // A matching root means this source no longer contains the
+                // documented incomplete receipt, so it cannot prove the
+                // one-time fallback behavior required by this audit.
+                if( known_id_matches )
+                {
+                  ++stats.known_constant_mismatch_blocks;
+                  if( logger )
+                    logger->line( "known_history_constant_mismatch height=" + std::to_string( height )
+                                  + " field=incomplete_receipt_unexpectedly_matches"
+                                  + " expected_computed=" + historical->computed_root
+                                  + " actual=" + bytes_to_hex( selected->replayed_root ) );
+                }
+              }
+              else
+              {
+                ++stats.ordinary_matching_blocks;
+              }
+            }
+            else if( selected->duplicate_keys
+                     && selected->computed_root == expected_root_above )
+            {
+              ++stats.duplicate_key_replay_fallback_blocks;
+              if( !stats.first_duplicate_key_replay_fallback_height
+                  || height < stats.first_duplicate_key_replay_fallback_height )
+                stats.first_duplicate_key_replay_fallback_height = height;
+              stats.last_duplicate_key_replay_fallback_height = std::max(
+                stats.last_duplicate_key_replay_fallback_height, height );
+              if( logger )
+                logger->line( "duplicate_key_replay_fallback height=" + std::to_string( height )
+                              + " duplicate_keys=" + std::to_string( selected->duplicate_keys )
+                              + " duplicate_entries=" + std::to_string( selected->duplicate_entries )
+                              + " block_id=" + bytes_to_hex( selected->record.block_id )
+                              + " serialized_root=" + bytes_to_hex( selected->computed_root )
+                              + " replayed_root=" + bytes_to_hex( selected->replayed_root )
+                              + " signed_root=" + bytes_to_hex( expected_root_above ) );
+            }
+            else if( historical
+                     && historical->kind == historical_case_kind::incomplete_receipt
+                     && exact_historical_fingerprint( *historical,
+                                                      selected->record.block_id,
+                                                      selected->replayed_root,
+                                                      expected_root_above ) )
+            {
+              ++stats.known_incomplete_receipt_fallback_blocks;
+              if( logger )
+                logger->line( "known_incomplete_receipt_fallback height=" + std::to_string( height )
+                              + " block_id=" + bytes_to_hex( selected->record.block_id )
+                              + " receipt_root=" + bytes_to_hex( selected->replayed_root )
+                              + " signed_root=" + bytes_to_hex( expected_root_above ) );
+            }
+            else if( historical
+                     && historical->kind == historical_case_kind::consensus_scar
+                     && exact_historical_fingerprint( *historical,
+                                                      selected->record.block_id,
+                                                      selected->replayed_root,
+                                                      expected_root_above ) )
+            {
+              ++stats.exact_consensus_scar_blocks;
+              if( logger )
+                logger->line( "exact_consensus_scar height=" + std::to_string( height )
+                              + " block_id=" + bytes_to_hex( selected->record.block_id )
+                              + " honest_root=" + bytes_to_hex( selected->replayed_root )
+                              + " signed_root=" + bytes_to_hex( expected_root_above ) );
+            }
+            else
             {
               // Documented legacy semantics: nodes of that era excluded some
               // recorded entries from the delta Merkle computation — removes
@@ -2281,7 +2600,7 @@ ReplayStats run_replay( const Args& args )
                   for( int i = 0; i < entries.size(); ++i )
                     if( !( mask & ( 1u << i ) ) )
                       *kept.Add() = entries[ i ];
-                  if( compute_delta_entries_merkle_root( kept ) == expected_root_above )
+                  if( analyze_replayed_delta_entries( kept ).merkle_root == expected_root_above )
                   {
                     legacy_match = true;
                     matched_mask = mask;
@@ -2289,7 +2608,18 @@ ReplayStats run_replay( const Args& args )
                 }
               }
 
-              if( !legacy_match )
+              if( historical && known_id_matches )
+              {
+                ++stats.known_constant_mismatch_blocks;
+                if( logger )
+                  logger->line( "known_history_constant_mismatch height=" + std::to_string( height )
+                                + " field=root_triple"
+                                + " expected_computed=" + historical->computed_root
+                                + " actual_computed=" + bytes_to_hex( selected->replayed_root )
+                                + " expected_signed=" + historical->signed_root
+                                + " actual_signed=" + bytes_to_hex( expected_root_above ) );
+              }
+              else if( !legacy_match )
               {
                 // No recorded-entry subset reproduces the consensus root. The
                 // likely cause is the inverse legacy failure: the receipt lost
@@ -2302,7 +2632,7 @@ ReplayStats run_replay( const Args& args )
                 if( logger )
                   logger->line( "unexplained_state_root_mismatch height=" + std::to_string( height )
                                 + " expected=" + bytes_to_hex( expected_root_above )
-                                + " actual=" + bytes_to_hex( selected->computed_root )
+                                + " actual=" + bytes_to_hex( selected->replayed_root )
                                 + " delta_entries=" + std::to_string( entries.size() )
                                 + " removes=" + std::to_string( total_removes )
                                 + " block_id=" + bytes_to_hex( selected->record.block_id ) );
@@ -2325,6 +2655,8 @@ ReplayStats run_replay( const Args& args )
                                     + ":key=" + bytes_to_hex( entries[ i ].key() );
                 }
 
+                // Any additional subset-dropping root is an unexpected
+                // consensus exception. Inventory it, but make the audit fail.
                 ++stats.legacy_dropped_tombstone_blocks;
                 stats.legacy_dropped_tombstones += dropped_removes;
                 stats.legacy_dropped_puts += dropped_puts;
@@ -2350,12 +2682,12 @@ ReplayStats run_replay( const Args& args )
           {
             ++stats.receipts_without_state_root;
           }
-          else if( selected->record.receipt.state_merkle_root() != selected->computed_root )
+          else if( selected->record.receipt.state_merkle_root() != selected->replayed_root )
           {
             throw std::runtime_error( "block receipt state merkle mismatch at height "
                                       + std::to_string( height )
                                       + ": expected=" + bytes_to_hex( selected->record.receipt.state_merkle_root() )
-                                      + " actual=" + bytes_to_hex( selected->computed_root ) );
+                                      + " actual=" + bytes_to_hex( selected->replayed_root ) );
           }
 
           for( const auto& delta_entry: selected->record.receipt.state_delta_entries() )
@@ -2397,7 +2729,25 @@ ReplayStats run_replay( const Args& args )
       {
         logger->line( "run_complete blocks_checked=" + std::to_string( stats.blocks_checked )
                       + " receipt_delta_entries=" + std::to_string( stats.receipt_delta_entries )
+                      + " ordinary_matching_blocks=" + std::to_string( stats.ordinary_matching_blocks )
+                      + " known_replayable_tombstone_blocks="
+                      + std::to_string( stats.known_replayable_tombstone_blocks )
+                      + " known_incomplete_receipt_fallback_blocks="
+                      + std::to_string( stats.known_incomplete_receipt_fallback_blocks )
+                      + " duplicate_key_receipt_blocks="
+                      + std::to_string( stats.duplicate_key_receipt_blocks )
+                      + " duplicate_key_replay_fallback_blocks="
+                      + std::to_string( stats.duplicate_key_replay_fallback_blocks )
+                      + " first_duplicate_key_replay_fallback_height="
+                      + std::to_string( stats.first_duplicate_key_replay_fallback_height )
+                      + " last_duplicate_key_replay_fallback_height="
+                      + std::to_string( stats.last_duplicate_key_replay_fallback_height )
+                      + " exact_consensus_scar_blocks=" + std::to_string( stats.exact_consensus_scar_blocks )
+                      + " known_constant_mismatch_blocks="
+                      + std::to_string( stats.known_constant_mismatch_blocks )
                       + " legacy_dropped_tombstone_blocks=" + std::to_string( stats.legacy_dropped_tombstone_blocks )
+                      + " unexplained_mismatch_blocks="
+                      + std::to_string( stats.unexplained_mismatch_blocks )
                       + " final_height=" + std::to_string( stats.final_height )
                       + " final_block_id=" + stats.final_block_id
                       + " final_state_merkle_root=" + stats.final_state_merkle_root );
@@ -2524,6 +2874,27 @@ ReplayStats run_replay( const Args& args )
     {
       logger->line( "run_complete blocks_checked=" + std::to_string( stats.blocks_checked )
                     + " receipt_delta_entries=" + std::to_string( stats.receipt_delta_entries )
+                    + " ordinary_matching_blocks=" + std::to_string( stats.ordinary_matching_blocks )
+                    + " known_replayable_tombstone_blocks="
+                    + std::to_string( stats.known_replayable_tombstone_blocks )
+                    + " known_incomplete_receipt_fallback_blocks="
+                    + std::to_string( stats.known_incomplete_receipt_fallback_blocks )
+                    + " duplicate_key_receipt_blocks="
+                    + std::to_string( stats.duplicate_key_receipt_blocks )
+                    + " duplicate_key_replay_fallback_blocks="
+                    + std::to_string( stats.duplicate_key_replay_fallback_blocks )
+                    + " first_duplicate_key_replay_fallback_height="
+                    + std::to_string( stats.first_duplicate_key_replay_fallback_height )
+                    + " last_duplicate_key_replay_fallback_height="
+                    + std::to_string( stats.last_duplicate_key_replay_fallback_height )
+                    + " exact_consensus_scar_blocks="
+                    + std::to_string( stats.exact_consensus_scar_blocks )
+                    + " known_constant_mismatch_blocks="
+                    + std::to_string( stats.known_constant_mismatch_blocks )
+                    + " legacy_dropped_tombstone_blocks="
+                    + std::to_string( stats.legacy_dropped_tombstone_blocks )
+                    + " unexplained_mismatch_blocks="
+                    + std::to_string( stats.unexplained_mismatch_blocks )
                     + " final_height=" + std::to_string( stats.final_height )
                     + " final_block_id=" + stats.final_block_id
                     + " final_state_merkle_root=" + stats.final_state_merkle_root );
@@ -2541,8 +2912,8 @@ ReplayStats run_replay( const Args& args )
 void print_text_result( const Args& args, const ReplayStats& stats )
 {
   const auto replay_mode = args.state_db_replay ? "height-index-state-db" : "direct-delta-root";
-  std::cout << ( stats.unexplained_mismatch_blocks
-                   ? "state delta replay audit: completed with unexplained mismatches\n"
+  std::cout << ( audit_has_failures( stats )
+                   ? "state delta replay audit: completed with historical validation failures\n"
                    : "state delta replay audit: ok\n" )
             << "source_db: " << args.source_db.string() << '\n'
             << "scratch_state_dir: " << args.scratch_state_dir.string() << '\n'
@@ -2561,6 +2932,21 @@ void print_text_result( const Args& args, const ReplayStats& stats )
             << "receipt_puts: " << stats.receipt_puts << '\n'
             << "receipt_removes: " << stats.receipt_removes << '\n'
             << "receipts_without_state_root: " << stats.receipts_without_state_root << '\n'
+            << "ordinary_matching_blocks: " << stats.ordinary_matching_blocks << '\n'
+            << "known_replayable_tombstone_blocks: " << stats.known_replayable_tombstone_blocks << '\n'
+            << "known_incomplete_receipt_fallback_blocks: "
+            << stats.known_incomplete_receipt_fallback_blocks << '\n'
+            << "duplicate_key_receipt_blocks: " << stats.duplicate_key_receipt_blocks << '\n'
+            << "duplicate_key_receipt_keys: " << stats.duplicate_key_receipt_keys << '\n'
+            << "duplicate_key_receipt_entries: " << stats.duplicate_key_receipt_entries << '\n'
+            << "duplicate_key_replay_fallback_blocks: "
+            << stats.duplicate_key_replay_fallback_blocks << '\n'
+            << "first_duplicate_key_replay_fallback_height: "
+            << stats.first_duplicate_key_replay_fallback_height << '\n'
+            << "last_duplicate_key_replay_fallback_height: "
+            << stats.last_duplicate_key_replay_fallback_height << '\n'
+            << "exact_consensus_scar_blocks: " << stats.exact_consensus_scar_blocks << '\n'
+            << "known_constant_mismatch_blocks: " << stats.known_constant_mismatch_blocks << '\n'
             << "legacy_dropped_tombstone_blocks: " << stats.legacy_dropped_tombstone_blocks << '\n'
             << "legacy_dropped_tombstones: " << stats.legacy_dropped_tombstones << '\n'
             << "legacy_dropped_puts: " << stats.legacy_dropped_puts << '\n'
@@ -2574,7 +2960,7 @@ void print_json_result( const Args& args, const ReplayStats& stats )
 {
   const auto replay_mode = args.state_db_replay ? "height-index-state-db" : "direct-delta-root";
   std::cout << "{\n"
-            << "  \"ok\": " << ( stats.unexplained_mismatch_blocks ? "false" : "true" ) << ",\n"
+            << "  \"ok\": " << ( audit_has_failures( stats ) ? "false" : "true" ) << ",\n"
             << "  \"source_db\": \"" << json_escape( args.source_db.string() ) << "\",\n"
             << "  \"scratch_state_dir\": \"" << json_escape( args.scratch_state_dir.string() ) << "\",\n"
             << "  \"replay_mode\": \"" << replay_mode << "\",\n"
@@ -2598,6 +2984,22 @@ void print_json_result( const Args& args, const ReplayStats& stats )
             << "  \"receipt_puts\": " << stats.receipt_puts << ",\n"
             << "  \"receipt_removes\": " << stats.receipt_removes << ",\n"
             << "  \"receipts_without_state_root\": " << stats.receipts_without_state_root << ",\n"
+            << "  \"ordinary_matching_blocks\": " << stats.ordinary_matching_blocks << ",\n"
+            << "  \"known_replayable_tombstone_blocks\": "
+            << stats.known_replayable_tombstone_blocks << ",\n"
+            << "  \"known_incomplete_receipt_fallback_blocks\": "
+            << stats.known_incomplete_receipt_fallback_blocks << ",\n"
+            << "  \"duplicate_key_receipt_blocks\": " << stats.duplicate_key_receipt_blocks << ",\n"
+            << "  \"duplicate_key_receipt_keys\": " << stats.duplicate_key_receipt_keys << ",\n"
+            << "  \"duplicate_key_receipt_entries\": " << stats.duplicate_key_receipt_entries << ",\n"
+            << "  \"duplicate_key_replay_fallback_blocks\": "
+            << stats.duplicate_key_replay_fallback_blocks << ",\n"
+            << "  \"first_duplicate_key_replay_fallback_height\": "
+            << stats.first_duplicate_key_replay_fallback_height << ",\n"
+            << "  \"last_duplicate_key_replay_fallback_height\": "
+            << stats.last_duplicate_key_replay_fallback_height << ",\n"
+            << "  \"exact_consensus_scar_blocks\": " << stats.exact_consensus_scar_blocks << ",\n"
+            << "  \"known_constant_mismatch_blocks\": " << stats.known_constant_mismatch_blocks << ",\n"
             << "  \"legacy_dropped_tombstone_blocks\": " << stats.legacy_dropped_tombstone_blocks << ",\n"
             << "  \"legacy_dropped_tombstones\": " << stats.legacy_dropped_tombstones << ",\n"
             << "  \"legacy_dropped_puts\": " << stats.legacy_dropped_puts << ",\n"
@@ -2629,9 +3031,9 @@ int main( int argc, char** argv )
       print_json_result( args, stats );
     else
       print_text_result( args, stats );
-    // Unexplained mismatches complete the inventory run but must not read as
-    // a clean audit; exit 2 distinguishes them from hard failures (exit 1).
-    return stats.unexplained_mismatch_blocks ? 2 : EXIT_SUCCESS;
+    // Historical mismatches complete the inventory run but must not read as a
+    // clean audit; exit 2 distinguishes them from hard failures (exit 1).
+    return audit_has_failures( stats ) ? 2 : EXIT_SUCCESS;
   }
   catch( const std::exception& e )
   {

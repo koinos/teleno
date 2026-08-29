@@ -141,9 +141,21 @@ same session without a fresh reviewed plan.
 ## After Restore
 
 Native restore writes markers that force observer-first recovery on next start
-and disables block production during that first recovery run. Keep that
-behavior. Start as an observer, verify database health and network state, then
-repeat the full producer activation gate before producing again.
+and creates a persistent `.backup-observer-recovery` hold. Block production
+stays disabled across restarts until the observer validation gate passes. The
+first post-restore startup cannot release the hold. After validation, stop the
+observer and use the following deliberate restart to release it and activate
+the already-reviewed producer configuration:
+
+```bash
+./build/teleno_node \
+  --basedir "$BASEDIR" \
+  --config "$BASEDIR/config.yml" \
+  --enable block_producer
+```
+
+This command can sign and produce blocks. Do not run it until every activation
+check in this guide passes.
 
 ## Out Of Scope
 

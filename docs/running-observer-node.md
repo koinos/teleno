@@ -29,7 +29,9 @@ diagnostics, and public RPC backends.
 ```
 
 The node logs enabled features, thread topology, storage layout, indexing
-status, P2P activity, metrics, and readiness.
+status, P2P activity, metrics, and readiness. It enters ready state only after
+startup indexing reaches the block-store head; cancellation or validation
+failure stops startup and exits non-zero.
 
 ## Background Start
 

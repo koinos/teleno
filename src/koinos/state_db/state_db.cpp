@@ -104,6 +104,7 @@ public:
   int64_t put_object( const object_space& space, const object_key& key, const object_value* val );
   int64_t remove_object( const object_space& space, const object_key& key, bool preserve_tombstone = false );
   crypto::multihash merkle_root() const;
+  crypto::multihash pending_merkle_root() const;
   std::vector< protocol::state_delta_entry > get_delta_entries() const;
 
   state_delta_ptr _state;
@@ -1154,6 +1155,11 @@ crypto::multihash state_node_impl::merkle_root() const
   return _state->merkle_root();
 }
 
+crypto::multihash state_node_impl::pending_merkle_root() const
+{
+  return _state->calculate_merkle_root();
+}
+
 std::vector< protocol::state_delta_entry > state_node_impl::get_delta_entries() const
 {
   return _state->get_delta_entries();
@@ -1212,7 +1218,7 @@ crypto::multihash abstract_state_node::merkle_root() const
 
 crypto::multihash abstract_state_node::pending_merkle_root() const
 {
-  return _impl->merkle_root();
+  return _impl->pending_merkle_root();
 }
 
 std::vector< protocol::state_delta_entry > abstract_state_node::get_delta_entries() const

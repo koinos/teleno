@@ -1,19 +1,26 @@
 #include "koinos/chain/controller.hpp"
+#include "koinos/chain/rectify.hpp"
 #include "koinos/chain/state.hpp"
 #include "koinos/state_db/backends/map/map_backend.hpp"
 #include "koinos/state_db/state_db.hpp"
 
+#include <koinos/crypto/elliptic.hpp>
 #include <koinos/crypto/merkle_tree.hpp>
 #include <koinos/protocol/protocol.pb.h>
 #include <koinos/util/base58.hpp>
 #include <koinos/util/conversion.hpp>
+#include <koinos/util/hex.hpp>
+#include <koinos/varint.hpp>
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <functional>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 using namespace koinos;
@@ -22,13 +29,120 @@ namespace {
 
 const std::string kfs_contract_id = "1A5BmMqV5jN5zBrdkhQumAfDZBzXLPBeN9";
 
+crypto::private_key block_signing_key()
+{
+  return crypto::private_key::regenerate(
+    crypto::hash( crypto::multicodec::sha2_256, std::string( "teleno checked replay test seed" ) ) );
+}
+
 chain::genesis_data make_genesis()
 {
   chain::genesis_data genesis;
   auto* entry = genesis.add_entries();
   *entry->mutable_space() = chain::state::space::metadata();
   entry->set_key( chain::state::key::genesis_key );
-  entry->set_value( "test-genesis-key" );
+  entry->set_value( block_signing_key().get_public_key().to_address_bytes() );
+
+  chain::resource_limit_data resource_limits;
+  resource_limits.set_disk_storage_cost( 10 );
+  resource_limits.set_disk_storage_limit( 409'600 );
+  resource_limits.set_network_bandwidth_cost( 5 );
+  resource_limits.set_network_bandwidth_limit( 1'048'576 );
+  resource_limits.set_compute_bandwidth_cost( 1 );
+  resource_limits.set_compute_bandwidth_limit( 100'000'000 );
+
+  entry = genesis.add_entries();
+  *entry->mutable_space() = chain::state::space::metadata();
+  entry->set_key( chain::state::key::resource_limit_data );
+  entry->set_value( util::converter::as< std::string >( resource_limits ) );
+
+  chain::max_account_resources max_resources;
+  max_resources.set_value( 10'000'000 );
+  entry = genesis.add_entries();
+  *entry->mutable_space() = chain::state::space::metadata();
+  entry->set_key( chain::state::key::max_account_resources );
+  entry->set_value( util::converter::as< std::string >( max_resources ) );
+
+  const std::map< std::string, uint64_t > thunk_compute = {
+    { "apply_block", 16'465 },
+    { "apply_call_contract_operation", 685 },
+    { "apply_set_system_call_operation", 136'081 },
+    { "apply_set_system_contract_operation", 8'692 },
+    { "apply_transaction", 12'542 },
+    { "apply_upload_contract_operation", 3'130 },
+    { "call", 3'573 },
+    { "check_authority", 12'653 },
+    { "check_system_authority", 12'750 },
+    { "consume_account_rc", 735 },
+    { "consume_block_resources", 753 },
+    { "deserialize_message_per_byte", 1 },
+    { "deserialize_multihash_base", 102 },
+    { "deserialize_multihash_per_byte", 404 },
+    { "event", 1'222 },
+    { "event_per_impacted", 101 },
+    { "exit", 11'636 },
+    { "get_account_nonce", 821 },
+    { "get_account_rc", 1'072 },
+    { "get_arguments", 809 },
+    { "get_block", 1'134 },
+    { "get_block_field", 1'417 },
+    { "get_caller", 825 },
+    { "get_chain_id", 1'046 },
+    { "get_contract_id", 778 },
+    { "get_head_info", 2'099 },
+    { "get_last_irreversible_block", 772 },
+    { "get_next_object", 11'181 },
+    { "get_object", 1'054 },
+    { "get_operation", 1'081 },
+    { "get_prev_object", 15'445 },
+    { "get_resource_limits", 1'227 },
+    { "get_transaction", 1'584 },
+    { "get_transaction_field", 1'530 },
+    { "hash", 1'570 },
+    { "keccak_256_base", 1'406 },
+    { "keccak_256_per_byte", 1 },
+    { "log", 738 },
+    { "object_serialization_per_byte", 1 },
+    { "post_block_callback", 741 },
+    { "post_transaction_callback", 721 },
+    { "pre_block_callback", 730 },
+    { "pre_transaction_callback", 729 },
+    { "process_block_signature", 4'499 },
+    { "put_object", 1'057 },
+    { "recover_public_key", 29'630 },
+    { "remove_object", 893 },
+    { "ripemd_160_base", 1'343 },
+    { "ripemd_160_per_byte", 1 },
+    { "set_account_nonce", 749 },
+    { "sha1_base", 1'151 },
+    { "sha1_per_byte", 1 },
+    { "sha2_256_base", 1'385 },
+    { "sha2_256_per_byte", 1 },
+    { "sha2_512_base", 1'445 },
+    { "sha2_512_per_byte", 1 },
+    { "verify_account_nonce", 822 },
+    { "verify_merkle_root", 1 },
+    { "verify_signature", 762 },
+    { "verify_vrf_proof", 144'067 },
+  };
+
+  chain::compute_bandwidth_registry registry;
+  for( const auto& [ name, compute ]: thunk_compute )
+  {
+    auto* compute_entry = registry.add_entries();
+    compute_entry->set_name( name );
+    compute_entry->set_compute( compute );
+  }
+  entry = genesis.add_entries();
+  *entry->mutable_space() = chain::state::space::metadata();
+  entry->set_key( chain::state::key::compute_bandwidth_registry );
+  entry->set_value( util::converter::as< std::string >( registry ) );
+
+  entry = genesis.add_entries();
+  *entry->mutable_space() = chain::state::space::metadata();
+  entry->set_key( chain::state::key::block_hash_code );
+  entry->set_value( util::converter::as< std::string >(
+    unsigned_varint{ std::underlying_type_t< crypto::multicodec >( crypto::multicodec::sha2_256 ) } ) );
   return genesis;
 }
 
@@ -155,9 +269,34 @@ protocol::block make_block()
   block.mutable_header()->set_previous(
     util::converter::as< std::string >( crypto::multihash::zero( crypto::multicodec::sha2_256 ) ) );
   block.mutable_header()->set_previous_state_merkle_root( genesis_merkle_root() );
-  block.mutable_header()->set_timestamp( 1'000 );
+  block.mutable_header()->set_timestamp( std::chrono::duration_cast< std::chrono::milliseconds >(
+                                           std::chrono::system_clock::now().time_since_epoch() )
+                                           .count() );
   block.set_id( util::converter::as< std::string >(
     crypto::hash( crypto::multicodec::sha2_256, block.header() ) ) );
+  return block;
+}
+
+protocol::block make_signed_block( uint64_t height,
+                                   const std::string& previous,
+                                   const std::string& previous_root,
+                                   uint64_t timestamp )
+{
+  protocol::block block;
+  block.mutable_header()->set_height( height );
+  block.mutable_header()->set_previous( previous );
+  block.mutable_header()->set_previous_state_merkle_root( previous_root );
+  block.mutable_header()->set_timestamp( timestamp );
+
+  const std::vector< crypto::multihash > transaction_hashes;
+  block.mutable_header()->set_transaction_merkle_root( util::converter::as< std::string >(
+    crypto::merkle_tree( crypto::multicodec::sha2_256, transaction_hashes ).root()->hash() ) );
+  block.set_id( util::converter::as< std::string >(
+    crypto::hash( crypto::multicodec::sha2_256, block.header() ) ) );
+
+  auto signer = block_signing_key();
+  block.set_signature( util::converter::as< std::string >(
+    signer.sign_compact( util::converter::to< crypto::multihash >( block.id() ) ) ) );
   return block;
 }
 
@@ -307,11 +446,111 @@ void test_apply_block_delta_preserves_absent_remove_tombstone()
   const auto block   = make_block();
   const auto receipt = make_receipt( block, entry );
 
+  controller.apply_block_delta( block, receipt, 1 );
+  assert( controller.get_head_info().head_topology().id() == block.id() );
+  assert( controller.get_head_info().head_state_merkle_root() == receipt.state_merkle_root() );
+}
+
+void test_exact_historical_root_exception()
+{
+  const auto block_id = util::from_hex< std::string >(
+    "0x1220a97d7b0567ad55e3b04446a2bef447335cfd676668b069544b04a4719146d586" );
+  const auto honest_root = util::from_hex< std::string >(
+    "0x12203a22d59290a838dd49c87f57fe80319636950948f6b9aaf02287c03bb36e5f68" );
+  const auto signed_root = util::from_hex< std::string >(
+    "0x12209948b54dee01acd8528cf15dec02366b76e7739aedaf4487859bf6d0d182d690" );
+
+  assert( chain::acceptable_rectified_previous_root( block_id, honest_root, signed_root ) );
+
+  auto changed_block = block_id;
+  changed_block.back() ^= 0x01;
+  assert( !chain::acceptable_rectified_previous_root( changed_block, honest_root, signed_root ) );
+
+  auto changed_honest_root = honest_root;
+  changed_honest_root.back() ^= 0x01;
+  assert( !chain::acceptable_rectified_previous_root( block_id, changed_honest_root, signed_root ) );
+
+  auto changed_signed_root = signed_root;
+  changed_signed_root.back() ^= 0x01;
+  assert( !chain::acceptable_rectified_previous_root( block_id, honest_root, changed_signed_root ) );
+}
+
+protocol::block_receipt tampered_receipt( protocol::block_receipt receipt )
+{
+  receipt.clear_state_merkle_root();
+  auto* extra_remove = receipt.add_state_delta_entries();
+  extra_remove->mutable_object_space()->set_system( true );
+  extra_remove->set_key( "checked-replay-extra-remove" );
+  return receipt;
+}
+
+void test_checked_replay_clean_fallback_and_halt()
+{
+  chain::controller source;
+  open_controller( source );
+
+  const auto now = std::chrono::duration_cast< std::chrono::milliseconds >(
+                     std::chrono::system_clock::now().time_since_epoch() )
+                     .count();
+  const auto zero_id = util::converter::as< std::string >(
+    crypto::multihash::zero( crypto::multicodec::sha2_256 ) );
+
+  const auto block_1 = make_signed_block(
+    1,
+    zero_id,
+    source.get_head_info().head_state_merkle_root(),
+    now );
+  rpc::chain::submit_block_request request_1;
+  *request_1.mutable_block() = block_1;
+  const auto receipt_1       = source.submit_block( request_1, 2 ).receipt();
+  assert( !receipt_1.state_merkle_root().empty() );
+
+  const auto block_2 = make_signed_block(
+    2,
+    block_1.id(),
+    source.get_head_info().head_state_merkle_root(),
+    now + 1'000 );
+  rpc::chain::submit_block_request request_2;
+  *request_2.mutable_block() = block_2;
+  const auto receipt_2       = source.submit_block( request_2, 2 ).receipt();
+  assert( !receipt_2.state_merkle_root().empty() );
+
+  chain::controller replay;
+  open_controller( replay );
+  assert( !replay.apply_block_delta_checked( block_1, receipt_1, receipt_1.state_merkle_root(), 2 ) );
+  assert( replay.get_head_info().head_topology().id() == block_1.id() );
+  assert( replay.get_head_info().head_state_merkle_root() == receipt_1.state_merkle_root() );
+
+  assert( replay.apply_block_delta_checked(
+    block_2,
+    tampered_receipt( receipt_2 ),
+    receipt_2.state_merkle_root(),
+    2 ) );
+  assert( replay.get_head_info().head_topology().id() == block_2.id() );
+  assert( replay.get_head_info().head_state_merkle_root() == receipt_2.state_merkle_root() );
+
+  chain::controller halt;
+  open_controller( halt );
+  const auto unreachable_root = util::converter::as< std::string >(
+    crypto::hash( crypto::multicodec::sha2_256, std::string( "unreachable checked replay root" ) ) );
   assert_throws_with(
     [&]() {
-      controller.apply_block_delta( block, receipt, 1 );
+      halt.apply_block_delta_checked( block_1, tampered_receipt( receipt_1 ), unreachable_root, 2 );
     },
-    "compute bandwidth registry does not exist" );
+    "re-executed block does not reproduce the consensus state merkle root" );
+  assert( halt.get_head_info().head_topology().height() == 0 );
+  assert( halt.get_head_info().head_topology().id() == zero_id );
+  assert( halt.get_head_info().head_state_merkle_root() == genesis_merkle_root() );
+
+  // The rejected writable node must be gone and the last validated parent
+  // must remain usable for a later correct attempt.
+  assert( !halt.apply_block_delta_checked(
+    block_1,
+    receipt_1,
+    receipt_1.state_merkle_root(),
+    2 ) );
+  assert( halt.get_head_info().head_topology().id() == block_1.id() );
+  assert( halt.get_head_info().head_state_merkle_root() == receipt_1.state_merkle_root() );
 }
 
 void test_transient_contract_state_delta_requires_preserved_tombstone()
@@ -391,7 +630,10 @@ void test_kfs_project_order_delta_requires_preserved_tombstone()
   assert( !transient_order->has_value() );
   assert( final_order->has_value() );
   assert( final_order->value() == final_order_entry );
-  assert( chain_space( final_order->object_space() ) == space );
+  const auto final_order_space = chain_space( final_order->object_space() );
+  assert( final_order_space.system() == space.system() );
+  assert( final_order_space.zone() == space.zone() );
+  assert( final_order_space.id() == space.id() );
 
   auto normal_replay_node = parent->create_anonymous_node();
   apply_delta_entries( normal_replay_node, receipt_entries, false );
@@ -409,6 +651,8 @@ int main()
   test_apply_block_delta_rejects_parent_state_merkle_mismatch();
   test_apply_block_delta_rejects_receipt_state_merkle_mismatch();
   test_apply_block_delta_preserves_absent_remove_tombstone();
+  test_exact_historical_root_exception();
+  test_checked_replay_clean_fallback_and_halt();
   test_transient_contract_state_delta_requires_preserved_tombstone();
   test_kfs_project_order_delta_requires_preserved_tombstone();
   return 0;

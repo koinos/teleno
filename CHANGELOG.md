@@ -4,7 +4,7 @@ All notable changes to the Teleno node runtime are documented in this file.
 Release tags use the form `teleno-node-v<version>`; the version source of
 truth is the `VERSION` file at the repository root.
 
-## [1.2.0-dev.0] - Unreleased
+## [1.2.0] - 2026-08-29
 
 ### Added
 
@@ -12,6 +12,32 @@ truth is the `VERSION` file at the repository root.
   target-rate pacing, admission and inclusion throughput, latency percentiles,
   explicit chain-ID and confirmation gates, secret-free signed-workload input,
   owner-only JSON/Markdown reports, and a simulated RPC test suite.
+- Trustworthy fast receipt replay matching `koinos-chain v1.5.2`: fresh
+  writable-node Merkle roots, tombstone-preserving delta application,
+  successor-header validation, at most one controlled full-execution fallback
+  per invalid receipt, and the exact historical mainnet state-root exception.
+
+### Changed
+
+- Fast indexing now retains one pending block so every replayed historical
+  block with an available successor is validated before finalization. Empty
+  replay queues wait asynchronously without blocking or hot polling, all
+  handlers use the configured chain executor, and oversized block-store
+  responses use bounded nonblocking backpressure so catch-up also progresses
+  with one chain worker. Startup now refuses to enter ready state if indexing
+  is cancelled or fails before reaching the block-store head.
+- The state-delta audit now models receipt replay semantics for duplicate keys
+  and inventories the resulting full-execution fallbacks separately from
+  consensus exceptions and unexplained mismatches.
+- Observer-first restore startup preserves the explicitly configured
+  `verify-blocks` mode instead of claiming that forced full verification can
+  repair state already finalized by an older binary. A persistent recovery
+  hold now keeps block production disabled across restarts until a later
+  explicit `--enable block_producer` activation.
+- Container builds now propagate the requested parallel-job limit through
+  nested dependency builds and embed an explicitly supplied hexadecimal
+  `VCS_REF` in the native binary, keeping its version identity aligned with
+  the OCI revision label even when the build context excludes `.git`.
 
 ## [1.1.0] - 2026-07-09
 

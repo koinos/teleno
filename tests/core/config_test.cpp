@@ -1,5 +1,6 @@
 #include "core/config.hpp"
 #include "core/rpc_access_policy.hpp"
+#include "core/restore_startup.hpp"
 
 #include <cassert>
 #include <cstdlib>
@@ -26,6 +27,61 @@ std::filesystem::path write_config( const std::string& content )
 
 int main()
 {
+  {
+    const auto dir = std::filesystem::temp_directory_path()
+                     / ( "teleno-restore-startup-test-" + std::to_string( std::rand() ) );
+    std::filesystem::create_directories( dir );
+
+    NodeConfig cfg;
+    cfg.verify_blocks = false;
+    cfg.features[ "block_producer" ] = true;
+
+    auto result = apply_restore_startup_policy( cfg, dir );
+    assert( !result.restore_marker_found );
+    assert( cfg.is_enabled( "block_producer" ) );
+    assert( !cfg.verify_blocks );
+
+    std::ofstream( dir / ".backup-just-restored" ).close();
+    result = apply_restore_startup_policy( cfg, dir );
+    assert( result.restore_marker_found );
+    assert( result.producer_recovery_hold_active );
+    assert( result.block_producer_was_enabled );
+    assert( !result.verify_blocks );
+    assert( !cfg.is_enabled( "block_producer" ) );
+    assert( !cfg.verify_blocks );
+    assert( !std::filesystem::exists( dir / ".backup-just-restored" ) );
+    assert( std::filesystem::exists( dir / ".backup-observer-recovery" ) );
+
+    cfg.features[ "block_producer" ] = true;
+    result = apply_restore_startup_policy( cfg, dir );
+    assert( !result.restore_marker_found );
+    assert( result.producer_recovery_hold_active );
+    assert( !result.producer_recovery_hold_released );
+    assert( !cfg.is_enabled( "block_producer" ) );
+
+    cfg.features[ "block_producer" ] = true;
+    result = apply_restore_startup_policy( cfg, dir, true );
+    assert( !result.restore_marker_found );
+    assert( !result.producer_recovery_hold_active );
+    assert( result.producer_recovery_hold_released );
+    assert( cfg.is_enabled( "block_producer" ) );
+    assert( !std::filesystem::exists( dir / ".backup-observer-recovery" ) );
+
+    cfg.verify_blocks = true;
+    cfg.features[ "block_producer" ] = true;
+    std::ofstream( dir / ".backup-just-restored" ).close();
+    result = apply_restore_startup_policy( cfg, dir, true );
+    assert( result.restore_marker_found );
+    assert( result.producer_recovery_hold_active );
+    assert( !result.producer_recovery_hold_released );
+    assert( result.block_producer_was_enabled );
+    assert( result.verify_blocks );
+    assert( !cfg.is_enabled( "block_producer" ) );
+    assert( cfg.verify_blocks );
+
+    std::filesystem::remove_all( dir );
+  }
+
   {
     auto path = write_config( R"(
 global:

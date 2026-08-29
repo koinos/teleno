@@ -128,9 +128,11 @@ Fetch public objects without activation to isolate transport issues:
 ## Restore Activated But Node Is Not Producing
 
 That is expected. Native restore forces observer-first recovery and disables
-block production for the first start after restore. Start as an observer,
-verify database and network health, then repeat the producer activation gate if
-this basedir is intended to produce.
+block production across restarts through `.backup-observer-recovery`. Start as
+an observer, verify database and network health, restart and verify again, then
+repeat the producer activation gate if this basedir is intended to produce.
+Only a later explicit `--enable block_producer` restart releases the hold; the
+first startup after restore cannot release it.
 
 ## Persistent Merkle Mismatch
 
@@ -145,6 +147,19 @@ state merkle mismatch:
 - Attempt validation-based recovery first.
 - Move or delete state only after explicit operator approval and evidence that
   recovery failed.
+
+The corrected fast-replay path can repair an incomplete stored receipt before
+that block is finalized. It cannot rewrite an incorrect state node that an
+older binary already finalized. A healthy pre-upgrade database should be kept
+and upgraded in place. For an already-corrupt database, retain both state and
+block-store data, retry with the corrected binary in observer mode, and only
+then use the documented known-good restore or block-store rebuild workflow.
+
+An unexplained mismatch after a block's single replay fallback is a stop
+condition; do not add an ignore-mismatch option or repeatedly restart past the
+causal block. Multiple independently validated blocks may each require one
+fallback; compare their heights and aggregate count with the committed
+validation report.
 
 ## Producer Key Or Address Looks Wrong
 

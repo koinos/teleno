@@ -36,6 +36,13 @@ checks pass.
 - [TPS Optimization Assessment](performance/tps-optimization-assessment.md) -
   measured bottlenecks, current-architecture optimization opportunities, and
   the boundary where parallel execution would require a redesign.
+- [Chain v1.5.2 Fast Replay Correctness Implementation Plan](implementation/chain-v1.5.2-fast-replay-plan.md) -
+  implementation and validation work for tombstone-preserving checked replay,
+  one-block lookahead, one-time re-execution, and the exact historical
+  state-root exception.
+- [Chain v1.5.2 Fast Replay Release Checklist](release-chain-v1.5.2-fast-replay-checklist.md) -
+  authorization-gated observer canary, native/container publication, consumer
+  handoff, and producer rollout commands.
 
 ## Safety Model
 

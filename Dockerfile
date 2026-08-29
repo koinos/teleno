@@ -47,7 +47,13 @@ RUN --mount=type=cache,target=/opt/teleno-deps,sharing=locked \
     scripts/build-zstd-static.sh \
     scripts/build-gmp-static.sh \
     scripts/build-libssh-static.sh \
-    && JOBS="${JOBS}" ./scripts/build-cpp-libp2p-koinos.sh \
+    && if [[ "${VCS_REF}" =~ ^[0-9A-Fa-f]{7,40}$ ]]; then \
+         export TELENO_GIT_COMMIT_OVERRIDE="${VCS_REF:0:12}"; \
+       fi \
+    && CMAKE_BUILD_PARALLEL_LEVEL="${JOBS}" \
+       HUNTER_JOBS_NUMBER="${JOBS}" \
+       JOBS="${JOBS}" \
+       ./scripts/build-cpp-libp2p-koinos.sh \
     && install -Dm755 "${KOINOS_NODE_BUILD_DIR}/teleno_node" /out/teleno_node \
     && /out/teleno_node --version
 

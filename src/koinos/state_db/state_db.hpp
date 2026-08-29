@@ -115,8 +115,9 @@ public:
   /**
    * Return the merkle root of writes on this state node without requiring finalization.
    *
-   * This is intended for validation paths that must reject a writable node before
-   * it is finalized into the fork graph.
+   * Unlike merkle_root(), the value is computed fresh on every call and never cached,
+   * so it remains correct if the node is mutated afterwards. This is intended for
+   * validation paths that must reject a writable node before finalization.
    */
   crypto::multihash pending_merkle_root() const;
 

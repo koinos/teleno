@@ -5,13 +5,13 @@ This image packages the Linux `teleno_node` runtime so an operator can run or bo
 The GitHub Actions workflow publishes to GitHub Container Registry:
 
 ```text
-ghcr.io/pgarciagon/teleno-node
+ghcr.io/koinos/teleno
 ```
 
 The default rolling test image tag is:
 
 ```bash
-docker pull ghcr.io/pgarciagon/teleno-node:beta
+docker pull ghcr.io/koinos/teleno:beta
 ```
 
 ## Build Locally
@@ -22,6 +22,30 @@ docker run --rm teleno-node:local --version
 ```
 
 The Docker build uses `scripts/build-cpp-libp2p-koinos.sh`, so the container binary is built through the same Linux native path as the manual Ubuntu build.
+
+The default build uses four parallel jobs. On a constrained builder, set a
+smaller value; the limit is propagated to the top-level build and Hunter's
+nested dependency builds:
+
+```bash
+docker build --build-arg JOBS=1 -t teleno-node:local .
+```
+
+For a traceable image built from an exported source context (where `.git` is
+not available inside the build), also pass the exact hexadecimal source
+revision. The binary version suffix and the OCI revision label then identify
+the same commit:
+
+```bash
+TELENO_COMMIT="$(git rev-parse HEAD)"
+docker build \
+  --build-arg VCS_REF="$TELENO_COMMIT" \
+  --build-arg JOBS=1 \
+  -t teleno-node:local .
+```
+
+An omitted or non-hexadecimal `VCS_REF` is not embedded as a commit identity;
+the binary reports `unknown` when no Git metadata is otherwise available.
 
 ## Run A Testnet Observer
 
@@ -38,7 +62,7 @@ docker run --rm --name teleno-testnet \
   -v "$HOME/teleno-testnet/basedir:/data" \
   -p 127.0.0.1:18122:18122 \
   -p 18888:18888 \
-  ghcr.io/pgarciagon/teleno-node:beta \
+  ghcr.io/koinos/teleno:beta \
   --basedir /data \
   --config /data/config.yml \
   --jsonrpc-listen 0.0.0.0:18122 \
@@ -62,7 +86,7 @@ Restore the current signed public testnet snapshot into an empty basedir:
 ```bash
 docker run --rm --entrypoint /bin/sh \
   -v "$HOME/teleno-testnet/basedir:/data" \
-  ghcr.io/pgarciagon/teleno-node:beta \
+  ghcr.io/koinos/teleno:beta \
   -lc 'test -f /data/config.yml || cp /usr/local/share/teleno/config/testnet-public-bootstrap-observer.container.yml /data/config.yml
        exec teleno_node --basedir /data --config /data/config.yml \
          --backup-public-restore \
@@ -80,7 +104,7 @@ Do not bake SSH private keys, password files, or public-bootstrap signing privat
 docker run --rm \
   -v "$HOME/teleno-testnet/basedir:/data" \
   -v "$HOME/.ssh:/keys:ro" \
-  ghcr.io/pgarciagon/teleno-node:beta \
+  ghcr.io/koinos/teleno:beta \
   --basedir /data \
   --config /data/config.yml \
   --backup-list-remote
@@ -115,7 +139,7 @@ docker run -d --name teleno-prod-producer \
   -p 127.0.0.1:8080:8080 \
   -p 8888:8888 \
   --entrypoint teleno-prod-producer \
-  ghcr.io/pgarciagon/teleno-node:beta
+  ghcr.io/koinos/teleno:beta
 ```
 
 Check the node from the Linux host:

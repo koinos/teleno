@@ -131,6 +131,8 @@ struct apply_block_options
   uint64_t index_to;
   std::chrono::system_clock::time_point application_time;
   bool propose_block;
+  std::optional< std::string > expected_state_root = {};
+  bool emit_external_side_effects                   = true;
 };
 
 struct apply_block_result
@@ -156,7 +158,10 @@ public:
   void set_client( std::shared_ptr< node::IRpcClient > c );
 
   apply_block_result apply_block( const protocol::block& block, const apply_block_options& opts );
-  void apply_block_delta( const protocol::block&, const protocol::block_receipt&, uint64_t );
+  bool apply_block_delta( const protocol::block&,
+                          const protocol::block_receipt&,
+                          uint64_t,
+                          const std::optional< std::string >& expected_root = {} );
 
   rpc::chain::submit_transaction_response submit_transaction( const rpc::chain::submit_transaction_request& );
   rpc::chain::get_head_info_response get_head_info( const rpc::chain::get_head_info_request& );
@@ -415,10 +420,15 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
                    timestamp_out_of_bounds_exception,
                    "block timestamp is too old" );
 
-    KOINOS_ASSERT( block.header().previous_state_merkle_root()
-                     == util::converter::as< std::string >( parent_node->merkle_root() ),
-                   state_merkle_mismatch_exception,
-                   "block previous state merkle mismatch" );
+    {
+      const auto parent_root = util::converter::as< std::string >( parent_node->merkle_root() );
+      KOINOS_ASSERT( block.header().previous_state_merkle_root() == parent_root
+                       || acceptable_rectified_previous_root( block.header().previous(),
+                                                              parent_root,
+                                                              block.header().previous_state_merkle_root() ),
+                     state_merkle_mismatch_exception,
+                     "block previous state merkle mismatch" );
+    }
 
     ctx.push_frame( stack_frame{ .call_privilege = privilege::kernel_mode } );
 
@@ -446,7 +456,15 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
 
     maybe_rectify_state( ctx, block, *res.receipt );
 
-    if( _client )
+    if( opts.expected_state_root )
+    {
+      KOINOS_ASSERT( *opts.expected_state_root
+                       == util::converter::as< std::string >( block_node->pending_merkle_root() ),
+                     state_merkle_mismatch_exception,
+                     "re-executed block does not reproduce the consensus state merkle root" );
+    }
+
+    if( _client && opts.emit_external_side_effects )
     {
       rpc::block_store::block_store_request req;
       req.mutable_add_block()->mutable_block_to_add()->CopyFrom( block );
@@ -542,7 +560,7 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
 
     // It is NOT safe to use block_node after this point without checking it against null
 
-    if( _client )
+    if( _client && opts.emit_external_side_effects )
     {
       const auto [ fork_heads, last_irreversible_block ] = get_fork_data( db_lock );
 
@@ -610,7 +628,7 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
 
     if( opts.propose_block && res.failed_transaction_indices.size() )
     {
-      if( _client )
+      if( _client && opts.emit_external_side_effects )
       {
         broadcast::transaction_failed trx_failed;
 
@@ -623,7 +641,7 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
 
       return res;
     }
-    else if( _client )
+    else if( _client && opts.emit_external_side_effects )
     {
       const auto& exception_data = e.get_json();
 
@@ -657,9 +675,10 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
   return res;
 }
 
-void controller_impl::apply_block_delta( const protocol::block& block,
+bool controller_impl::apply_block_delta( const protocol::block& block,
                                          const protocol::block_receipt& receipt,
-                                         uint64_t index_to )
+                                         uint64_t index_to,
+                                         const std::optional< std::string >& expected_root )
 {
   uint64_t index_message_interval                  = std::max( 10'000ull, index_to / 1'000ull );
   static constexpr std::chrono::seconds time_delta = std::chrono::seconds( 5 );
@@ -686,20 +705,26 @@ void controller_impl::apply_block_delta( const protocol::block& block,
                    pre_irreversibility_block_exception,
                    "block is prior to irreversibility" );
     KOINOS_ASSERT( block_id == root->id(), unknown_previous_block_exception, "unknown previous block" );
-    return; // Block is current LIB
+    return false; // Block is current LIB
+  }
+
+  {
+    const auto parent_root = util::converter::as< std::string >( parent_node->merkle_root() );
+    KOINOS_ASSERT( block.header().previous_state_merkle_root() == parent_root
+                     || acceptable_rectified_previous_root( block.header().previous(),
+                                                            parent_root,
+                                                            block.header().previous_state_merkle_root() ),
+                   state_merkle_mismatch_exception,
+                   "block previous state merkle mismatch" );
   }
 
   block_node = _db.create_writable_node( parent_id, block_id, block.header(), db_lock );
 
   execution_context ctx( _vm_backend, intent::block_application );
+  bool reexecute = false;
 
   try
   {
-    KOINOS_ASSERT( block.header().previous_state_merkle_root()
-                     == util::converter::as< std::string >( parent_node->merkle_root() ),
-                   state_merkle_mismatch_exception,
-                   "block previous state merkle mismatch" );
-
     for( const auto& delta_entry: receipt.state_delta_entries() )
     {
       chain::object_space object_space;
@@ -721,56 +746,73 @@ void controller_impl::apply_block_delta( const protocol::block& block,
                      "block receipt state merkle mismatch" );
     }
 
-    if( block_height % index_message_interval == 0 )
+    const auto replayed_root = util::converter::as< std::string >( block_node->pending_merkle_root() );
+
+    if( expected_root && *expected_root != replayed_root
+        && !acceptable_rectified_previous_root( block.id(), replayed_root, *expected_root ) )
     {
-      auto progress = block_height / static_cast< double >( index_to ) * 100;
-      LOG( info ) << "Indexing chain (" << progress << "%) - Height: " << block_height << ", ID: " << block_id;
-    }
+      LOG( warning ) << "delta_replay_fallback height=" << block_height << " id=" << block_id
+                     << " - replayed delta root does not match the consensus root signed in the"
+                        " next block header; re-executing block through full verification";
 
-    ctx.push_frame( stack_frame{ .call_privilege = privilege::kernel_mode } );
-
-    ctx.set_state_node( block_node );
-    ctx.reset_cache();
-
-    auto lib = system_call::get_last_irreversible_block( ctx );
-
-    try
-    {
-      // We need to finalize our node, checking if it is the new head block, update the cached head block,
-      // and advancing LIB as an atomic action or else we risk _db.get_head(), _cached_head_block, and
-      // LIB desyncing from each other
-      db_lock.reset();
       block_node.reset();
       parent_node.reset();
       ctx.clear_state_node();
-
-      auto unique_db_lock = _db.get_unique_lock();
-      _db.finalize_node( block_id, unique_db_lock );
-
-      if( block_id == _db.get_head( unique_db_lock )->id() )
-      {
-        std::unique_lock< std::shared_mutex > head_lock( _cached_head_block_mutex );
-        _cached_head_block = std::make_shared< protocol::block >( block );
-      }
-
-      if( lib > _db.get_root( unique_db_lock )->revision() )
-      {
-        auto lib_id = _db.get_node_at_revision( lib, block_id, unique_db_lock )->id();
-        _db.commit_node( lib_id, unique_db_lock );
-      }
-
-      unique_db_lock.reset();
-      db_lock    = _db.get_shared_lock();
-      block_node = _db.get_node( block_id, db_lock );
-      ctx.set_state_node( block_node );
+      _db.discard_node( block_id, db_lock );
+      db_lock.reset();
+      reexecute = true;
     }
-    catch( ... )
+
+    if( !reexecute )
     {
-      // If any exception is thrown, reset to the expected local state and then rethrow.
-      db_lock    = _db.get_shared_lock();
-      block_node = _db.get_node( block_id, db_lock );
+      if( block_height % index_message_interval == 0 )
+      {
+        auto progress = block_height / static_cast< double >( index_to ) * 100;
+        LOG( info ) << "Indexing chain (" << progress << "%) - Height: " << block_height << ", ID: " << block_id;
+      }
+
+      ctx.push_frame( stack_frame{ .call_privilege = privilege::kernel_mode } );
+
       ctx.set_state_node( block_node );
-      throw;
+      ctx.reset_cache();
+
+      auto lib = system_call::get_last_irreversible_block( ctx );
+
+      try
+      {
+        // Finalize, update the cached head, and advance LIB as one locked action.
+        db_lock.reset();
+        block_node.reset();
+        parent_node.reset();
+        ctx.clear_state_node();
+
+        auto unique_db_lock = _db.get_unique_lock();
+        _db.finalize_node( block_id, unique_db_lock );
+
+        if( block_id == _db.get_head( unique_db_lock )->id() )
+        {
+          std::unique_lock< std::shared_mutex > head_lock( _cached_head_block_mutex );
+          _cached_head_block = std::make_shared< protocol::block >( block );
+        }
+
+        if( lib > _db.get_root( unique_db_lock )->revision() )
+        {
+          auto lib_id = _db.get_node_at_revision( lib, block_id, unique_db_lock )->id();
+          _db.commit_node( lib_id, unique_db_lock );
+        }
+
+        unique_db_lock.reset();
+        db_lock    = _db.get_shared_lock();
+        block_node = _db.get_node( block_id, db_lock );
+        ctx.set_state_node( block_node );
+      }
+      catch( ... )
+      {
+        db_lock    = _db.get_shared_lock();
+        block_node = _db.get_node( block_id, db_lock );
+        ctx.set_state_node( block_node );
+        throw;
+      }
     }
 
     // It is NOT safe to use block_node after this point without checking it against null
@@ -816,6 +858,24 @@ void controller_impl::apply_block_delta( const protocol::block& block,
 
     throw;
   }
+
+  if( reexecute )
+  {
+    apply_block( block,
+                 apply_block_options{ index_to,
+                                      std::chrono::system_clock::now(),
+                                      false,
+                                      expected_root,
+                                      false } );
+
+    auto reexec_lock     = _db.get_shared_lock();
+    auto reexecuted_node = _db.get_node( block_id, reexec_lock );
+    KOINOS_ASSERT( reexecuted_node,
+                   block_state_error_exception,
+                   "re-executed block node is missing after fallback" );
+  }
+
+  return reexecute;
 }
 
 rpc::chain::submit_transaction_response
@@ -1352,6 +1412,14 @@ void controller::apply_block_delta( const protocol::block& block,
                                     uint64_t index_to )
 {
   _my->apply_block_delta( block, receipt, index_to );
+}
+
+bool controller::apply_block_delta_checked( const protocol::block& block,
+                                            const protocol::block_receipt& receipt,
+                                            const std::string& expected_root,
+                                            uint64_t index_to )
+{
+  return _my->apply_block_delta( block, receipt, index_to, expected_root );
 }
 
 rpc::chain::propose_block_response controller::propose_block( const rpc::chain::propose_block_request& request,
