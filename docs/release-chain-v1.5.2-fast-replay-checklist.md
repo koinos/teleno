@@ -1,12 +1,13 @@
 # Chain v1.5.2 Fast Replay Release Checklist
 
-Status: 1.2.0 release preparation authorized; corrected observer canary passed on 2026-08-31; publication not executed
+Status: Teleno node 1.2.0 published on 2026-09-01 after the corrected observer canary and repository/artifact gates passed; consumer and producer handoffs remain separately gated
 
 This checklist covers actions outside the repository after the repository-side
 implementation and validation gates pass. The 1.2.0 native release was
-authorized on 2026-08-29, and an isolated observer canary was authorized on
-2026-08-30. Neither request activates block production or authorizes changes
-to Koinos One.
+authorized on 2026-08-29, an isolated observer canary was authorized on
+2026-08-30, and the validated release was published on 2026-09-01. None of
+those requests activates block production or authorizes changes to Koinos
+One.
 
 ## Required Inputs
 
@@ -105,10 +106,32 @@ evidence only and must not be published as the release artifact.
 
 ## Native And Container Publication
 
-The observer canary has passed. Run these commands only after the exact release
-commit is reviewed, the repository and artifact gate above is repeated from
-that clean commit, and all identities agree. The 1.2.0 release request does
-not waive those final source and artifact checks:
+Publication completed on 2026-09-01 from clean release commit
+`b8dab4c08f99ff1ba951e4bd229a154572b8e4ee`:
+
+- annotated tag: `teleno-node-v1.2.0`, dereferencing to the exact release
+  commit;
+- GitHub Release:
+  `https://github.com/koinos/teleno/releases/tag/teleno-node-v1.2.0`;
+- native build workflow:
+  `https://github.com/koinos/teleno/actions/runs/33474703407`, successful;
+- versioned container workflow:
+  `https://github.com/koinos/teleno/actions/runs/33474712008`, successful;
+- published image: `ghcr.io/koinos/teleno:1.2.0`, manifest digest
+  `sha256:da2a2437ca7d8b9c89bba0d5e6471468b7cb780b152819b9314bfad8954b5d72`;
+  and
+- published identity: `teleno_node 1.2.0+b8dab4c08f99`, with matching OCI
+  revision and a passing CLI and producer-guard smoke test after a fresh pull.
+
+The commands below remain the reproducible publication shape. The completed
+release used the repository's tag-triggered workflow to build, smoke, and push
+the versioned container rather than a manual registry push.
+
+The observer canary passed. These commands document the publication gate and
+remain required for any reproduction: the exact release commit must be
+reviewed, the repository and artifact gate above must be repeated from that
+clean commit, and all identities must agree. The 1.2.0 release request did not
+waive those final source and artifact checks:
 
 ```bash
 git tag -a "teleno-node-v$TELENO_VERSION" "$TELENO_COMMIT" \

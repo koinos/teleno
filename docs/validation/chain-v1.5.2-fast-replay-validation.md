@@ -1,12 +1,12 @@
 # Chain v1.5.2 Fast Replay Validation
 
-Status: Repository-scoped validation and corrected 1.2.0 observer canary complete
+Status: Repository-scoped validation, corrected 1.2.0 observer canary, and published release artifact verification complete
 
 Validation date: 2026-08-31
 
 Repository base commit: `787d7cf37e5d2134ebc72faf944381a6aa4462a3`
 
-Prepared release identity: `1.2.0` / `teleno-node-v1.2.0`
+Published release identity: `1.2.0` / `teleno-node-v1.2.0`
 
 Reference chain commit: `0ae99eced8b585c4145424e9c2a28f667796cc66`
 
@@ -602,6 +602,25 @@ seconds. `./build/teleno_node --version` reported
 correction and documentation worktree and is evidence only; it is not a
 publishable release artifact.
 
+The final publication gate was repeated on 2026-09-01 from a clean detached
+repository-local worktree at
+`b8dab4c08f99ff1ba951e4bd229a154572b8e4ee`. The test-enabled dependency
+build, complete build, and complete CTest suite exited zero; CTest passed
+20/20 in 22.66 seconds. The focused configuration, staged service startup,
+controller, indexer, historical fixture, and pending-root set passed 6/6 in
+0.32 seconds, and the transaction benchmark script suite passed 4/4. The
+native binary reported `teleno_node 1.2.0+b8dab4c08f99` without a dirty
+suffix, and its CMake cache contained no path to another workspace.
+
+A clean local Linux/arm64 container build at the same commit passed version,
+CLI, OCI revision, and producer-activation guard checks. The tag-triggered
+Linux/amd64 workflow then independently built, smoked, and published
+`ghcr.io/koinos/teleno:1.2.0` with manifest digest
+`sha256:da2a2437ca7d8b9c89bba0d5e6471468b7cb780b152819b9314bfad8954b5d72`.
+A fresh pull reproduced the exact version, revision label, CLI surface, and
+producer guard. The native build workflow and both container workflows for
+the release commit completed successfully.
+
 - [x] Full-range observer reached and followed current canonical head, with
   sustained pre- and post-restart comparisons against both references.
 - [x] Observer canary and post-restart health checks passed on the same
@@ -619,8 +638,8 @@ at the required historical checkpoints, while Teleno's full archive was
 covered by the complete receipt audit and production-path checked replay.
 
 The authorized WP7 observer canary also passed full-range live-head follow and
-the post-convergence clean restart gate. Release publication, consumer
-handoff, and producer rollout remain separate actions and have not been
-executed by this validation run. The canary image's synthetic revision is
-validation evidence only; publication still requires a clean exact release
-commit and a freshly reproduced artifact identity.
+the post-convergence clean restart gate. Release publication was subsequently
+completed from the clean, freshly reproduced commit and artifact identity
+recorded above. Consumer handoff and producer rollout remain separate actions
+and have not been executed. The canary image's synthetic revision remains
+validation evidence only and was not published as the release artifact.

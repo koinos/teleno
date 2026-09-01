@@ -1,6 +1,6 @@
 # Chain v1.5.2 Fast Replay Correctness Implementation Plan
 
-Status: Repository implementation, WP1-WP7 validation, and corrected 1.2.0 observer canary complete; publication pending
+Status: Repository implementation, WP1-WP7 validation, corrected observer canary, and Teleno node 1.2.0 publication complete; consumer and producer handoffs remain separately gated
 
 Scope: Teleno native chain indexing and state-delta replay
 
@@ -635,8 +635,9 @@ code is present.
 - Files changed: `VERSION`, `CHANGELOG.md`, `docs/release-builds.md`, and
   `docs/release-chain-v1.5.2-fast-replay-checklist.md` contain the
   repository-side behavior, validation gates, exact authorization-gated
-  commands, and consumer handoff. `VERSION` identifies the prepared native
-  release as `1.2.0`, and the matching changelog section is dated 2026-08-29.
+  commands, and consumer handoff. The release tag identifies native version
+  `1.2.0`; after publication, `VERSION` advanced to `1.3.0-dev.0` and the
+  changelog opened the matching unreleased development section.
 - Invariants: the isolated observer canary remained producer-disabled, used a
   separate basedir, preserved the existing service, and passed before any
   release publication. Authorization does not extend to producer activation
@@ -649,9 +650,14 @@ code is present.
   passed a post-convergence clean stop/restart on the same durable basedir.
   Startup again validated a 60-block backlog before P2P and JSON-RPC, and
   sustained comparisons against both references found no unexplained mismatch.
-- Remaining actions: create the exact clean release commit, reproduce the
-  release artifact identity, and execute the documented tag, image publication,
-  and Koinos One handoff steps only with their required authorization. Producer
-  rollout remains separately gated and out of scope.
-- Exit criterion: observer canary and repository checklist preparation are
-  satisfied; external publication and consumer handoff were not executed.
+- Completed: commit `b8dab4c08f99ff1ba951e4bd229a154572b8e4ee` was
+  rebuilt from a clean repository-local worktree, passed the native and
+  container gates, and was published on 2026-09-01 as annotated tag
+  `teleno-node-v1.2.0`, GitHub Release `Teleno node 1.2.0`, and
+  `ghcr.io/koinos/teleno:1.2.0`. The published image reports
+  `teleno_node 1.2.0+b8dab4c08f99` and carries the matching OCI revision.
+- Remaining actions: Koinos One consumer handoff and every producer rollout
+  action require separate authorization and remain out of scope.
+- Exit criterion: satisfied for repository implementation, validation, canary,
+  and native/container publication; consumer and producer handoffs remain
+  separately gated.
