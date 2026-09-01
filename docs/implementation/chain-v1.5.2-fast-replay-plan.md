@@ -1,6 +1,6 @@
 # Chain v1.5.2 Fast Replay Correctness Implementation Plan
 
-Status: Repository implementation and WP1-WP6 complete; 1.2.0 release preparation authorized, observer canary pending
+Status: Repository implementation, WP1-WP7 validation, and corrected 1.2.0 observer canary complete; publication pending
 
 Scope: Teleno native chain indexing and state-delta replay
 
@@ -555,8 +555,8 @@ code is present.
   hold.
 - Tests: marker absence, both verification modes, hold persistence, same-start
   bypass prevention, and later explicit release pass in `koinos_config_test`.
-- Remaining risk: the repository container smoke is complete; the operator
-  canary remains an external authorization-gated WP7 action.
+- Remaining risk: none repository-scoped; the authorized observer canary
+  passed under WP7 with block production disabled.
 - Exit criterion: satisfied for repository behavior and documentation.
 
 ### WP6: Historical and differential validation
@@ -625,9 +625,8 @@ code is present.
   re-execution or unexplained mismatch. The same scratch reopened from durable
   LIB 37,019,501 with the clean final binary and reproduced the final block,
   root, chain ID, and six selected reads with zero fallback or side effect.
-- Remaining risk: live observer-follow and canary validation are external WP7
-  gates requiring explicit authorization; they are not repository-scoped
-  historical proof.
+- Remaining risk: none for historical proof; the separate live observer
+  canary and restart gates also passed under WP7.
 - Exit criterion: satisfied for repository-scoped implementation and
   historical/differential validation.
 
@@ -638,13 +637,21 @@ code is present.
   repository-side behavior, validation gates, exact authorization-gated
   commands, and consumer handoff. `VERSION` identifies the prepared native
   release as `1.2.0`, and the matching changelog section is dated 2026-08-29.
-- Invariants: the 1.2.0 native release preparation and publication are
-  authorized. That authorization does not extend to operating a live canary,
-  producer activation, or a consumer-repository change.
+- Invariants: the isolated observer canary remained producer-disabled, used a
+  separate basedir, preserved the existing service, and passed before any
+  release publication. Authorization does not extend to producer activation
+  or a consumer-repository change.
 - Tests: all repository build, CTest, focused, CLI, container, historical,
   differential, archive-head, and reopen gates are complete.
-- Remaining actions: the observer canary still requires an approved isolated
-  basedir and config. Release publication remains gated on that result, and
-  the Koinos One submodule handoff requires separate authorization.
-- Exit criterion: repository checklist preparation is satisfied; the release
-  remains blocked at the external observer-canary gate.
+- Completed: the corrected observer canary crossed both historical boundaries,
+  completed checked replay through archived height 37,019,561 with exactly
+  70,731 explained fallbacks, reached and followed current canonical head, and
+  passed a post-convergence clean stop/restart on the same durable basedir.
+  Startup again validated a 60-block backlog before P2P and JSON-RPC, and
+  sustained comparisons against both references found no unexplained mismatch.
+- Remaining actions: create the exact clean release commit, reproduce the
+  release artifact identity, and execute the documented tag, image publication,
+  and Koinos One handoff steps only with their required authorization. Producer
+  rollout remains separately gated and out of scope.
+- Exit criterion: observer canary and repository checklist preparation are
+  satisfied; external publication and consumer handoff were not executed.

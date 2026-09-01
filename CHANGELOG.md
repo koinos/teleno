@@ -25,7 +25,10 @@ truth is the `VERSION` file at the repository root.
   handlers use the configured chain executor, and oversized block-store
   responses use bounded nonblocking backpressure so catch-up also progresses
   with one chain worker. Startup now refuses to enter ready state if indexing
-  is cancelled or fails before reaching the block-store head.
+  is cancelled or fails before reaching the block-store head. During recovery
+  indexing, only the block store and chain controller start; P2P, RPC,
+  mempool, and block production remain stopped until the backlog is validated,
+  preventing concurrent controller mutation during replay fallback.
 - The state-delta audit now models receipt replay semantics for duplicate keys
   and inventories the resulting full-execution fallbacks separately from
   consensus exceptions and unexplained mismatches.

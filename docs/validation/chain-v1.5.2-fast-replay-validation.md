@@ -1,8 +1,8 @@
 # Chain v1.5.2 Fast Replay Validation
 
-Status: Repository-scoped validation complete; 1.2.0 observer canary pending approved inputs
+Status: Repository-scoped validation and corrected 1.2.0 observer canary complete
 
-Validation date: 2026-08-29
+Validation date: 2026-08-31
 
 Repository base commit: `787d7cf37e5d2134ebc72faf944381a6aa4462a3`
 
@@ -422,6 +422,126 @@ and `969a1f66f36bb9bbd9c871652d84cd757ecc27489917e08d19bc5654ac901c58`.
 
 ## Clean build and release gates
 
+### Authorized observer canary completed
+
+The authorized Linux observer canary uses an isolated copy whose durable chain
+state starts at height 30,504,141 and whose read-only block-store source ends at
+37,019,561. The prepared copy contains no wallet or producer-key material,
+explicitly disables block production, and is separate from every running node
+basedir. Its prepared unified RocksDB `CURRENT` and manifest SHA-256 values are
+`74c58b19daad9950fe24797c86f9db859ce597191d7d1afb9b2459e892530e9b`
+and
+`d57e49b56a791bfbf46b4b8cd153fd6290fb2b3997e35c2607b561bd91a0e086`.
+
+The first valid checked-replay attempt with the prepared 1.2.0 candidate
+reached the expected one-time fallback at 30,504,202, then exited with
+`SIGSEGV` when P2P was already running concurrently with recovery indexing.
+The same checkpoint and replay mode remained stable with P2P disabled for both
+one and two chain workers. The captured crash, one-worker diagnostic, and
+two-worker diagnostic logs have SHA-256 values
+`7638ae0906a8f521595f130672ff52e3751be3ab52f2f1a8820a0afc717312e0`,
+`2f6ad00bd8cba72f80ea50b296b9dcc104f9571d4c99a7ba9f39ed7fec8f362f`,
+and
+`2f24632bb2c68f09ff31a015c8c608fc1d75d8f61916ad4e2c1627c794689565`.
+
+Startup now opens only the block store and chain controller before draining
+the recovery backlog. P2P, RPC, mempool, and block production start only after
+the indexer validates the block-store head. The staged-start unit coverage
+proves deferred external startup, idempotent core startup, reverse-order stop,
+unknown-component rejection, and full core shutdown when a later external
+start fails. A clean repository-local build and the complete 20-test suite pass
+with this correction.
+
+The corrected amd64 canary image is
+`sha256:ea39098c6e0491aea0230f8bbf1a906a3376e94d1bd4702deec3d3e084e2ef70`.
+It reports `teleno_node 1.2.0+44a7e4cb2756`; the synthetic revision identifies
+the exact canary source patch and is not a publishable release commit. The same
+continuous corrected run crossed both historical boundaries with no
+unexplained mismatch. It then completed checked replay through archived height
+37,019,561: the indexer applied 6,515,420 blocks in 48,125.3 seconds and
+reported exactly 70,731 re-execution fallbacks, consisting of block 30,504,202
+plus the 70,730 previously classified duplicate-key receipts. P2P and JSON-RPC
+remained stopped until the indexer finished, then started and reached
+`teleno_node ready`. The archive-head canary log has SHA-256
+`7ed12bac6c35a2e367ef46520cfbe88fccbc19499a17b0462d76743eb5f3f3d6`.
+
+The canary reached the live canonical head on 2026-08-31. Before the final
+restart, 12 samples taken ten seconds apart covered heights 38,973,189 through
+38,973,222. Ten samples matched the independent native observer and legacy
+microservice reference exactly on height, block ID, state root, and LIB. The
+other two observed a reference one or two blocks behind during sequential
+polling and matched on the next sample. Immediately before shutdown, all three
+nodes matched at height 38,973,249 with block ID
+`0x1220fe06298e2be3a13a7316bcd8123c2b7241fcc7890f48cf32c889cd98c7bc7e25`,
+state root `EiDQ-kmPIUgZz0EUGIJa2jeEAAxwbCCWJvJ8ILbFHZDF5A==`, and LIB
+38,973,189. The canary had five connected peers and no critical or producer
+activity log entries.
+
+An intermediate persistence restart was performed during live catch-up at
+height 37,397,340 to keep the isolated canary within its disk safety margin.
+SIGINT produced an orderly reverse service shutdown, `teleno_node shutdown
+complete`, exit status zero, and no OOM or consensus error. On the same image,
+configuration, and basedir, the next start opened durable chain state at
+37,397,280, held every external service behind the recovery gate, replayed the
+60-block block-store backlog in 0.0212131 seconds, and only then started P2P and
+JSON-RPC and entered ready state. Block production and gRPC remained disabled.
+The reopen also reduced obsolete RocksDB WAL retention from 237 files and
+13,548,806,720 bytes after close to one file and 11,827,786 bytes after open,
+recovering the canary's disk safety margin without deleting or replacing any
+chain or state data. This intermediate result supplements the final
+post-convergence restart below.
+
+Live catch-up was also compared at the canary's exact historical height rather
+than only against the moving reference heads. At height 37,437,221, the canary
+block ID, previous block ID, timestamp, and state root signed by successor
+37,437,222 matched both the independent native observer block store and the
+legacy microservice block store. The compared block ID was
+`0x1220115ffc3bdc050a2f02c281d125531efed689e2de81769155401393414fe694a4`,
+and the state root was
+`EiAkSmIgvdHufGQm_qZSgV3mo8OtEvN8vdJ62ae9wLBbPQ==`. This proves that the
+continued P2P catch-up retained the canonical block and state commitment after
+the archive handoff and persistence restart; the sustained-head evidence above
+and below completes the live-follow gate.
+
+The final clean stop used
+`docker stop --signal=SIGINT --timeout=120 teleno-canary-fix-44a7e4cb2756`
+at 18:06:19 Europe/Berlin. The node completed its ordered JSON-RPC, P2P, chain,
+and block-store shutdown at 18:06:23, logged `teleno_node shutdown complete`,
+and exited zero without OOM or error. It had advanced to height 38,973,266.
+The stopped full log has SHA-256
+`67585b96cb34ab1fd451aedd1a362481d09b1f9c9b7b63242d48076a14d07445`.
+
+`docker start teleno-canary-fix-44a7e4cb2756` then reopened the same image,
+arguments, and basedir. The block store and chain started first, the recovery
+gate validated a 60-block durable backlog in 0.0177039 seconds, and only then
+did P2P and JSON-RPC start and the node report ready. Reopen reduced the closed
+database's 29 WAL files to one without deleting state. The post-restart log
+slice through 18:11:35 Europe/Berlin has SHA-256
+`d9e2d6905c680ef63a5ece1cb807cda76f7c33af97c7a0c943dd4672945ef52e`.
+It contains no critical error, production-loop start, or produced-block entry.
+
+Twelve more ten-second samples after restart covered heights 38,973,302
+through 38,973,327. Eleven matched both references exactly on height, block
+ID, state root, and LIB; one sampled the canary one block behind and matched on
+the next sample. A final exact three-way comparison at 18:12:05
+Europe/Berlin matched height 38,973,360, block ID
+`0x122000b26e13ecf94c3e6b4a335f87eee30df1733100ce64215cf22aedbf9e8eee21`,
+state root `EiDkBuGDDtJfW_OaF5WoS8itFDtkv2Eswok19P-E63S9hw==`, and LIB
+38,973,300. Peer samples remained between three and five. Transient tip
+differences caused by sequential polling, including a same-height reference
+reorganization at 38,970,871, resolved on the next sample; both reference
+block stores subsequently confirmed the same canonical block and successor.
+No persistent or unexplained consensus mismatch was observed.
+
+The observer-only guard was rechecked after the final restart: both the
+container arguments and configuration explicitly disabled `block_producer`
+and gRPC,
+the isolated basedir contained no wallet or private-key material, and the
+post-restart log contained zero producer-start or production-loop lines. The
+pre-existing native observer service retained its original process and
+activation time throughout the canary work; it was inspected read-only and was
+not restarted or reconfigured.
+
 - [x] `KOINOS_BUILD_TESTS=ON ./scripts/build-cpp-libp2p-koinos.sh` from a clean,
   repository-local configuration. The final post-audit build-script log
   SHA-256 is
@@ -466,9 +586,26 @@ and `969a1f66f36bb9bbd9c871652d84cd757ecc27489917e08d19bc5654ac901c58`.
   stopped cleanly; log SHA-256
   `969a3068e5f7d9701f112b39eff179d1d57bd37d2d46a2e53e3f9be2c2cdb3c5`.
 - [x] Archive-head checked replay and same-scratch durable reopen.
-- [ ] Full-range observer reaches and follows current head.
-- [ ] Observer canary and post-restart health checks. External authorization
-  required; commands will be prepared but not run in this repository task.
+
+The required repository-local sequence was repeated on the final corrected
+worktree on 2026-08-31. Before execution, both `CMAKE_HOME_DIRECTORY` and
+`CMAKE_CACHEFILE_DIR` resolved under the active Teleno repository and contained
+no reference to another workspace. The exact
+`KOINOS_BUILD_TESTS=ON ./scripts/build-cpp-libp2p-koinos.sh` command exited zero,
+`cmake --build build --parallel` exited zero, and
+`ctest --test-dir build --output-on-failure` passed 20/20 in 18.83 seconds. A
+focused rerun including configuration, staged service startup, controller,
+indexer, historical fixture, and state DB pending-root tests passed 6/6 in 0.28
+seconds. `./build/teleno_node --version` reported
+`1.2.0+daa919b257bf-dirty`, `./build/teleno_node --help` exited zero, and
+`git diff --check` passed. The `-dirty` identity is expected for the reviewed
+correction and documentation worktree and is evidence only; it is not a
+publishable release artifact.
+
+- [x] Full-range observer reached and followed current canonical head, with
+  sustained pre- and post-restart comparisons against both references.
+- [x] Observer canary and post-restart health checks passed on the same
+  isolated basedir with block production disabled.
 
 ## Current conclusion
 
@@ -481,7 +618,9 @@ through all 37,019,561 blocks; differential reference execution was performed
 at the required historical checkpoints, while Teleno's full archive was
 covered by the complete receipt audit and production-path checked replay.
 
-Reaching and following the live network head, the observer canary restart, and
-release/producer rollout are external authorization-gated WP7 actions. They
-remain intentionally unexecuted and are not included in the repository-scoped
-completion claim.
+The authorized WP7 observer canary also passed full-range live-head follow and
+the post-convergence clean restart gate. Release publication, consumer
+handoff, and producer rollout remain separate actions and have not been
+executed by this validation run. The canary image's synthetic revision is
+validation evidence only; publication still requires a clean exact release
+commit and a freshly reproduced artifact identity.

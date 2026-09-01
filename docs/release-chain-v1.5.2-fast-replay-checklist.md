@@ -1,11 +1,12 @@
 # Chain v1.5.2 Fast Replay Release Checklist
 
-Status: 1.2.0 release preparation authorized on 2026-08-29; observer canary pending approved inputs
+Status: 1.2.0 release preparation authorized; corrected observer canary passed on 2026-08-31; publication not executed
 
 This checklist covers actions outside the repository after the repository-side
 implementation and validation gates pass. The 1.2.0 native release was
-authorized on 2026-08-29. That request does not identify or authorize a live
-canary basedir, activate block production, or authorize changes to Koinos One.
+authorized on 2026-08-29, and an isolated observer canary was authorized on
+2026-08-30. Neither request activates block production or authorizes changes
+to Koinos One.
 
 ## Required Inputs
 
@@ -78,10 +79,36 @@ unexplained state-Merkle mismatch. Stop it cleanly, restart with the same
 observer-only command, and repeat head, root, peer, and log checks. Do not pass
 `--enable block_producer` during this canary.
 
+The authorized corrected canary has crossed both historical boundaries and
+completed checked replay through archived height 37,019,561. It applied
+6,515,420 blocks in 48,125.3 seconds, reported exactly 70,731 explained
+fallbacks, kept P2P and JSON-RPC stopped until indexing completed, and then
+reached ready state. The archive-head log SHA-256 is
+`7ed12bac6c35a2e367ef46520cfbe88fccbc19499a17b0462d76743eb5f3f3d6`.
+During live catch-up, an intermediate SIGINT stop exited zero and the same
+observer-only container reopened the same durable basedir. The recovery gate
+validated a 60-block block-store backlog before P2P and JSON-RPC started, then
+the node returned to ready state with block production and gRPC still
+disabled.
+
+The canary subsequently reached and followed current canonical head. Twelve
+ten-second samples before the final restart and twelve after it matched the
+independent native observer and legacy microservice reference on block ID,
+state root, and LIB whenever sampled at the same height; transient one- or
+two-block sequential-polling differences resolved on the next sample. The
+final clean SIGINT stop exited zero without OOM, and restart of the same image,
+arguments, and basedir validated a 60-block backlog before starting P2P and
+JSON-RPC. The final exact three-way comparison was at height 38,973,360, with
+no unexplained consensus mismatch or producer activity. The corrected
+observer canary therefore passed. Its synthetic image revision is validation
+evidence only and must not be published as the release artifact.
+
 ## Native And Container Publication
 
-Run these commands only after the observer canary passes. The 1.2.0 release
-request authorizes publication, but it does not waive that validation gate:
+The observer canary has passed. Run these commands only after the exact release
+commit is reviewed, the repository and artifact gate above is repeated from
+that clean commit, and all identities agree. The 1.2.0 release request does
+not waive those final source and artifact checks:
 
 ```bash
 git tag -a "teleno-node-v$TELENO_VERSION" "$TELENO_COMMIT" \

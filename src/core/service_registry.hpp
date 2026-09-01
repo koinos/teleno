@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <exception>
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -32,26 +34,19 @@ public:
   {
     for( auto& comp: _components )
     {
-      LOG( info ) << "[" << comp.name << "] Starting...";
-      try
-      {
-        comp.start();
-        comp.started = true;
-        LOG( info ) << "[" << comp.name << "] Started";
-      }
-      catch( const std::exception& e )
-      {
-        LOG( error ) << "[" << comp.name << "] Start failed: " << e.what();
-        stop_all();
-        throw;
-      }
-      catch( ... )
-      {
-        LOG( error ) << "[" << comp.name << "] Start failed: unknown exception";
-        stop_all();
-        throw;
-      }
+      if( !comp.started )
+        start_component( comp );
     }
+  }
+
+  void start( const std::string& name )
+  {
+    auto it = std::find_if(
+      _components.begin(), _components.end(), [&]( const Component& component ) { return component.name == name; } );
+    if( it == _components.end() )
+      throw std::invalid_argument( "unknown service component: " + name );
+    if( !it->started )
+      start_component( *it );
   }
 
   void stop_all()
@@ -82,6 +77,29 @@ public:
   const std::vector< Component >& components() const { return _components; }
 
 private:
+  void start_component( Component& comp )
+  {
+    LOG( info ) << "[" << comp.name << "] Starting...";
+    try
+    {
+      comp.start();
+      comp.started = true;
+      LOG( info ) << "[" << comp.name << "] Started";
+    }
+    catch( const std::exception& e )
+    {
+      LOG( error ) << "[" << comp.name << "] Start failed: " << e.what();
+      stop_all();
+      throw;
+    }
+    catch( ... )
+    {
+      LOG( error ) << "[" << comp.name << "] Start failed: unknown exception";
+      stop_all();
+      throw;
+    }
+  }
+
   std::vector< Component > _components;
 };
 

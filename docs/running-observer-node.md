@@ -33,6 +33,14 @@ status, P2P activity, metrics, and readiness. It enters ready state only after
 startup indexing reaches the block-store head; cancellation or validation
 failure stops startup and exits non-zero.
 
+When the state database trails an existing block-store head, startup enters a
+recovery indexing gate. Only the block store and chain controller run while
+that backlog is validated. P2P, JSON-RPC, gRPC, mempool, and block production
+remain stopped until indexing succeeds, so RPC health checks can refuse the
+connection during this phase. Use the indexing and recovery-gate log lines for
+progress and do not treat temporary RPC unavailability as a request to expose
+or bypass a privileged endpoint.
+
 ## Background Start
 
 Use your host service manager for long-running operation. For an ad hoc local

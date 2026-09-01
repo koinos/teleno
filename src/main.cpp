@@ -2067,14 +2067,19 @@ int main( int argc, char** argv )
       }
     } );
 
-    // ── Start all registered components ──
-    registry.start_all();
-
-    // Run chain indexer AFTER all components are started (chain + block_store must be open)
+    // Recovery indexing owns the controller until the existing block-store
+    // backlog is drained. Starting P2P, RPC submission, or block production
+    // before that point would allow another thread to mutate the controller
+    // while checked replay is restoring or re-executing a block. Keep startup
+    // core-only until indexing succeeds, then expose the remaining services.
     if( cfg.is_enabled( "chain" ) && cfg.is_enabled( "block_store" ) )
     {
       try
       {
+        registry.start( "block_store" );
+        registry.start( "chain" );
+        LOG( info ) << "[chain] Recovery indexing gate active; external services remain stopped";
+
         chain::indexer idx( chain_ioc, controller, monolith_client, effective_verify );
         auto future = idx.index();
         std::vector< std::thread > chain_workers;
@@ -2109,6 +2114,8 @@ int main( int argc, char** argv )
         return EXIT_FAILURE;
       }
     }
+
+    registry.start_all();
 
     LOG( info ) << "[node] " << node::node_name() << " ready";
     if( backup_scheduler )
