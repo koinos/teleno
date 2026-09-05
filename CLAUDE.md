@@ -1,6 +1,6 @@
 # Teleno Agent Project Guide
 
-Last updated: 2026-07-10
+Last updated: 2026-09-05
 
 This file contains operational guidance for agents working in the standalone
 Teleno repository. Detailed architecture, operator procedures, validation
@@ -81,6 +81,16 @@ the affected documentation and examples current when behavior changes.
 Some deeper architecture and parity references still live in `koinos-one` and
 are linked from `docs/README.md`. Treat those as cross-repository reference
 material, not as authority to modify the Koinos One app during node-only work.
+
+## Open TODOs
+
+- [ ] Address the bugs and memory/disk-efficiency findings in the
+  [software review](docs/performance/teleno-software-audit.md), following the
+  [remediation plan](docs/implementation/teleno-audit-remediation-plan.md).
+  Prioritize WP1 storage integrity, WP2 RPC lifecycle, and WP3 cache correctness
+  and memory efficiency. Remediation is not implemented; obtain authorization
+  before starting it. Keep this TODO open until the required fixes and
+  verification gates are completed and documented.
 
 ## Build And Test Workflow
 
