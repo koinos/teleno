@@ -43,6 +43,9 @@ checks pass.
 - [Chain v1.5.2 Fast Replay Release Checklist](release-chain-v1.5.2-fast-replay-checklist.md) -
   authorization-gated observer canary, native/container publication, consumer
   handoff, and producer rollout commands.
+- [iOS and Android Feasibility and Implementation Plan](implementation/teleno-mobile-feasibility-and-implementation-plan.md) -
+  native port assessment, simplified mobile app, store policy constraints, and
+  staged implementation and verification gates.
 
 ## Safety Model
 
