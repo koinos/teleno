@@ -1,59 +1,56 @@
-# Teleno on iOS and Android: feasibility and implementation plan
+# Teleno on iOS and Android: producer feasibility and implementation plan
 
-Date: 2026-09-10. Status: **PROPOSED — analysis only; no mobile port implemented.**
+Date: 2026-09-10. Status: **PROPOSED — analysis only; no mobile implementation or store approval.**
 
 Spanish translation: [Español](teleno-mobile-feasibility-and-implementation-plan.es.md).
 
-This plan covers the native Teleno port, a simplified Koinos One mobile app,
-and publication through Apple's App Store and Google Play. Policy conclusions
-use the official pages linked below, checked on the date above. Engineering
-estimates are planning judgments, not measurements or delivery commitments.
+This plan covers an embedded Teleno producer, a minimal mobile app with external
+funds custody, and publication through Apple's App Store and Google Play with
+an individual publisher where eligible. It consolidates product decisions,
+technical implementation, and distribution gates in one document. Policy and
+fee sources were checked on the date above; estimates and acceptance targets
+are planning judgments, not measured results or delivery commitments.
 
-## 1. Recommendation
+## 1. Product objective and feasibility
 
-Build a useful mobile companion for both platforms first, and run an embedded
-observer feasibility prototype alongside that product work. Develop the shared
-native runtime once, then integrate Android before committing to a public iOS
-embedded-node release. The iOS dependency and policy probes should nevertheless
-start early, so Android work does not conceal an iOS blocker.
+Build a minimal app that runs Teleno and produces **Koinos Proof of Burn (PoB)**
+blocks on the phone, while the user controls KOIN/VHP through an external
+wallet. The app owns only a separate production key. A useful prototype must
+produce a block accepted by an independent reference node, not merely display
+remote status or synchronize as an observer.
 
-The companion should monitor a user-selected Teleno node, show KOIN/VHP/Mana
-and account activity, and make connection health understandable. Begin with
-watch-only accounts. Add a non-custodial wallet only as an independently tested
-increment. Remote producer monitoring is useful without putting production
-keys or the block-production loop on the phone.
+PoB is the working consensus assumption because the requested funding model
+uses VHP. Teleno selects `pob` or `federated` and does not implement Proof of
+Work. A literal PoW requirement would require a separate consensus/network
+project; it cannot be introduced as a mobile packaging option.
 
-**A companion app is not a port of the node.** The embedded track below is the
-actual port: it runs Teleno's chain execution, storage, and P2P code on the
-device. Its first product contract should be explicit, interruptible observer
-sessions. A continuously available smartphone producer is not a credible
-baseline for this project.
+| Area | Assessment | Required evidence or decision |
+| --- | --- | --- |
+| Production with external funds custody | Supported by the existing separation of producer address and signing key | Mobile secure signer, externally authorized registration, effective VHP, and real PoB production |
+| Embedded producer on iOS/Android | Plausible engineering prototype; no mobile build or device production established | Cross-builds, reference parity, interruption recovery, eligible uptime, storage and thermal measurements |
+| Both public stores with an individual publisher | No established release path for the proposed local producer | Correct account type and review of the fully disclosed feature set; neither mining rule expressly exempts PoB |
+| Continuous phone production | Not a credible default availability promise | A supported operating mode must demonstrate useful production despite suspension and catch-up |
+| App managing an off-device producer | More credible distribution and availability path | A separate product decision and authenticated management implementation; not completion of local production |
 
-### Feasibility by product variant
+Prioritize native producer feasibility and store classification before a broad
+app build. Integrate Android first after shared foundations, while running the
+iOS dependency, lifecycle, and policy probes early. Start and recover every
+node as an observer; enable production only after explicit user action and
+readiness checks. Observer mode is a safety state of this producer product.
 
-These ratings are engineering/review-risk assessments, not store decisions.
-The policy grounds are detailed in section 8.
-
-| Variant | iOS | Android | Product decision |
-| --- | --- | --- | --- |
-| Remote companion, watch-only accounts | High technical feasibility; credible store path | High technical feasibility; credible store path | Recommended first release |
-| Non-custodial wallet using remote RPC | Feasible; custody, publisher, and regional scope need review | Feasible; declarations and regional scope need review | Separate increment after watch-only MVP |
-| Embedded observer during explicit sessions | Technically plausible; WASM policy, dependency licensing, resources, and lifecycle remain gates | Technically plausible; native builds, resources, and lifecycle remain gates | Prototype on both; mature Android first |
-| Continuously available background observer | No reliable general-purpose daemon contract | Restricted and device-dependent; a foreground service is not an uptime guarantee | Exclude from normal phone promises |
-| On-device block production | Very high publication risk and poor availability fit | Very high Play publication risk; dedicated-device experiments are a separate question | Exclude from store release scope |
-| Genuine protocol-verifying light client | No implementation established by this review | Same | Separate protocol research, not a build option |
-
-No portable build, device resource profile, App Review decision, or Play review
-decision was produced in this analysis. The feasibility work must resolve those
-unknowns before an embedded-node release is promised.
+Exclude an internal funds wallet, exchange, burns, general portfolio, and
+arbitrary transaction signing from the app. Removing those features reduces
+scope, but does not resolve device-mining restrictions or the cost of porting
+the full validating runtime. Section 8 separates enrollment from eligibility;
+section 12 records the deployment alternatives.
 
 ## 2. Verified starting point
 
-The inspected Teleno checkout is `6652556bc5cf4884f7c4a20aa4ec24d409181f3d`,
-with `VERSION` equal to `1.3.0-dev.0`. The existing root README modification and
-untracked high-throughput plan are unrelated to this proposal. Koinos One was
-read at clean checkout `1e844159973765615f72bd35c6c546f739322c66`; its app version
-is `1.2.0-dev.0`. These are source identities, not mobile binary identities.
+The inspected Teleno checkout is `299a0bfc151bca7c8727cfadabfdc21ebc19046d`,
+with `VERSION` equal to `1.3.0-dev.0`. Its native source is unchanged from
+`6652556bc5cf4884f7c4a20aa4ec24d409181f3d`. Koinos One was read at
+`1e844159973765615f72bd35c6c546f739322c66`, app version `1.2.0-dev.0`.
+These are source identities, not mobile binary identities.
 
 | Current evidence | Consequence for the port |
 | --- | --- |
@@ -85,63 +82,126 @@ relevant fixes and coverage, or must remain unavailable in the mobile profile.
 The existing remediation TODO remains open; this planning task does not start
 its implementation.
 
-## 3. Simplified Koinos One mobile product
+### Producer and contract evidence
 
-### First release: useful without a local blockchain database
+Teleno's [producer configuration](../../src/block_production/block_producer.hpp)
+separates `producer_address` from the signing key. The
+[implementation](../../src/block_production/block_producer.cpp) loads or creates
+a WIF key, implements PoB VRF/block signing, and exposes a key-derived address
+distinct from the configured funding/reward account.
 
-| Surface | Initial behavior | Later extension |
+The inspected [PoB contract](https://github.com/koinos/koinos-one/blob/1e844159973765615f72bd35c6c546f739322c66/vendor/koinos/koinos-contracts-as/contracts/pob/assembly/Pob.ts)
+requires the producer account to authorize key registration, uses the registered
+key for proofs, and applies VHP consumption/KOIN rewards to that account.
+The [VHP contract](https://github.com/koinos/koinos-one/blob/1e844159973765615f72bd35c6c546f739322c66/vendor/koinos/koinos-contracts-as/contracts/vhp/assembly/Vhp.ts)
+supports authorized transfers and delays effective balance increases. No new
+custody contract or consensus change is needed for the proposed separation.
+
+These contract findings describe inspected source, not a fresh audit matching
+it to deployed WASM. Verify the selected network's contract identity,
+parameters, registration, and effective balances before activation. Follow the
+[producer activation guide](../running-producer-node.md).
+
+## 3. Minimal app and external funds custody
+
+Use two separate identities:
+
+| Identity | What it controls | Where its secret lives |
 | --- | --- | --- |
-| Home | Selected network and node, last refresh, head/LIB, health, watch-only balances | Optional notifications from a consented monitoring service |
-| Node | Add an HTTPS endpoint; inspect its identity, connectivity, and capabilities; see available health data | Pair with the user's Koinos One installation; explicit local observer sessions |
-| Accounts | Add public addresses, show KOIN/VHP/Mana, copy/share a receive address or QR, show available activity | Reviewed non-custodial signing and transfers |
-| Activity | Transaction/block details, pending versus confirmed/final status, data-source attribution | Richer history when a compatible index is available |
-| Settings | Network/endpoints, privacy, connection removal, support, licenses, version | Local storage quota, Wi-Fi policy, session settings |
+| Account A: funding and rewards address | KOIN/VHP transfers, external burns, production-key registration/replacement | The user's external wallet; never imported into the producer app |
+| Key P: production key | PoB VRF proofs and block signatures for account A after registration | The device running Teleno, protected through its native key-storage layer |
 
-Retain Koinos One's visual language while designing navigation, forms,
-accessibility, text scaling, and touch targets for phones. Do not transplant the
-desktop's full settings screen. Source selection and stale data must remain
-visible: `Remote node`, `Local validation in progress`, `Validated through
-height ...`, and `History unavailable` represent different guarantees.
+```mermaid
+flowchart LR
+    Wallet[External wallet: account A secret]
+    Account[Account A: KOIN and VHP]
+    Phone[Mobile Teleno: production key P]
+    Registration[PoB registration: account A authorizes P]
+    Chain[Koinos network]
+    Wallet -->|External funding and account operations| Account
+    Phone -->|Public production key only| Wallet
+    Wallet -->|Registers P for A| Registration
+    Registration --> Chain
+    Phone -->|Validates and produces blocks for A| Chain
+    Chain -->|Production consumes VHP and credits KOIN| Account
+```
 
-The initial app does not need a platform account. Manual endpoint setup should
-work before a desktop pairing feature exists. Public chain RPC alone cannot
-provide private CPU/disk/process metrics; capability detection must hide or
-explain unavailable fields. QR pairing, notifications, and richer node health
-require additional infrastructure and are explicitly scheduled below.
+Proposed onboarding:
 
-Keep native builds, repository cloning, shell commands, SFTP administration,
-restore activation, arbitrary RPC consoles, VHP burns, producer-key management,
-and production activation outside the first mobile release. Remote production
-status can be displayed without exposing those operations. Pool discovery and
-allocation workflows can be a later product increment after their data and
-transaction contracts are specified.
+1. The user creates or selects **account A in an external wallet**, then imports
+   only its public address into the app and selects the network.
+2. The app deliberately generates **production key P**. It shows the public key
+   and a registration summary/QR containing the network and account A. A QR or
+   deep link requires a supported external signing flow; its existence must be
+   verified rather than assumed.
+3. In the external wallet or compatible CLI, the user registers P for A. The
+   user also transfers VHP to A or performs an external KOIN-to-VHP burn with A
+   as beneficiary, and maintains the liquid KOIN/Mana needed for account
+   operations. The app neither signs these transactions nor requests A's secret.
+4. The app follows the chain and distinguishes current VHP from **effective VHP**
+   and registration from **active registration**. The inspected contracts use
+   20-block delays for key activation and VHP increases. Check actual network
+   state and registration inclusion; do not use a fixed wall-clock countdown
+   or treat `get_public_key` alone as proof that the key is active.
+5. After local observer readiness and all production checks pass, the user
+   explicitly starts production. The app displays session availability and
+   canonical block results. Losing readiness returns it to a safe paused state.
+6. Rewards remain in A. Transfers, VHP replenishment, key replacement, and
+   revocation remain external. Lost-device recovery generates a replacement
+   production key and re-registers it externally; it does not restore a funds
+   wallet inside the app.
+
+The node can generate P, but **the address derived from P must not be presented
+as the funding address**. Funding that address would defeat the separation.
+If creating the funds account on the phone is essential, account creation,
+secret export, recovery, and wallet classification must be reconsidered; that
+is not the recommended minimal design.
+
+The PoB registration grants production authority, not ordinary spending
+authority over a separate account A. This assumes the account's authorization
+rules do not separately grant P spending rights. Production still consumes
+VHP and credits KOIN under consensus rules, so “no internal wallet” must not
+be described as “no financial effects.”
+
+### App surfaces
+
+The proposed app needs four surfaces: setup with public account and production
+key; node synchronization/readiness; explicit start/pause with production
+results; and settings for storage, network, session limits, diagnostics, and
+external key recovery. Show only balances needed to explain readiness and
+production results. Do not add a general funds wallet, portfolio, exchange,
+burn interface, or arbitrary transaction signer.
+
+The app needs no platform account. Keep source freshness, selected network,
+local validation height, registration status, and the reason production is
+paused visible. General account history is outside the initial product; if a
+later feature uses partial indexes, unavailable history must not mean no activity.
 
 ### App framework decision
 
-| Choice | Reuse and benefit | Cost and limitation |
-| --- | --- | --- |
-| React Native with TypeScript and native modules | Reuses React knowledge, pure TypeScript models, formatters, validation, and selected tests; supports a shared C++ module | React DOM components/CSS need adaptation; OS lifecycle and key handling still need native work |
-| Capacitor with a redesigned React web UI | Reuses more existing DOM components; practical for a companion-focused launch | Still needs native plugins for the node and secure operations; a WebView does not keep background work alive |
-| SwiftUI plus Kotlin/Compose | Direct access to each platform's UI and lifecycle | Two UI implementations and less reuse of the current app |
+React Native with TypeScript and native modules is a reasonable shared-UI
+default for the embedded producer. Keep consensus, scheduling, and signing
+native. SwiftUI plus Kotlin/Compose is an alternative with direct platform
+integration and two UI implementations. Capacitor is more attractive if a
+separate decision selects a remote-management product and greater web UI reuse.
+None changes the storage or background-execution limits.
+[React Native C++ modules](https://reactnative.dev/docs/the-new-architecture/pure-cxx-modules),
+[Capacitor plugins](https://capacitorjs.com/docs).
 
-**Recommended:** React Native if the embedded-node track is a strategic part of
-the product. Prefer Capacitor if the team deliberately chooses a companion-only
-scope and maximum web UI reuse. Both support native integration; neither solves
-the storage or scheduling problem. This judgment follows the existing app
-architecture and the documented
-[React Native C++ module path](https://reactnative.dev/docs/the-new-architecture/pure-cxx-modules)
-and [Capacitor plugin model](https://capacitorjs.com/docs). Do not promise a reuse
-percentage before extracting and testing the actual modules.
+Design a small original phone UI; it need not reproduce Koinos One's wallet or
+desktop workflows. Reuse pure domain logic only after rights and mobile
+behavior checks. Do not promise a reuse percentage before examining the modules.
 
 ## 4. Architecture and trust boundaries
 
 ```mermaid
 flowchart TB
-    UI[Mobile app: status, accounts, activity]
+    UI[Mobile app: setup, readiness, production]
     Domain[Shared TypeScript models and capability checks]
     Remote[Remote HTTPS chain client]
     Bridge[Native mobile bridge]
-    Core[Teleno embedded observer library]
+    Core[Teleno embedded producer runtime]
+    Signer[Native production signer: key P]
     Storage[App-private chain and block storage]
     Peers[Koinos peers]
     Gateway[Optional paired management gateway]
@@ -152,6 +212,7 @@ flowchart TB
     Remote --> Node
     Domain --> Bridge
     Bridge --> Core
+    Core --> Signer
     Core --> Storage
     Core --> Peers
     Domain --> Gateway
@@ -176,9 +237,10 @@ sources. No such path was established in this code review. A pruned validating
 node is also a different product from a light client: it still executes and
 validates blocks while retaining less historical data.
 
-### Optional remote management
+### Optional remote management deployment
 
-Implement pairing and management as a narrow, authenticated service in the app
+If the off-device alternative in section 12 is selected, implement pairing and
+management as a narrow, authenticated service in the app
 or management layer. Teleno remains the node runtime. The current backup admin
 API is not a public remote-control API and should stay loopback-bound.
 
@@ -186,11 +248,12 @@ Start with read-only scopes. Use TLS, a short-lived pairing challenge, explicit
 network/node identity, device-specific revocable credentials, request limits,
 and redacted diagnostics. A gateway should expose named operations and sanitized
 status; it should not forward arbitrary shell commands or the entire admin API.
-Keep production keys on the node. If remote mutations are later added, require
+Keep production keys on the producer host. Adding start/stop control requires
 review of the target and operation, reauthentication, replay protection, an
 operation receipt, and server-side confirmation of the resulting state.
 
-For remote alerts, a separately consented observer/gateway watches the node and
+Remote alerts are optional work outside the initial local producer. A separately
+consented observer/gateway watches the node and
 sends minimal notifications through APNs/FCM. A suspended phone cannot be the
 sole source of continuous monitoring. Document which provider sees endpoints,
 addresses, and notification subscriptions; omit account balances and secrets
@@ -214,6 +277,9 @@ create(config, platform_services) -> handle
 start_async(handle) -> operation_id
 request_suspend(handle, reason) -> operation_id
 resume_async(handle) -> operation_id
+read_producer_readiness(handle) -> versioned_readiness
+start_production_async(handle, reviewed_target) -> operation_id
+pause_production_async(handle, reason) -> operation_id
 query_async(handle, typed_request) -> result
 read_status(handle) -> versioned_status
 subscribe(handle, bounded_event_sink) -> subscription
@@ -233,6 +299,13 @@ with explicit `Suspending`, `Suspended`, `Stopping`, and recoverable error state
 Suspend stops new work and checkpoints progress at a valid persistence boundary.
 A cancellation request must return promptly, including during startup indexing.
 
+Keep production state separate: `Disabled -> AwaitingRegistration -> Eligible ->
+Producing`, with `Paused` and error states. Recheck local chain readiness,
+network/account identity, active registration, effective VHP, key availability,
+and resource limits before signing. Pause on lost readiness. Suspend/restart
+must not silently reactivate production or substitute another key. Production
+ABI operations are proposed named controls, not a general-purpose signing API.
+
 **Correct recovery cannot depend on receiving a shutdown callback.** The OS
 may kill the app before cleanup finishes. Database writes, metadata, replay
 progress, and restore staging must recover coherently after abrupt termination.
@@ -247,18 +320,17 @@ code or required dependency discovery. Introduce explicit mobile CMake targets
 and options, for example `TELENO_BUILD_EMBEDDED` and component selection flags.
 These names are proposed and do not exist today.
 
-For a store observer artifact, omit the producer loop, producer-key creation,
-Go helper transport, CLI tools, server listeners, private SFTP backup, and
-desktop service administration from the link graph. Retain signature/VRF and
-other cryptography needed to validate the protocol. Removing block production
-does not establish that those verification dependencies are unnecessary.
+The producer artifact must retain chain validation, block storage, mempool,
+native P2P/gossip, VRF, block assembly, and the production loop. Inject the
+reviewed native production signer; keep CLI plaintext-key provisioning out of
+the app integration. Exclude Go helper transport, CLI tools, server listeners,
+private SFTP backup, and desktop service administration from the link graph.
 
-Retain chain and required block storage. Assess mempool/gossip dependencies
-before disabling transaction admission. Make optional history and metadata
-indexes genuinely optional, and decouple in-process query dispatch from the
-current network server and its index-library dependencies. Keep a default
-desktop build with the existing service surface to prevent mobile packaging
-from silently regressing native operation.
+Make optional history and metadata indexes genuinely optional, and decouple
+in-process query dispatch from network servers and unnecessary index libraries.
+No JSON-RPC, gRPC, or admin listener should open by default in the mobile app.
+Keep the desktop build's existing service surface and compatibility checks.
+An observer-only artifact would be a separate product, not the producer target.
 
 ### 5.3 Dependency qualification
 
@@ -332,7 +404,8 @@ For illustration, running one hour per day requires at least 24 times the live
 arrival rate during that hour, before initial bootstrap and safety margin.
 This is an illustrative scheduling calculation, not a Koinos throughput
 measurement. Measure work/bytes as well as block counts, since contract-heavy
-blocks vary greatly in cost. A short foreground demo following the head does
+blocks vary greatly in cost. Measure the remaining synchronized, eligible
+production time after catch-up; it is the useful part of the session. A short foreground demo following the head does
 not prove that an intermittently opened phone will remain useful.
 
 ## 6. Platform-specific implementation
@@ -345,7 +418,8 @@ Use a macOS build runner, explicit target deployment versions, and store-signed
 app bundles; do not download native node binaries at runtime.
 [Apple framework packaging](https://developer.apple.com/documentation/xcode/creating-a-multi-platform-binary-framework-bundle).
 
-Implement foreground observer sessions first. Use background transfer APIs for
+Implement explicit foreground producer sessions, starting in observer mode
+until production readiness passes. Use background transfer APIs for
 snapshot downloads, and treat validation/import as separate CPU and storage
 work. Evaluate `BGProcessingTask` and, on iOS 26+, `BGContinuedProcessingTask`
 for bounded user-requested work with progress, expiration, and cancellation.
@@ -357,16 +431,15 @@ of an entitlement to a permanent node daemon.
 
 Handle app suspension, memory warnings, thermal pressure, Low Power Mode,
 protected-data unavailability while locked, and OS termination. Select file
-protection deliberately; do not weaken wallet protection to keep the database
+protection deliberately; do not weaken production-key protection to keep the database
 running. Pause sockets and use persistent recovery state. Request local-network
 access only if LAN pairing needs it, support IPv6/NAT64, and make outbound P2P
 reconnection independent of a stable inbound address.
 
-An initial support-floor proposal is iOS 18+ for the companion, with continued
-processing available only on supported newer systems. Device and framework
-qualification must confirm the floor; choosing the build SDK does not require
-the same minimum deployment OS. Embedded support may need a narrower hardware
-matrix than the companion.
+iOS 18+ is a candidate minimum to qualify, with continued processing available
+only on supported newer systems. Producer resource and framework tests must
+determine the actual supported devices. The build SDK and minimum deployment
+OS are separate choices; no device support is established by this proposal.
 
 ### Android
 
@@ -392,7 +465,7 @@ such as `specialUse` is an automatically accepted way to run indefinitely.
 Use platform transfer/job APIs for resumable downloads when applicable. Their
 transfer allowance does not authorize indefinite block execution. Keep node
 storage app-private, exclude reconstructible data from device backups, and
-avoid broad external-storage permissions. An initial companion floor of
+avoid broad external-storage permissions. An initial producer-app floor of
 Android 11/API 30 is a product proposal to validate, separate from Play's target
 SDK requirement.
 
@@ -404,22 +477,23 @@ through its UI framework. The official page currently specifies a February 1,
 deferred to that deadline.
 [Android 16 KiB support](https://developer.android.com/guide/practices/page-sizes).
 
-## 7. Wallet security and dependency rights
+## 7. Production-key security and dependency rights
 
-### Wallet increment
+### Native production signer
 
-Reuse network definitions, amount formatting, and transaction models only after
-testing their mobile behavior. Replace the desktop key-storage and unlocking
-layer. Validate address derivation, transaction serialization, signatures,
-chain ID, nonce, resource payer/Mana, confirmation text, and finality against
-known fixtures and the reference implementation.
+The current CLI loads or creates a WIF file. That is not a finished mobile key
+store. The port needs OS-backed entropy, encrypted native storage, a reviewed
+key-availability policy while locked, and a narrow interface for VRF/block
+signing. Do not expose private material or a general-purpose signing operation
+to the JavaScript/UI layer. Test loss, rotation, restart, and backup exclusions;
+do not silently replace a missing production key. Hardware protection of the
+wrapping key does not prove the existing Koinos VRF runs inside secure hardware.
 
-Protect account secrets with platform storage and biometric/passcode access.
-Keep decrypted key material out of persistent JavaScript state, logs, analytics,
-crash attachments, clipboard defaults, and the React bridge wherever possible.
-For a native signer, make memory lifetime and zeroization explicit. If secrets
-are processed in JavaScript, do not claim reliable immediate zeroization of
-garbage-collected copies. Test recovery independently of biometric unlock.
+Keep decrypted keys out of logs, analytics, crash attachments, clipboard, and
+persistent UI state. Specify native memory lifetime and zeroization; do not
+claim reliable immediate zeroization of garbage-collected JavaScript copies.
+Test key loss and external re-registration independently of biometric unlock.
+Account A's private key must never enter the app.
 
 Do not promise hardware-isolated Koinos signing merely because the phone has
 a Secure Enclave or StrongBox. The documented Apple API supports NIST P-256,
@@ -429,11 +503,6 @@ key plus reviewed software signing where necessary, or qualify an external
 signer. Explain the difference to users.
 [Apple Secure Enclave](https://developer.apple.com/documentation/security/protecting-keys-with-the-secure-enclave),
 [Android Keystore](https://developer.android.com/privacy-and-security/keystore).
-
-Keep producer hot keys separate from custody keys and outside the mobile MVP.
-Transaction confirmation must show the selected network, signer, destination,
-amount, and operation. A remote server must never be able to turn a read query
-into an opaque signing request.
 
 ### Rights and licenses
 
@@ -457,165 +526,136 @@ LGPL dependency is automatically forbidden in either store.
 
 Removing mobile SFTP avoids shipping libssh for that feature. Removing GMP may
 require a compatible cryptographic implementation and extensive parity review;
-disabling the producer alone is not sufficient evidence that it can be removed.
+both production and protocol validation require qualified VRF cryptography.
 Record an SBOM and license disposition for both mobile artifacts and their
 native/UI dependency trees.
 
-## 8. App Store and Google Play feasibility
+## 8. Individual publishing and store feasibility
 
-### Apple: published rules and their application
+Fees below are paid by the **publisher**, not by every user installing the app.
+They cover developer enrollment, not development, hardware, or node operation.
 
-Apple's relevant published constraints are concise but material:
+| Store | Enrollment | Effect on this proposal |
+| --- | --- | --- |
+| Apple App Store | Individuals can enroll for USD 99 per year, subject to regional pricing. Their legal name appears as seller. Organization enrollment uses the same program fee. [Apple enrollment](https://developer.apple.com/programs/enroll/). | An individual account is possible in general. Eligibility of this particular app remains a separate question. |
+| Google Play | USD 25 once; personal and organization account types exist, with identity verification. [Play enrollment](https://support.google.com/googleplay/android-developer/answer/6112435?hl=en). | Paying the fee does not establish app approval or the appropriate account type. |
 
-- Section 3.1.5(ii) restricts cryptocurrency mining to off-device processing.
-- Section 3.1.5(i) permits wallet storage apps from organization-enrolled developers.
-- Section 2.5.2 restricts downloaded code that changes app functionality; an
-  interpreter is not an explicit blanket exception for blockchain contracts.
-- Sections 2.4.2 and 2.5.4 address resource use and appropriate background work.
-- Sections 2.1, 2.3.1, and 4.2 require reviewable, accurately disclosed, useful
-  functionality. Section 3.1 governs paid digital features.
+Apple's sections 3.1.5(i–ii) reserve wallet storage apps for organization-enrolled
+developers and restrict mining to processing off the device. Google's policy
+prohibits device mining and permits remote mining management.
+[Apple rules](https://developer.apple.com/app-store/review/guidelines/),
+[Google blockchain policy](https://support.google.com/googleplay/android-developer/answer/13607354?hl=en).
 
-**Assessment:** a useful remote companion has a credible path. On-device PoB
-production has very high rejection risk; the rules do not expressly exempt PoB.
-An observer avoids producing rewards, but downloaded contract execution remains
-an unresolved review issue. Explain WASM validation and its restricted host API
-to App Review using a concrete build. Treat feedback as guidance, not guaranteed
-approval. Do not conceal execution behind the label “blockchain data.”
-[App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/).
+**Interpretation:** keeping spending authority external improves the case for a
+producer utility without a wallet. It does not settle either store's
+classification of PoB production. If classified as device mining, that feature
+conflicts with the rules regardless of publisher type. Literal on-device PoW
+would face that direct conflict as well. An organization account does not fix
+the mining restriction.
 
-Demonstrate that contract execution cannot load native libraries or access
-platform/UI services. That technical boundary supports the review explanation;
-it does not establish an exemption.
+Google directs financial-service publishers, including crypto wallets, toward
+organization accounts; those need a D-U-N-S number. Use the account type that
+matches the actual publisher and services. New personal accounts created after
+November 13, 2023 also need a closed test with at least 12 testers continuously
+opted in for 14 days before applying for production access.
+[Account types](https://support.google.com/googleplay/android-developer/answer/13634885?hl=en),
+[Personal-account testing](https://support.google.com/googleplay/android-developer/answer/14151465?hl=en).
 
-### Google Play: published rules and their application
+### Contract execution and device policy
 
-Google prohibits on-device cryptocurrency mining and permits remote mining
-management. Its blockchain policy also requires relevant tokenized-asset
-disclosures and restricts promotion of potential earnings from playing or
-trading. **Assessment:** remote node/producer monitoring has a credible path;
-on-device PoB production is a very high-risk release feature because no explicit
-PoB exception is stated. Low CPU consumption does not establish an exception.
-[Blockchain-based content](https://support.google.com/googleplay/android-developer/answer/13607354?hl=en).
+Apple's section 2.5.2 separately restricts downloaded code that changes app
+functionality; using a WASM interpreter is not a blanket exemption. Explain
+the exact contract execution and restricted host API, including why contracts
+cannot load native libraries or access platform/UI services. Resource use,
+background work, accurate disclosure, and useful functionality also remain
+review requirements.
+[Apple rules](https://developer.apple.com/app-store/review/guidelines/).
 
-Google's country-specific exchange/software-wallet guidance explicitly places
-non-custodial wallets outside that specific policy's scope. That does not remove
-other Play requirements or applicable law. Custody, exchange, fiat services,
-or managed earning products need a separate assessment of features and launch
-territories. In particular, do not tell the project that a purely non-custodial
-wallet automatically requires the same country registrations as an exchange.
-[Exchange and wallet policy guidance](https://support.google.com/googleplay/android-developer/answer/16329703?hl=en).
-
-Play restricts self-updates and downloaded native executables, and includes an
-interpreter/VM exception subject to the rest of its policies. Teleno's exact
-WASM behavior needs documentation and review under that rule. Foreground
-services must have justified types, user-visible purpose and control, and run
-only as needed; declaration evidence may include a demonstration video.
-**Assessment:** package native code through Play and evaluate bounded observer
-sessions. Review P2P relay behavior under the same policy's proxy-service
-restrictions; disable optional general relay service in the phone profile.
-A foreground service does not establish continuous uptime.
+Play restricts self-updates and downloaded native executables; its
+interpreter/VM exception remains subject to other policies. Document Teleno's
+WASM behavior, justify any foreground-service type and controls, and review
+P2P relay behavior under proxy-service restrictions. Disable optional general
+relay service in the phone profile. Package native code through the store;
+neither an interpreter nor a foreground service resolves mining eligibility.
 [Device/network and foreground-service policy](https://support.google.com/googleplay/android-developer/answer/16559646?hl=en).
 
 ### Submission requirements to schedule
 
 | Requirement | Implementation/release action |
 | --- | --- |
-| Publisher identity | Use the authorized organization for the wallet product. Google also directs financial-service publishers toward organization accounts and requires D-U-N-S for organization verification. [Google account types](https://support.google.com/googleplay/android-developer/answer/13634885?hl=en). |
+| Publisher identity | Use an individual account only where the actual publisher and producer utility qualify. Resolve financial-service classification; organization verification requires D-U-N-S on Google. [Google account types](https://support.google.com/googleplay/android-developer/answer/13634885?hl=en). |
 | Current iOS upload toolchain | As checked, uploads require Xcode 26+ with the iOS 26+ SDK, effective April 28, 2026. Recheck at submission; this is distinct from minimum supported device OS. [Apple requirements](https://developer.apple.com/news/upcoming-requirements/). |
 | Current Android target SDK | As checked, new apps/updates must target Android 16/API 36+ from August 31, 2026. Do not plan a new release around an assumed extension. [Play target API policy](https://support.google.com/googleplay/android-developer/answer/11926878?hl=en). |
 | Privacy disclosures | Publish the actual data flow for RPC queries, addresses, node pairing, diagnostics, and push providers. Complete both [Apple privacy details](https://developer.apple.com/app-store/app-privacy-details/) and [Play Data safety](https://support.google.com/googleplay/android-developer/answer/10787469?hl=en). Public blockchain data can still reveal a user's interests and holdings when queried. |
 | Apple native dependency privacy | Audit filesystem/disk and other covered APIs, including third-party libraries, and supply valid reasons/manifests where required. [Required-reason APIs](https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api), [privacy manifests](https://developer.apple.com/documentation/bundleresources/adding-a-privacy-manifest-to-your-app-or-third-party-sdk). |
 | Encryption | Complete export classification for the actual TLS, P2P, storage, and signing implementation; do not assume an HTTPS-only exemption covers all of Teleno. [Apple export compliance](https://developer.apple.com/help/app-store-connect/manage-app-information/overview-of-export-compliance/). |
-| Financial declarations | Complete the financial-features declaration even if the app declares no financial features; select wallet/other applicable features honestly. This also applies to the specified Play testing tracks. [Financial declaration guidance](https://support.google.com/googleplay/android-developer/answer/13849271?hl=en). |
+| Financial declarations | Complete the financial-features declaration even if the app declares no financial features; declare token earning/production and other applicable features accurately; external custody does not mean no financial features. This also applies to the specified Play testing tracks. [Financial declaration guidance](https://support.google.com/googleplay/android-developer/answer/13849271?hl=en). |
 | Account deletion | If a service account is introduced, implement account/data deletion and retention disclosures. Deleting a service account cannot erase on-chain history. Watch-only addresses do not themselves require inventing a backend account system. [Play deletion requirements](https://support.google.com/googleplay/android-developer/answer/13327111?hl=en). |
 | Test access | Plan TestFlight and Play testing with reviewable non-secret access. If using a new personal Play account, the stated closed-test gate is 12 opted-in testers for 14 continuous days before applying for production access; it is not a universal organization-account requirement. [Play testing rules](https://support.google.com/googleplay/android-developer/answer/14151465?hl=en). |
 
-### Store strategy
+### Store submission strategy
 
-Submit the companion as a complete, useful product. Keep the native observer
-in a separately reviewed increment until runtime, rights, and resource gates
-pass. Produce a review packet showing the app modes, a data-flow diagram,
-contract execution boundaries, actual permissions, measured resource use,
-publisher rights, and steps that reviewers can complete without a long chain
-download or access to a private producer.
+Prepare a precise packet showing processing location, PoB/VRF behavior, VHP
+consumption and rewards, separate keys, external funding, WASM boundaries,
+permissions, measured resources, publisher rights, and supported sessions.
+Provide a reproducible non-secret demonstration that does not require access
+to a private producer or an impractically long chain download. Ask how this
+exact functionality is classified; support feedback is not binding preapproval.
 
-If an embedded observer is rejected, retain the companion release while
-resolving the specific objection or appealing with evidence. A simulator build
-or TestFlight acceptance does not prove public store eligibility. Android
-distribution outside Play may be considered for an experimental node, but is
-a separate distribution/security/update project and does not remove OS limits.
-Alternative iOS distribution likewise needs its own eligibility analysis.
+Submit the actual producer feature set when the technical gates pass. Do not
+hide production behind remote flags, a misleading label, or an observer-only
+review build. TestFlight, a test track, or development signing does not establish
+public-store approval. A rejection requires resolving the objection, an
+evidence-based appeal, or an explicit deployment decision under section 12.
 
-The first release should be free of exchange, custody, paid mining, and yield
-products. This narrows the engineering and product scope. Any later paid app
-features, hosted services, or token transactions need their own current
-storefront/payment-policy assessment; using cryptocurrency is not a general
-substitute for platform billing. Launch territories should follow the actual
-service model, with legal review where regulated services are introduced.
+The initial app excludes exchange, funds custody, paid mining services, and
+managed yield products. Later paid features or hosted services need their own
+current payment and regional assessment. Cryptocurrency is not a general
+substitute for platform billing. No store contact or submission was made as
+part of this planning work.
 
-## 9. Implementation work packages
+## 9. Implementation sequence and effort
 
-All package paths below are proposed. Estimates use **engineer-weeks of work**,
-including component tests and integration, and may overlap only with sufficient
-staff. They exclude unpredictable external review time. Work proceeds after a
-separate implementation request; no phase is being executed by this document.
+| Stage | Deliverable | Exit evidence |
+| --- | --- | --- |
+| R0 — product and distribution | Specify PoB, on-device requirement, publisher, supported sessions, external signing flow, and accurate review packet. | A recorded classification assessment and explicit unresolved store questions. If individual publishing or on-device production is mandatory and rejected, stop that store path. |
+| R1 — native feasibility | Minimal real-device harnesses for iOS and Android: VM, crypto/VRF, storage recovery, native P2P, and producer integration probes. | Build identities, dependency/license report, device measurements, and concrete blockers. Compilation alone does not establish production. |
+| R2 — production foundation | Approved durability/cache/lifecycle fixes, shared runtime, secure production signer, component selection, observer readiness, cancellation, and restart behavior. | Desktop regressions and mobile interruption/parity gates pass. Existing WP1–WP3 remain prerequisites, not work completed by this review. |
+| R3 — producer app | Minimal UI and external-registration flow; Android integration first, with early iOS feasibility evidence. Keep chain, mempool, P2P, VRF, and block production in the producer artifact. | A real device produces a PoB block on a controlled test network; an independent reference node accepts it and confirms canonical inclusion and irreversibility. Funds authority stays external. |
+| R4 — useful operation | Sustained supported sessions, offline catch-up, thermal/storage pressure, clock/network changes, lost-key recovery, and rotation. | Measured eligible uptime and block outcomes; no signing while unready, no wallet secret in the app, no automatic key substitution, and coherent recovery after abrupt kills. |
+| R5 — distribution decision | Installed release-candidate tests, exact disclosures, required account verification/testing, and store review of the real feature set. | Actual acceptance for each published artifact. A test installation or support answer is not public release approval. Rejected local production requires a recorded stop or a separately chosen deployment alternative. |
 
-| Package | Scope, repository ownership, and deliverable | Dependency / exit gate | Effort |
-| --- | --- | --- | --- |
-| M0 — feasibility evidence | Teleno: exact dependency/license manifest; minimal Android and iOS native harnesses with storage, VM, crypto, and transport probes. App owner: publisher/reuse rights, target users/devices, store review explanation. | Record real build/link failures and device results; decide which embedded blockers are tractable. Seek policy clarification where available without assuming preapproval. | 4–6 |
-| M1 — companion app | Koinos One mobile app: domain/transport interfaces, phone UI, HTTPS endpoints, watch-only accounts, capability-aware activity and health, accessibility, local preferences, release automation. | M0 product/rights decisions; useful operation on both OSes, including stale/incorrect endpoints. Does not depend on an embedded core. | 8–12 |
-| M2 — shared native foundation | Teleno: prerequisite WP1–WP3 work, runtime extraction, cancellation, build-time component separation, host/target dependency builds, ABI and desktop regression coverage. | M0 native feasibility; no persistence/lifecycle/cache release blockers; desktop behavior preserved. | 10–16 |
-| M3 — Android observer | Teleno: NDK artifact. Mobile app: native adapter, session service, storage/bootstrap UI, reconnects, interruption handling, resource instrumentation. | M2; Android hardware parity, kill/reopen, resource and 16 KiB gates. | 6–10 |
-| M4 — iOS observer | Teleno: iOS artifact. Mobile app: native adapter, app lifecycle, data protection, bounded work/download integration, device resource qualification. | M2 and early iOS policy/license evidence; reviewable observer with acceptable catch-up behavior. May overlap M3 with another engineer. | 8–12 |
-| M5 — embedded release qualification | Both repositories: representative historical validation, adversarial fixtures, long interruption/thermal runs, package/license verification, beta fixes, store review packet. | M3/M4 for each platform; all release gates below. | 6–10 |
-| O1 — mobile wallet | App: native/platform secret handling, recovery, signing, confirmations, independent security review and regional scope. | M1 plus rights/publisher decisions; testnet and recovery gates before a production wallet release. | Additional 6–10, plus external review |
-| O2 — pairing and remote alerts | App/management layer: desktop pairing, authenticated read-only gateway, revocation, sanitized node health, optional APNs/FCM relay. | M1; explicit operational/data ownership and endpoint isolation. | Additional 4–8, plus ongoing service operations |
-| O3 — retention or true light verification | Teleno/protocol work: specify missing retention/proof contracts, implement and validate as separate capabilities. | Only if M0/M3 measurements show the unpruned design misses the product budget. | Re-estimate after design; not included above |
+Keep the native correctness work and device qualification on the critical
+path. The minimal producer UI can progress once its key/registration interfaces
+are defined, but broad app development should not outrun evidence about the
+two-store distribution target. Optional pairing/alerts and protocol retention
+or light-client research require separately specified work packages.
 
-The complete base program M0–M5 is roughly **42–66 engineer-weeks**. A team with
-one C++/storage engineer, one mobile engineer, and part-time QA/design can plan
-approximately **6–9 months** for both embedded variants if the gates pass;
-policy rejection, cryptographic dependency replacement, or pruning could extend
-that substantially. The companion can target a **10–16 week** release track
-with that staffing and overlapping feasibility work. A solo implementation
-should be planned substantially longer, approximately **10–16 months** for the
-base embedded scope, before optional capabilities or major blockers.
+Re-estimate after R0/R1 using actual dependency failures, device results, and
+the selected distribution model. There is no defensible total delivery date
+for this producer scope yet. Removing the wallet reduces feature work; it
+does not remove native runtime extraction, secure production signing, storage,
+or reference/device qualification. Wallet work is not part of this estimate.
 
-These estimates assume existing Koinos protocol expertise, access to suitable
-test devices and a representative chain corpus, no consensus rewrite, and no
-custodial service. Re-estimate after M0 using measured port failures. For a
-financial budget, multiply the selected packages by actual loaded team rates
-and add device/CI, publisher, legal/security review, and optional relay costs;
-no rate or spending budget is assumed here.
-
-### First implementation sequence
-
-1. Agree the initial companion/observer scope and publisher rights; select the
-   oldest supported iPhone and at least one midrange Android test device.
-2. Pin source/dependency revisions and build a minimal native harness on each
-   target; exercise a real VM invocation, RocksDB write/reopen, crypto vectors,
-   and native peer connection rather than stopping at a link-only demo.
-3. Record device memory, disk, thermal, and catch-up results; submit concrete
-   policy questions about observer WASM and keep producer code outside the
-   intended store artifact.
-4. Start the companion domain/UI work while implementing the approved native
-   prerequisites. Preserve a deployable companion if the embedded track stops.
-5. Stabilize Android observer sessions, then qualify iOS and both store builds
-   against the same chain corpus and release gates.
+Budget in engineer-weeks using actual loaded team rates, and separately include
+test devices, CI, publisher fees, security/license review, external review
+delays, and any chosen management service. Parallel execution requires suitable
+C++/storage and mobile engineering capacity. No spending budget is assumed,
+and implementation begins only under a separate implementation request.
 
 ## 10. Verification and release gates
 
 | Gate | Required evidence | Failure action |
 | --- | --- | --- |
-| G0 — build and rights | Clean reproducible cross-builds; exact dependency revisions/SBOM; licensed app reuse and distributable native link graph | Resolve dependency/right issues or keep companion-only artifacts |
+| G0 — build and rights | Clean reproducible cross-builds; exact dependency revisions/SBOM; licensed app reuse and distributable native link graph | Resolve dependency/right issues before releasing the producer |
 | G1 — protocol parity | Same block IDs, receipts, metering, state roots, and LIB/fork outcomes against the reference over a fixed corpus; historical exception and invalid-input cases | Stop embedded release; do not relax validation |
 | G2 — interruption integrity | Repeated process kills during block writes, indexing, WAL/flush, compaction, and bootstrap activation; retry/reopen consistency and preserved recovery markers | Fix durability/lifecycle or keep prototype-only |
 | G3 — resource viability | Whole-app memory, bytes written/day, bootstrap peak disk, steady sync, thermal behavior, and catch-up on the minimum device | Narrow supported devices or implement measured optimizations/retention |
 | G4 — network resilience | Wi-Fi/cellular changes, metered/offline policy, IPv6/NAT64, wrong-chain peers, reconnect storms, partial responses, malicious peers, clock changes | Fix transport and source attribution before beta |
-| G5 — user trust and keys | Explicit local/remote state, incomplete history handling, isolated credentials, verified recovery/signatures if wallet enabled, no producer path in observer package | Remove incomplete feature or remediate |
-| G6 — store artifact | Tests of installed release builds; permissions, manifests, signatures, symbol files, SDK/page-size checks; reviewer access and accurate feature disclosures | Delay that artifact, preserve a separately valid companion release |
+| G5 — production authority and readiness | Account A secret stays external; P has no spending authority; active registration/effective VHP checks; explicit activation; pause when unready; recovery and external key rotation; real PoB blocks accepted by an independent reference node through canonical inclusion and irreversibility | Stop production release and remediate; never substitute a new key or remote data silently |
+| G6 — store artifact | Tests of installed release builds; permissions, manifests, signatures, symbol files, SDK/page-size checks; reviewer access and accurate feature disclosures | Delay that artifact; record store acceptance or explicitly select another deployment |
 
-Suggested initial **acceptance targets**, to confirm in M0 rather than present
+Suggested initial **acceptance targets**, to confirm in R1 rather than present
 as achieved performance:
 
 - At least one older supported iPhone, a contemporary iPhone, a midrange Android
@@ -629,6 +669,8 @@ as achieved performance:
   and lifecycle states, plus deterministic injected failures at known boundaries.
 - Prompt cancellation acknowledgement (target under one second), with a tested
   recovery path when safe shutdown cannot finish within OS-granted time.
+- Measure synchronized and eligible production time, canonical block outcomes,
+  and interruption losses; local logs alone do not prove production.
 - No thermal critical state under the supported workload; pause/reduce optional
   work on thermal warnings. Record battery and storage writes before setting
   public battery-life claims.
@@ -647,11 +689,12 @@ protocol/storage tests, mobile native artifacts, native versioning, and CLI
 documentation. Suggested additions include `src/runtime/`, `include/teleno/`,
 `cmake/mobile/`, platform build scripts, and mobile harness tests.
 
-Koinos One owns the app and management layer. A proposed `mobile/` workspace
-and a narrowly extracted TypeScript domain package can live there after the
-rights and repository-layout decision. A separate mobile repository is also
-possible, but should not duplicate consensus code. This document makes no
-changes to the desktop application or its submodule pin.
+The minimal mobile app can live in a separate repository consuming versioned
+Teleno artifacts. It owns phone UI, OS adapters, secure key storage, store
+packaging, and any separately chosen management service. It need not reproduce
+Koinos One's wallet or desktop workflows. Decide repository layout and rights
+before extracting any Koinos One code/assets; do not duplicate consensus code.
+This plan does not change the desktop app or its Teleno submodule pin.
 
 Publish versioned native artifacts with exact Teleno commit, build options,
 dependency lock, ABI version, symbol files, and license notices. The mobile
@@ -660,15 +703,32 @@ independent release versions. Recheck store policy and toolchain requirements
 for each submission. Preserve the existing desktop/native release gates and
 update affected manuals when behavior actually changes.
 
-## 12. Decisions to make after the feasibility prototype
+## 12. Deployment decision and remaining uncertainty
 
-The recommended defaults are a watch-only companion, React Native for the
-longer-term embedded strategy, explicit observer sessions, and off-device
-production. The prototype should determine whether the native memory/storage
-budget and intermittent catch-up are realistic, whether iOS contract execution
-is reviewable, and whether the dependency licenses permit the intended build.
+| Deployment | Producer location | Fit to the objective |
+| --- | --- | --- |
+| Embedded PoB app in both stores | The phone validates and produces | Exact product target, but publication and useful device availability remain unproven. Do not promise this launch. |
+| Android development/direct-install experiment | A selected Android device | Useful route for measuring actual local production. It does not deliver Play publication or remove OS limits. |
+| iOS development-device experiment | A selected iPhone | Useful for proving native operation and interruption behavior. Development signing is not public App Store distribution. |
+| Store app controlling an off-device Teleno producer | A user-owned computer or server | More credible publication path and availability model. Requires external hardware and management setup; does not satisfy literal production on the phone. |
 
-If those gates pass, proceed with the staged native port. If they fail, the
-companion remains a useful product, and a dedicated light-client or retention
-project can be evaluated using measured evidence. Neither outcome should be
-described as a completed mobile full-node port before the native gates pass.
+The remote alternative can still be a **producer product**: pair an existing
+user-owned Teleno deployment, provision P there, register/fund A externally,
+check readiness, then explicitly start or stop production from an authenticated
+client. P stays on the producer host. Secure pairing, revocation, and a narrow
+management API would need implementation; public chain RPC is insufficient.
+Keep privileged backup/admin endpoints isolated. This alternative is a product
+decision, not an automatic substitute for the requested local producer.
+
+Proceed with a public local-producer release only when protocol, key isolation,
+recovery, useful device operation, rights, and the relevant store's review
+all pass. If local production and both stores are mandatory, an unresolved
+policy blocker leaves the requested deployment unproven; it is not solved by
+shipping a monitoring app. Alternative iOS distribution needs its own
+eligibility analysis, and direct Android distribution needs an update/security
+plan in addition to device qualification.
+
+No mobile build, performance test, store approval, funding transaction,
+registration, deployment, or production activation was performed by this
+analysis. The plan describes the evidence required before those outcomes can
+be claimed.
