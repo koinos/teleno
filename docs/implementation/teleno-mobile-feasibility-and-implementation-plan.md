@@ -2,6 +2,8 @@
 
 Date: 2026-09-10. Status: **PROPOSED — analysis only; no mobile port implemented.**
 
+Spanish translation: [Español](teleno-mobile-feasibility-and-implementation-plan.es.md).
+
 This plan covers the native Teleno port, a simplified Koinos One mobile app,
 and publication through Apple's App Store and Google Play. Policy conclusions
 use the official pages linked below, checked on the date above. Engineering

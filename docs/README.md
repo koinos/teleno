@@ -46,6 +46,7 @@ checks pass.
 - [iOS and Android Feasibility and Implementation Plan](implementation/teleno-mobile-feasibility-and-implementation-plan.md) -
   native port assessment, simplified mobile app, store policy constraints, and
   staged implementation and verification gates.
+  [Spanish translation](implementation/teleno-mobile-feasibility-and-implementation-plan.es.md).
 
 ## Safety Model
 
