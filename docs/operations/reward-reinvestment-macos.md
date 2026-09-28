@@ -15,6 +15,7 @@ The implementation lives in [`tools/reinvestment/`](../../tools/reinvestment/):
 
 - `reinvest-teleno-rewards.cjs`: irreversible receipt accounting, explicit-amount
   burns, reserve/cap/minimum controls and persistent reconciliation.
+- `reinvest-rpc.cjs`: bounded read-only JSON-RPC transport and pinned-head block batches.
 - `reinvest-keychain.swift`: native Keychain import and noninteractive access.
 - `reinvest-macos-runner.cjs`: private configuration and scheduler entrypoint.
 - `install-reinvest-macos.py`: observation-only hourly LaunchAgent installer.
@@ -27,7 +28,7 @@ Every operator supplies their own account with `--account`.
 
 - macOS, Python 3, Node.js 22 and Swift command-line build tools.
 - A trusted kcli checkout with `node_modules/koilib` installed, its CLI built,
-  and `src/abis/pob.json` present. Follow that project's installation instructions.
+  and `src/abis/pob.json` plus `src/abis/token.json` present. Follow that project's installation instructions.
 - An encrypted custody wallet at `~/.kcli/wallet.json` matching the producer
   account. The wallet and password file must be owned by the current user and
   inaccessible to other users (0600).
@@ -150,8 +151,21 @@ launchctl print "gui/$(id -u)/org.koinos.reinvest"
   runs. Back up state: deleting and recounting old rewards can burn twice.
 - Only irreversible blocks are counted; RPC chain identity, checkpoint and
   block continuity are checked. This does not authenticate a malicious RPC.
-- RPC failures stop the current run. The next hourly scan resumes from saved
-  state. Scans are bounded at 10,000 blocks; incomplete scans never burn.
+- RPC reads send explicit JSON headers, use a 15-second request/body timeout,
+  and attempt at most five times for network errors, non-JSON responses,
+  HTTP 408/429 and server errors. Retries use exponential backoff plus jitter;
+  Retry-After is respected up to 30 seconds. Permanent HTTP/authorization and
+  JSON-RPC application errors fail closed rather than being retried.
+- Reads are paced at least 500 ms apart and blocks are fetched in batches of
+  20 against one sampled head ID. Exact batch coverage, per-block continuity,
+  receipts and the persisted checkpoint remain validated. Each processed block
+  is still checkpointed individually.
+- Exhausted RPC retries stop the current run. The next hourly scan resumes
+  from saved state. Scans are bounded at 10,000 blocks; incomplete scans never
+  burn. No alternate RPC is silently selected.
+- The retry transport allows only named read methods. It rejects transaction
+  and block submission. kcli signing/submission remains separate and is never
+  automatically retried by this transport.
 - Pending attempts block automatic resubmission. A timeout, rejected transaction
   or missing transaction ID requires investigation, not clearing the pending
   state. Inspect canonical transactions and receipts from `scanFrom` onward.
@@ -181,10 +195,18 @@ release updater, notification service or isolated signing backend.
 ## Validation Scope
 
 ```bash
-node --test tools/reinvestment/reinvest-teleno-rewards.test.cjs
+node --test tools/reinvestment/reinvest-teleno-rewards.test.cjs tools/reinvestment/reinvest-rpc.test.cjs
+KCLI_ROOT='/absolute/path/to/kcli-checkout' node --test tools/reinvestment/reinvest-rpc.test.cjs
 python3 tools/reinvestment/install-reinvest-macos.py --help
 swiftc tools/reinvestment/reinvest-keychain.swift -o /tmp/reinvest-keychain-check
 ```
+
+The RPC/ABI repair was verified by a complete live read-only catch-up and amount
+preview, including successful recovery from HTTP 429 rate limits. Balance reads
+use kcli's bundled token ABI rather than the incompatible SDK convenience ABI.
+The optional `KCLI_ROOT` test exercises the actual installed ABI without network
+access; transport tests simulate HTML, 429, server errors, timeouts, permanent
+failures, refusal of mutation methods and incomplete block batches.
 
 The original local variant passed live read-only producer-receipt parsing,
 Keychain access, custody-address verification and observation-mode LaunchAgent

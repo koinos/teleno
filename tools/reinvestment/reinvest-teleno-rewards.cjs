@@ -9,6 +9,7 @@ const CHAIN = 'EiBZK_GGVP0H_fXVAM3j6EAuz3-B-l3ejxRSewi7qIBfSA==';
 const KOIN = '19GYjDBVXU7keLbYvMLazsGQn3GTWHjHkK';
 const POB = '159myq5YUhhoVWu3wsHKHiJYKPKGUrGiyv';
 const SCALE = 100000000n;
+const { createReadRpc, canonicalBlocks } = require('./reinvest-rpc.cjs');
 
 function units(value) {
   if (!/^\d+(\.\d{1,8})?$/.test(value || '')) throw new Error('Use a nonnegative decimal with at most 8 decimals');
@@ -74,6 +75,7 @@ async function main(argv) {
   const checksum = crypto.createHash('sha256').update(crypto.createHash('sha256').update(decoded.slice(0, 21)).digest()).digest().subarray(0, 4);
   if (decoded.length !== 25 || decoded[0] !== 0 || !Buffer.from(decoded.slice(21)).equals(checksum)) throw new Error('Invalid producer address');
   const provider = new Provider([opt.rpc || 'https://api.koinos.io']);
+  provider.call = createReadRpc({ endpoint: opt.rpc || 'https://api.koinos.io' });
   const file = path.resolve(opt.state || path.join(os.homedir(), '.kcli/teleno-reinvest/state.json'));
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const dir = fs.lstatSync(path.dirname(file));
@@ -85,11 +87,18 @@ async function main(argv) {
     if (await provider.getChainId() !== CHAIN) throw new Error('Wrong chain: mainnet required');
     const head = await provider.getHeadInfo();
     const lib = Number(head.last_irreversible_block);
+    if (!Number.isSafeInteger(lib) || lib < 1 || lib > Number(head.head_topology.height)) throw new Error('Invalid RPC finality');
+    const headId = head.head_topology.id;
+    const getBlock = async height => {
+      const blocks = await provider.getBlocks(height, 1, headId, { returnBlock: false, returnReceipt: false });
+      if (!blocks || blocks.length !== 1 || Number(blocks[0].block_height) !== height) throw new Error('Missing checkpoint block');
+      return blocks[0];
+    };
     if (opt.init) {
       if (opt.execute || fs.existsSync(file)) throw new Error('Initialization cannot execute or overwrite state');
       const start = opt['start-height'] ? Number(opt['start-height']) : lib + 1;
       if (!Number.isSafeInteger(start) || start < 1 || start > lib + 1) throw new Error('Invalid start height');
-      const previous = await provider.getBlock(start - 1);
+      const previous = await getBlock(start - 1);
       save(file, { version: 1, account: ACCOUNT, chain: CHAIN, cursor: start - 1, blockId: previous.block_id,
         rewards: '0', burned: '0', pending: null, history: [] });
       console.log(`Initialized for ${ACCOUNT}; rewards counted from height ${start}. No burn.`);
@@ -99,7 +108,7 @@ async function main(argv) {
     protectedFile(file);
     const state = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (state.version !== 1 || state.account !== ACCOUNT || state.chain !== CHAIN) throw new Error('Wrong state identity/version');
-    if (state.cursor > lib || (await provider.getBlock(state.cursor)).block_id !== state.blockId) throw new Error('RPC finality/checkpoint mismatch');
+    if (state.cursor > lib || (await getBlock(state.cursor)).block_id !== state.blockId) throw new Error('RPC finality/checkpoint mismatch');
     const mint = new Serializer({ nested: { reward: { fields: {
       to: { type: 'bytes', id: 1, options: { '(koinos.btype)': 'ADDRESS' } },
       value: { type: 'uint64', id: 2, options: { jstype: 'JS_STRING' } }
@@ -109,8 +118,8 @@ async function main(argv) {
     const max = Number(opt['max-blocks'] || 1000);
     if (!Number.isSafeInteger(max) || max < 1 || max > 10000) throw new Error('max-blocks must be 1..10000');
     const end = Math.min(lib, state.cursor + max);
-    for (let height = state.cursor + 1; height <= end; height++) {
-      const b = await provider.getBlock(height);
+    for await (const b of canonicalBlocks(provider, headId, state.cursor + 1, end)) {
+      const height = state.cursor + 1;
       if (!b?.receipt || !b.block || Number(b.block_height) !== height || b.receipt.id !== b.block_id || b.block.header.previous !== state.blockId) {
         throw new Error(`Missing/inconsistent block or receipt at ${height}`);
       }
@@ -151,7 +160,8 @@ async function main(argv) {
     if (!opt.reserve || !opt.cap) throw new Error('Set explicit --reserve and --cap (KOIN)');
     const reserve = units(opt.reserve), cap = units(opt.cap), minimum = units(opt.min || '1');
     if (reserve <= 0n || cap <= 0n || minimum <= 0n) throw new Error('Reserve, cap and minimum must be positive');
-    const koin = new Contract({ id: KOIN, abi: utils.tokenAbi, provider });
+    const tokenAbi = JSON.parse(fs.readFileSync(path.join(root, 'src/abis/token.json'), 'utf8'));
+    const koin = new Contract({ id: KOIN, abi: tokenAbi, provider });
     const { result } = await koin.functions.balance_of({ owner: ACCOUNT });
     if (!result?.value) throw new Error('Missing balance response');
     const balance = BigInt(result.value);

@@ -35,7 +35,7 @@ def main():
     plist_path = home / f'Library/LaunchAgents/{label}.plist'
     if config_path.exists() or plist_path.exists():
         raise SystemExit('Existing installation found; refusing to overwrite it')
-    for required in [node, kcli, root / 'node_modules/koilib', root / 'src/abis/pob.json']:
+    for required in [node, kcli, root / 'node_modules/koilib', root / 'src/abis/pob.json', root / 'src/abis/token.json']:
         if not required.exists():
             raise SystemExit(f'Missing dependency: {required}')
     wallet = home / '.kcli/wallet.json'
@@ -45,7 +45,7 @@ def main():
         folder.mkdir(parents=True, exist_ok=True)
     for folder in [base, release, logs, state.parent]:
         folder.chmod(0o700)
-    for name in ['reinvest-teleno-rewards.cjs', 'reinvest-macos-runner.cjs', 'reinvest-keychain.swift']:
+    for name in ['reinvest-teleno-rewards.cjs', 'reinvest-rpc.cjs', 'reinvest-macos-runner.cjs', 'reinvest-keychain.swift']:
         shutil.copyfile(source / name, release / name)
         (release / name).chmod(0o600)
     helper = release / 'reinvest-keychain'
