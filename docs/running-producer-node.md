@@ -159,6 +159,11 @@ check in this guide passes.
 
 ## Out Of Scope
 
+An optional external custody-wallet utility is documented in
+[Reward Reinvestment With kcli On macOS](operations/reward-reinvestment-macos.md).
+It installs in observation mode and is separate from the native producer;
+installation does not authorize burns or recurring transaction signing.
+
 This CLI guide does not provide commands for producer registration, VHP burns,
 wallet default-account changes, or transaction signing/submission. Those are
 chain-mutating actions and require separate explicit confirmation.
