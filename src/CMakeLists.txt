@@ -550,7 +550,7 @@ if(KOINOS_BUILD_TESTS)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_executable(teleno_compatibility_fixture
     ../tests/integration/compatibility_fixture.cpp)
-  target_link_libraries(teleno_compatibility_fixture PRIVATE chain)
+  target_link_libraries(teleno_compatibility_fixture PRIVATE chain koinos_storage_lib)
   add_test(NAME koinos_compatibility_node_test
     COMMAND ${Python3_EXECUTABLE} -B
       ${CMAKE_CURRENT_SOURCE_DIR}/../tests/integration/compatibility_node_test.py

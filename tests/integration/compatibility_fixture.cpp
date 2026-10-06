@@ -6,6 +6,7 @@
 
 #include <koinos/chain/system_calls.pb.h>
 #include <koinos/util/base64.hpp>
+#include "storage/rocksdb_manager.hpp"
 #include <google/protobuf/util/json_util.h>
 #include <filesystem>
 #include <fstream>
@@ -88,8 +89,17 @@ int main(int argc, char** argv) {
     require(refused, "old capacity unexpectedly returned selected bytecode");
     old.close();
 
+    // Match the native node's persisted genesis metadata and shared CF layout.
+    node::storage::RocksDBManager reference_storage;
+    node::NodeConfig reference_config;
+    reference_storage.open(root / "reference-state", reference_config);
+    auto backend = std::make_shared<state_db::backends::rocksdb::rocksdb_backend>();
+    backend->open(*reference_storage.db(),
+                  *reference_storage.handle(node::storage::ColumnFamily::default_state),
+                  *reference_storage.handle(node::storage::ColumnFamily::chain_state),
+                  *reference_storage.handle(node::storage::ColumnFamily::chain_metadata));
     chain::controller reference(10'000'000, 131'072, {});
-    reference.open(std::make_shared<state_db::backends::map::map_backend>(), genesis, chain::fork_resolution_algorithm::pob, false);
+    reference.open(std::move(backend), genesis, chain::fork_resolution_algorithm::pob, false);
     auto previous = util::converter::as<std::string>(crypto::multihash::zero(crypto::multicodec::sha2_256));
     const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     for (uint64_t height = 1; height <= 3; ++height) {
@@ -105,6 +115,7 @@ int main(int argc, char** argv) {
       previous = block.id();
     }
     reference.close();
+    reference_storage.close();
     std::cout << "Prepared owned native fixture; old-capacity refusal reproduced; three reference roots generated.\n";
     return 0;
   } catch (const std::exception& e) {
