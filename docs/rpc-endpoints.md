@@ -43,14 +43,15 @@ transaction store, contract meta store, and account history when those
 components are enabled. It does not expose native backup or restore admin
 methods.
 
-## Compatibility candidate 1.2.1
+## Native compatibility update 1.2.1
 
-The [1.2.1 candidate](validation/compatibility-1.2.1.md) raises the external
+The [1.2.1 compatibility update](validation/compatibility-1.2.1.md) raises the external
 `chain.invoke_system_call` result capacity to 131,072 bytes. Fresh accepted
 receipts can complete an otherwise identical archived receipt's missing state
 root. Existing roots are preserved and conflicting completion is refused.
-This does not repair historical omissions. Verify the actual binary identity;
-the candidate is not a published final release or a packaged Koinos One update.
+This does not repair historical omissions. Verify the actual native binary
+identity. Koinos One requires its own submodule/binary integration and package
+checks before the application includes these changes.
 
 ## gRPC
 
