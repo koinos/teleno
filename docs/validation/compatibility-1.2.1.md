@@ -152,10 +152,66 @@ IDs, PIDs and start times remained unchanged.
 
 This evidence precedes the final version/commit rebuild. The final artifact
 metadata and completion checkpoint must record its own identities and results;
-a passing RC-era binary cannot be relabeled as a final release. An official
+a passing RC-era binary cannot be relabeled as a final release. Official
 image builds failed on GNU redirect and GMP project connection timeouts.
 The clean hosted native build of `4b52a44d8007883cb52a3a6e85c2f5ae15280580`
 passed all 22 CTests and all four benchmark unit tests. The subsequent build
 recipe correction keeps the two runtime patches unchanged and requires its own
 final artifact identities and official image qualification. Runs superseded by the
 corrected fixture/final-source work were cancelled and do not count as passes.
+
+## Final release evidence
+
+[Native 1.2.1](https://github.com/koinos/teleno/releases/tag/teleno-node-v1.2.1)
+was published on 6 October 2026 at 18:25:30 UTC. The annotated tag remains
+`teleno-node-v1.2.1`, pointing to source
+`2f3cda598c3f8a02cc4d1a7f1992f0a7c70e043f` on native 1.2.0.
+This later documentation/development-version update does not relabel the
+release artifacts or move the release tag.
+
+| Gate | Verified result |
+| --- | --- |
+| Final Linux native build | 22/22 CTests in 17.64 seconds; 4/4 benchmark unit tests; exit 0, no OOM |
+| [Clean hosted native build](https://github.com/koinos/teleno/actions/runs/37489887688) | 22/22 CTests and 4/4 benchmark unit tests; CLI identity passed |
+| [Official Dockerfile qualification](https://github.com/koinos/teleno/actions/runs/37489892888) | Clean build, version/help and producer guard passed; no image push |
+| [Tag image publication](https://github.com/koinos/teleno/actions/runs/37501717598) | Build, smoke tests and GHCR push passed on the exact release source |
+| Isolated observer scenario | Passed with the actual native ELF and again inside the pulled official image |
+| Assets | Six uploaded files; server SHA-256 digests and downloaded bytes verified; all 251 source files and the staged container ELF inspected |
+| Service preservation | All 14 pre-existing service IDs, PIDs and start times unchanged after image qualification |
+
+Both isolated observer runs used fresh owned data and no public networking or
+operator keys. They returned the exact 109,002-byte selected bridge WASM,
+accepted the 131,072-byte serialized return boundary, refused oversize output
+without changing state, completed three finalized receipts matching a separately
+generated reference, preserved two full receipts/head/identity across a clean
+shutdown and cold restart, and accepted a third block afterwards. The official
+image test used a read-only root, dropped capabilities, no new privileges, two
+CPUs and 5 GiB RAM with no additional container swap. Its deterministic fixture
+was built separately from the same verified source and mounted read-only.
+
+The native Linux ELF reports
+`1.2.1+2f3cda598c3f8a02cc4d1a7f1992f0a7c70e043f`, SHA-256
+`42da08d680b162076d9d3927a7e11f3c5382ee83432e495d2cb55e8729d0b4cb`.
+The official image reports `1.2.1+2f3cda598c3f`; its ELF SHA-256 is
+`a7b8445235baaab78e04ab909c844ac6fd430495cb0abe4355973892e426bfbb`.
+They have the same source commit but distinct build identities and binaries.
+The Docker-save release asset stages the exact native ELF over the released
+1.2.0 runtime; it is distinct from the official Dockerfile image.
+
+The verified official image is:
+
+```text
+ghcr.io/koinos/teleno@sha256:97cba04de727fb295320dfbdf69d5cc99b029dc0daf4541fe6bc7a3bab51dee8
+```
+
+The `1.2.1`, `teleno-node-v1.2.1`, `sha-2f3cda5` and `latest` tags were pushed
+with this digest. Final checksums, source manifests, commands, test logs, CLI
+evidence and image qualification are included in the release assets. Artifacts
+are unsigned. Private infrastructure details, databases, signing fixtures and
+dependency caches are excluded.
+
+The unpublished original RC remains distinct. No live node, Vortex deployment,
+public chain, producer, Koinos One binary/package or submodule pin changed.
+These fixtures do not qualify bridge execution, historical repair, full mainnet
+catch-up, LR2 memory bounds, integrated races or production readiness. The
+independent LR2 work remains outside this compatibility release.

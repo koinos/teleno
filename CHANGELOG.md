@@ -4,6 +4,8 @@ All notable changes to the Teleno node runtime are documented in this file.
 Release tags use the form `teleno-node-v<version>`; the version source of
 truth is the `VERSION` file at the repository root.
 
+## [1.2.2-dev.0] - Unreleased
+
 ## [1.2.1] - 2026-10-06
 
 ### Fixed
