@@ -5,6 +5,7 @@
 #undef main
 
 #include <koinos/chain/system_calls.pb.h>
+#include "koinos/state_db/backends/rocksdb/rocksdb_backend.hpp"
 #include <koinos/util/base64.hpp>
 #include "storage/rocksdb_manager.hpp"
 #include <google/protobuf/util/json_util.h>
