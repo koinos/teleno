@@ -58,7 +58,7 @@ chain:
   verify-blocks: true
 jsonrpc:
   listen: 127.0.0.1:{port}
-  jobs: 1
+  jobs: 2
 features:
   chain: true
   block_store: true
