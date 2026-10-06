@@ -547,6 +547,17 @@ if(KOINOS_BUILD_TESTS)
     COMMAND koinos_block_receipt_completion_test)
   set_tests_properties(koinos_block_receipt_completion_test PROPERTIES TIMEOUT 45)
 
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_executable(teleno_compatibility_fixture
+    ../tests/integration/compatibility_fixture.cpp)
+  target_link_libraries(teleno_compatibility_fixture PRIVATE chain)
+  add_test(NAME koinos_compatibility_node_test
+    COMMAND ${Python3_EXECUTABLE} -B
+      ${CMAKE_CURRENT_SOURCE_DIR}/../tests/integration/compatibility_node_test.py
+      --node $<TARGET_FILE:teleno_node>
+      --fixture $<TARGET_FILE:teleno_compatibility_fixture>)
+  set_tests_properties(koinos_compatibility_node_test PROPERTIES TIMEOUT 100)
+
   add_executable(koinos_rocksdb_manager_test
     ../tests/storage/rocksdb_manager_test.cpp)
 
