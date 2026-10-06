@@ -66,10 +66,13 @@ The backup missing-object regression now selects `db/CURRENT` from the latest
 snapshot manifest. Its previous directory-order selection could remove an
 unused historical object and produce a false CI failure. This is a test-only
 correction. CI selects owned temporary/test roots explicitly. The GMP download
-URL now uses the project's own HTTPS archive; version 6.3.0 and pinned SHA-256
+URL now uses the kernel.org GNU HTTPS mirror; version 6.3.0 and pinned SHA-256
 `a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898`
-are unchanged. The earlier GNU mirror timed out during the official image build;
-that failed build is retained as a failure, not qualification.
+are unchanged. The GNU redirect and GMP project endpoints both timed out in
+official image builds. The mirror's downloaded bytes match the same pin.
+Download waits are bounded, and Docker builds GMP before its long dependency
+build so a source-download failure is visible early. Failed image builds are
+retained as failures, not qualification.
 
 ## Repeatable qualification
 
@@ -150,5 +153,9 @@ IDs, PIDs and start times remained unchanged.
 This evidence precedes the final version/commit rebuild. The final artifact
 metadata and completion checkpoint must record its own identities and results;
 a passing RC-era binary cannot be relabeled as a final release. An official
-image build first failed on the GNU mirror timeout. Runs superseded by the
+image builds failed on GNU redirect and GMP project connection timeouts.
+The clean hosted native build of `4b52a44d8007883cb52a3a6e85c2f5ae15280580`
+passed all 22 CTests and all four benchmark unit tests. The subsequent build
+recipe correction keeps the two runtime patches unchanged and requires its own
+final artifact identities and official image qualification. Runs superseded by the
 corrected fixture/final-source work were cancelled and do not count as passes.

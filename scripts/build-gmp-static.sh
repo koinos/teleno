@@ -7,7 +7,7 @@ DEPS_ROOT="${KOINOS_DEPS_ROOT:-$ROOT_DIR/.deps}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
 
 GMP_VERSION="${GMP_VERSION:-6.3.0}"
-GMP_SOURCE_URL="${GMP_SOURCE_URL:-https://gmplib.org/download/gmp/gmp-$GMP_VERSION.tar.xz}"
+GMP_SOURCE_URL="${GMP_SOURCE_URL:-https://mirrors.kernel.org/gnu/gmp/gmp-$GMP_VERSION.tar.xz}"
 GMP_SOURCE_SHA256="${GMP_SOURCE_SHA256:-a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898}"
 GMP_SOURCE_TARBALL="${GMP_SOURCE_TARBALL:-}"
 GMP_INSTALL_DIR="${GMP_INSTALL_DIR:-$DEPS_ROOT/gmp-static-$GMP_VERSION}"
@@ -73,7 +73,7 @@ resolve_source_tarball() {
   mkdir -p "$GMP_DOWNLOAD_DIR"
   tarball="$GMP_DOWNLOAD_DIR/gmp-$GMP_VERSION.tar.xz"
   echo "==> Downloading GMP $GMP_VERSION source" >&2
-  curl -L --fail --retry 3 --output "$tarball" "$GMP_SOURCE_URL"
+  curl -L --fail --retry 3 --connect-timeout 20 --max-time 180 --output "$tarball" "$GMP_SOURCE_URL"
   verify_tarball "$tarball" || exit 1
   printf '%s\n' "$tarball"
 }

@@ -19,8 +19,10 @@ truth is the `VERSION` file at the repository root.
 
 ### Build and validation
 
-- Fetch the identical hash-pinned GMP 6.3.0 archive from the GMP project after
-  the GNU mirror became unreachable. Dependency versions remain unchanged.
+- Fetch the identical hash-pinned GMP 6.3.0 archive from the kernel.org GNU
+  mirror after the GNU redirect and GMP project endpoints timed out in CI.
+  Bound download waits and build GMP before Docker's long dependency build.
+  Dependency versions remain unchanged.
 - Add a canonical isolated observer test for large bytecode retrieval, buffer
   boundaries, finalized receipt completion and cold restart persistence.
 - Give CI explicit owned test roots and make the backup missing-object test
