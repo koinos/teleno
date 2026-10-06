@@ -20,6 +20,10 @@ def require(value, message):
         raise RuntimeError(message)
 
 
+def rpc_bytes(value):
+    return bytes.fromhex(value[2:]) if value.startswith('0x') else base64.b64decode(value, validate=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--node', required=True)
@@ -123,11 +127,11 @@ features:
         before = rpc('chain.get_head_info')
         for slot in ('large', 'boundary', 'small'):
             response = rpc('chain.invoke_system_call', json.loads((basedir / f'{slot}-request.json').read_text()))
-            require(base64.b64decode(response['value'], validate=True)
+            require(rpc_bytes(response['value'])
                     == (basedir / f'{slot}-expected-wire.bin').read_bytes(), f'{slot} byte-for-byte readback')
         rpc('chain.invoke_system_call', json.loads((basedir / 'oversize-request.json').read_text()), error=True)
         response = rpc('chain.invoke_system_call', json.loads((basedir / 'small-request.json').read_text()))
-        require(base64.b64decode(response['value'], validate=True)
+        require(rpc_bytes(response['value'])
                 == (basedir / 'small-expected-wire.bin').read_bytes(), 'read after refusal')
         require(before == rpc('chain.get_head_info'), 'read changed chain head/state')
 
