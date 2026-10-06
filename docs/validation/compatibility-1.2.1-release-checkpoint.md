@@ -66,7 +66,8 @@ or generated CTest edits are packaged. Artifacts are unsigned.
   read-only, network-disabled released runtime container with no chain/key mounts.
 - A staged candidate container was built from the exact ELF and digest-pinned
   1.2.0 runtime. Its version/help, ELF hash, libraries and producer guard passed
-  with no network, writable filesystem or chain/key mounts. Container archive
+  with networking disabled and a read-only root filesystem, without chain/key
+  mounts. Container archive
   inspection found the exact candidate ELF in its final layer.
 - Original provisional ELF still has SHA-256
   `430f6940d7e000577155ac6bcfc74637e4768cfdb32799c37fb9f5529ab85416`;
