@@ -21,7 +21,9 @@ def require(value, message):
 
 
 def rpc_bytes(value):
-    return bytes.fromhex(value[2:]) if value.startswith('0x') else base64.b64decode(value, validate=True)
+    if value.startswith('0x'):
+        return bytes.fromhex(value[2:])
+    return base64.b64decode(value + '=' * (-len(value) % 4), altchars=b'-_', validate=True)
 
 
 def main():
