@@ -146,10 +146,12 @@ features:
         require(len(response['block_items']) == 1, 'archived block missing')
         item = response['block_items'][0]
         receipt = item['receipt']
-        expected_root = '0x' + (basedir / f'block-{height}-root.bin').read_bytes().hex()
-        require(receipt['id'] == block_id(height) and int(receipt['height']) == height
-                and receipt['state_merkle_root'] == expected_root, 'archived finalized receipt/root mismatch')
-        require(item['block']['id'] == block_id(height), 'archived block identity')
+        expected_root = (basedir / f'block-{height}-root.bin').read_bytes()
+        expected_id = (basedir / f'block-{height}-id.bin').read_bytes()
+        require(rpc_bytes(receipt['id']) == expected_id and int(receipt['height']) == height
+                and rpc_bytes(receipt['state_merkle_root']) == expected_root,
+                f'archived finalized receipt/root mismatch: {receipt.get("state_merkle_root")} / {expected_root.hex()}')
+        require(rpc_bytes(item['block']['id']) == expected_id, 'archived block identity')
         return item
 
     def submit(height):
@@ -158,7 +160,8 @@ features:
         require(response['receipt'] == item['receipt'], 'early archive did not complete exact execution receipt')
         head = rpc('chain.get_head_info')
         require(int(head['head_topology']['height']) == height
-                and head['head_topology']['id'] == block_id(height), 'observer head did not advance')
+                and rpc_bytes(head['head_topology']['id']) == (basedir / f'block-{height}-id.bin').read_bytes(),
+                'observer head did not advance')
         return item
 
     process, log = start('first-start')
