@@ -4,7 +4,7 @@ All notable changes to the Teleno node runtime are documented in this file.
 Release tags use the form `teleno-node-v<version>`; the version source of
 truth is the `VERSION` file at the repository root.
 
-## [1.2.1-rc.1] - Unreleased
+## [1.2.1] - 2026-10-06
 
 ### Fixed
 
@@ -17,12 +17,18 @@ truth is the `VERSION` file at the repository root.
   preserve existing roots, block topology and archive WAL policy. This does
   not repair historical omissions or replace missing entire receipts.
 
-### Validation boundary
+### Build and validation
 
-- This is a source and artifact release candidate, not a published final
-  release. See [qualification and operator notes](docs/validation/compatibility-1.2.1.md).
-- Production changes are limited to these two fixes on native release 1.2.0.
-  Unfinished LR2 work and unrelated development changes are excluded.
+- Fetch the identical hash-pinned GMP 6.3.0 archive from the GMP project after
+  the GNU mirror became unreachable. Dependency versions remain unchanged.
+- Add a canonical isolated observer test for large bytecode retrieval, buffer
+  boundaries, finalized receipt completion and cold restart persistence.
+- Give CI explicit owned test roots and make the backup missing-object test
+  select an object referenced by the latest snapshot. No backup runtime behavior
+  changes are included.
+- Runtime changes are limited to the two fixes above on native release 1.2.0;
+  unfinished LR2 work and unrelated development changes are excluded. See
+  [qualification and operator notes](docs/validation/compatibility-1.2.1.md).
 
 ## [1.2.0] - 2026-08-29
 

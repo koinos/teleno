@@ -1,7 +1,9 @@
 # Compatibility 1.2.1 candidate completion checkpoint
 
-6 October 2026. **Final publication withheld; an unpublished draft is retained.**
-This checkpoint records completed authorized work and the remaining release gates.
+Initial checkpoint, 6 October 2026. **The unpublished RC draft is retained.**
+This historical snapshot records the original component-only qualification.
+The user later authorized the full native suite and isolated observer tests;
+see the [updated qualification report](compatibility-1.2.1.md).
 
 ## Exact identity
 
@@ -105,14 +107,14 @@ and qualification limits. The qualification archive includes the exact build
 command, source manifest, permitted test logs, CLI/container evidence and the
 runtime staging recipe, with private infrastructure details excluded.
 
-## Remaining gates and maintenance boundary
+## Gates outstanding at the initial checkpoint
 
 Full scenario CTest, whole-node finalized-receipt readback plus observer restart,
 actual selected large-contract bytecode readback and a fresh standard Dockerfile
 build remain unqualified. The restricted component/runtime evidence cannot be
-reported as passing those gates. The current task forbids additional simulated
-chains, forks and laboratory deployments and does not authorize installing the
-candidate on a live node. Retain the candidate rather than publish a falsely
+reported as passing those gates. The original component-only scope excluded additional simulated
+chains, forks and laboratory deployments. The later test authorization permits
+isolated native fixtures while live-node installation remains outside scope. Retain the candidate rather than publish a falsely
 qualified final release. No public tag, final release, producer action, transaction,
 database reset/pruning/repair or seed-server change occurred. No PR was created,
 because its automatic CI would execute scenarios outside this task's boundary.

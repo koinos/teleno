@@ -1,18 +1,20 @@
-# Native 1.2.1 compatibility release candidate
+# Native 1.2.1 compatibility qualification
 
 Prepared 6 October 2026. Base: native 1.2.0 commit
 `b8dab4c08f99ff1ba951e4bd229a154572b8e4ee`.
-Candidate version: `1.2.1-rc.1`; branch: `codex/release-1.2.1-compatibility`.
-This candidate is not a published final release or a live-node update.
+Final source version: `1.2.1`; branch: `codex/release-1.2.1-compatibility`.
+Publication requires the final version, exact source commit, rebuilt artifacts,
+checksums and container gates to agree. Preparing source does not publish it.
+The [initial RC checkpoint](compatibility-1.2.1-release-checkpoint.md) preserves
+its distinct frozen build and unpublished assets.
 
-## Production scope and review
+## Production scope
 
-Only `src/main.cpp` and `src/block_store/block_store.cpp` change production
-behavior. The external `chain.invoke_system_call` buffer increases from
-64,000 (the actual base-source value) to 131,072 bytes. This accommodates
-retrieval of the selected 109,002-byte bridge contract plus protobuf framing.
-The capacity change does not alter VM execution, compute limits or RPC exposure.
-Actual large-contract retrieval using this candidate remains unqualified.
+Only `src/main.cpp` and `src/block_store/block_store.cpp` change runtime behavior.
+The external `chain.invoke_system_call` buffer increases from the actual base
+value of 64,000 to 131,072 bytes. This accommodates the selected 109,002-byte
+bridge contract plus protobuf framing. VM execution, compute limits, RPC exposure,
+production defaults and unfinished LR2 changes are outside this patch.
 
 The store archives an early receipt before finalization sets its state root.
 On the later validated accepted notification, the existing-record path can
@@ -24,46 +26,64 @@ completion raises an error. An absent entire receipt remains absent.
 The existing exclusive store lock covers lookup, validation and write. The
 single-record write uses the existing `put_record_bytes` and asynchronous WAL
 policy. Skip-list pointers, highest-block topology and other records are
-preserved. Encoding validation relies on the controller's validated receipt;
-it does not independently prove the digest against chain state. Interruptions
-before the accepted notification can still leave an omission. No historical
-repair, database rewrite, pruning, new defaults or unfinished LR2 work is included.
+preserved. The validated controller receipt supplies the root; the store does
+not independently recompute it. An interruption before the accepted notification
+can still leave an omission. Historical repair, database rewrites and pruning
+remain separate work.
 
-The canonical `koinos_block_receipt_completion_test` links the production store.
-Its test-only RocksDB wrapper injects a failed Put without owning the real DB.
-It requires an existing, explicitly selected `TELENO_TEST_ARTIFACT_ROOT` and
-retains fresh fixture directories. Temporary overlay builds and edited generated
-CTest files are not part of the candidate source.
+## Canonical regressions
 
-## Verified prepared-input evidence
+`koinos_block_receipt_completion_test` links the production store. It checks
+accepted notification after topology advance, cold reopen, late/duplicate
+preservation, failed Put/retry, fourteen conflicting completion refusals and
+absent-receipt preservation. Its RocksDB wrapper injects a failed Put without
+owning the real DB.
 
-Before assembling this candidate, all 251 production/component input files
-matched their recorded sizes and SHA-256 values. Manifest SHA-256:
-`81450faac970a5534487333a516ea7eb622cfb42d24cb2fde48f3f21ec12b798`.
-Input archive SHA-256:
-`fde1210b87e76e4e2b5813c4ed1d98fb2e26159d1872c3759f53f9215b1806d0`.
-Minimal corrected block store SHA-256:
-`53deada5889918566bae8311e72f1ddc1f5158f9563422e8715a2adc614817d6`.
+`koinos_compatibility_node_test` runs the actual native executable with fresh
+owned data, loopback-only RPC and disabled P2P and production. Its helper reuses
+the repository's deterministic test-only genesis/signing fixture and generates
+reference finalized roots with the native shared RocksDB layout. No operator
+keys are read or written. The test verifies:
 
-The earlier native Linux/x86_64 build finished successfully without OOM.
-The original missing-root defect failed at the expected preservation assertion;
-the corrected component passed completion after topology advance, cold reopen,
-late/duplicate preservation, failed-write retry, fourteen conflict refusals and
-absent-receipt preservation. Eleven focused CTests passed with zero executed
-failures. Ten scenario tests were disabled before execution and did not pass.
-The earlier modified binary still reported its base 1.2.0 identity and must
-never be relabeled or distributed as this candidate. CLI and library checks
-of that earlier binary were performed with networking disabled and no chain or
-key mounts; they do not qualify the candidate artifact.
+- byte-for-byte retrieval of a 109,002-byte payload through the external syscall;
+- an exact 131,072-byte serialized result, oversize refusal and a successful small
+  read after refusal, without changing head/state;
+- real controller submission, early archive and accepted-notification completion
+  for two test blocks, matching independently generated finalized roots and the
+  complete execution receipt returned by submission;
+- a clean observer shutdown and cold restart, unchanged head, chain identity,
+  blocks and receipts, followed by a third block preserving earlier records.
 
-## Repeatable build and bounded qualification
+The default CTest payload is deterministic test data. Set
+`TELENO_TEST_CONTRACT_BYTECODE` to the selected public WASM for exact bridge
+qualification. The runner requires 109,002 bytes and SHA-256
+`d66facf63456ff6b2690d7e6756142008b11d985886d8ce10411864eb6992a49`.
+The WASM is an external qualification input, not bundled into Teleno source.
+This proves retrieval and receipt persistence in an isolated native observer;
+it does not execute the bridge contract or qualify a Vortex deployment.
 
-Use a clean checkout of the candidate commit, Ubuntu 24.04/x86_64, pinned native
-dependencies, fresh owned build/test directories and copied dependency caches.
-Keep original caches and unrelated services intact. Limit the build to two CPUs,
-5 GiB RAM and no container swap; no chain data or signing secrets are inputs.
+The backup missing-object regression now selects `db/CURRENT` from the latest
+snapshot manifest. Its previous directory-order selection could remove an
+unused historical object and produce a false CI failure. This is a test-only
+correction. CI selects owned temporary/test roots explicitly. The GMP download
+URL now uses the project's own HTTPS archive; version 6.3.0 and pinned SHA-256
+`a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898`
+are unchanged. The earlier GNU mirror timed out during the official image build;
+that failed build is retained as a failure, not qualification.
 
-A clean dependency build uses the repository recipe:
+## Repeatable qualification
+
+Use a clean checkout or hash-verified Git export of the exact source commit,
+Ubuntu 24.04/x86_64, pinned dependencies and owned build/test storage. Keep source
+manifests, compiler/configure commands, logs and binary identity. For an export,
+set `TELENO_GIT_COMMIT_OVERRIDE` to the verified full commit. A copied build cache
+is only an optimization: its source paths must resolve to this exact export and
+all executed targets must be built from it.
+
+For bounded local qualification, use two CPUs and 5 GiB RAM without container
+swap, copied dependency inputs, no network and no live chain/key mounts. Mac
+results cannot close Linux operational gates. Generated local data belongs on
+the user-selected external volume; an absent volume is a stop condition.
 
 ```bash
 export PYTHONDONTWRITEBYTECODE=1
@@ -78,50 +98,57 @@ export KOINOS_BUILD_TESTS=ON
 mkdir -p "$TMPDIR" "$TELENO_TEST_ARTIFACT_ROOT"
 ./scripts/build-cpp-libp2p-koinos.sh
 cmake --build "$TELENO_TEST_BUILD_ROOT" --parallel 2
-```
-
-A fresh CMake configure can reuse the exact pinned installed dependencies;
-retain its command, source manifest, cache and compiler identity as evidence.
-For a Git source export, set `TELENO_GIT_COMMIT_OVERRIDE` to the verified full
-commit. Require `CMAKE_HOME_DIRECTORY` to name that exact source tree.
-
-Within the currently authorized component-only scope, execute this exact subset:
-
-```bash
-ctest --test-dir "$TELENO_TEST_BUILD_ROOT" --output-on-failure \
-  -R '^koinos_(block_receipt_completion|config|service_registry|rocksdb_manager|state_db_durability|state_db_pending_root|backup_plan|backup_checkpoint|backup_snapshot|backup_sftp|gorpc_codec)_test$'
+ctest --test-dir "$TELENO_TEST_BUILD_ROOT" --output-on-failure
+python3 -B -m unittest -v tests/scripts/benchmark_transaction_tps_test.py
 "$TELENO_TEST_BUILD_ROOT/teleno_node" --version
 "$TELENO_TEST_BUILD_ROOT/teleno_node" --help
 ```
 
-No generated CTest edits are needed. Record the excluded controller delta,
-indexer lookahead, historical replay fixture, public restore, backup service,
-backup admin, peer sync, producer, mempool and gRPC scenario tests as **not run**.
-Do not start additional simulated chains, forks or laboratory node deployments.
-The exact current build/test/container outcome belongs in the completion
-checkpoint and artifact metadata; this source report does not predeclare a pass.
+The user subsequently authorized the full native suite and isolated readback/
+restart fixture. The initial eleven-test restriction does not apply to that
+follow-up. Record every failure and repair before the final passing run. Test
+reader corrections included Koinos hex/URL-safe base64 handling, persisted
+reference genesis and two RPC session slots for adjacent connection cleanup.
+No generated CTest overlays or edits are part of the source.
 
-## Publication and operator gate
+## Release and operator boundaries
 
-A final release requires version/commit-matched artifacts, focused and broader
-native test evidence, CLI identity, container verification, checksums, operator
-notes and a secret-free source/artifact review. The restricted subset is not
-complete CTest qualification. Whole-node accepted-receipt readback after
-finalization and observer restart, and actual large-contract readback, remain
-unqualified. Keep this concrete candidate rather than publish a falsely
-qualified final release while those gates are unresolved. GitHub PR CI runs
-scenario tests outside this task's scope; do not use it to bypass that boundary.
+Require the full native suite, benchmark unit suite, exact selected bytecode
+fixture, version/help, runtime libraries, producer guard, official Dockerfile
+build/smoke and secret-free source/artifact review. Record final commit, binary
+hashes, source manifest and the actual container provenance in artifact metadata.
+Rebuild after setting the final version; never relabel the earlier provisional
+or RC binaries. Publish only when the applicable gates pass.
 
-For a separately authorized maintenance action, verify exact source commit,
-artifact SHA-256, version, libraries, network, observer role, selected basedir,
-configuration and ownership before staging. Preserve the old binary and data.
-After approved installation, check fresh accepted receipts against an independent
-reference and exact retrieved bytecode, then perform an approved observer
-restart. Preserve existing state and diagnose any mismatch; historical omissions
-require separate repair authorization. A rollback plan must retain the original
-binary/configuration and account for complete receipts already written; do not
-reset or prune the DB. Producer activation remains a separate decision.
+This scoped compatibility release does not qualify whole-node memory bounds,
+4-GB VPS catch-up, sanitizer/race coverage, historical repair or production
+activation. Those remain separate gates for the LR2 work excluded here.
 
-Koinos One documentation may describe this native candidate, but its submodule,
-binary, package and GUI do not gain the fixes until a deliberately authorized
-integration pins this exact native commit and passes its own package checks.
+For separately authorized installation, verify source commit, artifact SHA-256,
+version, libraries, network, observer role, basedir, configuration and ownership.
+Preserve old binary, configuration and data. Check fresh receipts against an
+independent reference and exact bytecode, then perform an approved observer
+restart. Preserve and diagnose state on a mismatch. Rollback must account for
+complete receipts already written; do not reset or prune the database.
+
+Koinos One documentation can describe the native fixes, but its submodule,
+binary, GUI and packages acquire them only through a separately authorized
+integration pinning the exact native release commit and passing app package
+checks. No live node, producer, public chain, Vortex deployment, app packaging
+or submodule mutation is part of this qualification.
+
+## Pre-release test evidence
+
+On 6 October 2026, all 22 canonical CTests passed in 15.33 seconds, with
+zero failures, on source `b52ff4b94cd4f001ffbe1fe2dfe91596f5c36b70`.
+The four benchmark unit tests also passed. The integration CTest used the exact
+selected bridge WASM and the two runtime patches are unchanged for the final
+version rebuild. The container exited 0 without OOM; the complete source
+manifest matched before and after building. All fourteen pre-existing service
+IDs, PIDs and start times remained unchanged.
+
+This evidence precedes the final version/commit rebuild. The final artifact
+metadata and completion checkpoint must record its own identities and results;
+a passing RC-era binary cannot be relabeled as a final release. An official
+image build first failed on the GNU mirror timeout. Runs superseded by the
+corrected fixture/final-source work were cancelled and do not count as passes.

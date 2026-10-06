@@ -143,9 +143,10 @@ their blast radius.
   timestamp, and native runtime identity.
 - Update changelog or release notes for user-facing behavior.
 
-## 1.2.1 Compatibility Candidate
+## 1.2.1 Compatibility Release
 
 See [scope, qualification and operator notes](validation/compatibility-1.2.1.md).
-Keep the candidate separate from the unrelated LR2 development tree. A retained
-candidate and component subset do not imply a final release, a published image
-or live-node qualification.
+Keep this compatibility release separate from the unrelated LR2 development
+tree. Its native source, final version, artifacts, full test suite and container
+checks must agree before publication. The initial RC assets have a distinct
+identity and must never be relabeled as final artifacts.
