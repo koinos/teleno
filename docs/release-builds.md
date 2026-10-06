@@ -142,3 +142,10 @@ their blast radius.
 - Check About/Build Info for product version, commit, release channel, build
   timestamp, and native runtime identity.
 - Update changelog or release notes for user-facing behavior.
+
+## 1.2.1 Compatibility Candidate
+
+See [scope, qualification and operator notes](validation/compatibility-1.2.1.md).
+Keep the candidate separate from the unrelated LR2 development tree. A retained
+candidate and component subset do not imply a final release, a published image
+or live-node qualification.

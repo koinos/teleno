@@ -4,6 +4,26 @@ All notable changes to the Teleno node runtime are documented in this file.
 Release tags use the form `teleno-node-v<version>`; the version source of
 truth is the `VERSION` file at the repository root.
 
+## [1.2.1-rc.1] - Unreleased
+
+### Fixed
+
+- Increase the external `chain.invoke_system_call` result buffer from 64,000
+  to 131,072 bytes, allowing retrieval of larger contract bytecode without
+  changing protocol execution or compute limits.
+- Complete a missing archived receipt state root when a validated accepted
+  receipt matches the same block, identity, height and every other execution
+  field. Require a 34-byte SHA-256 multihash; refuse conflicting data and
+  preserve existing roots, block topology and archive WAL policy. This does
+  not repair historical omissions or replace missing entire receipts.
+
+### Validation boundary
+
+- This is a source and artifact release candidate, not a published final
+  release. See [qualification and operator notes](docs/validation/compatibility-1.2.1.md).
+- Production changes are limited to these two fixes on native release 1.2.0.
+  Unfinished LR2 work and unrelated development changes are excluded.
+
 ## [1.2.0] - 2026-08-29
 
 ### Added

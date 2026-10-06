@@ -16,6 +16,51 @@ KOINOS_DECLARE_DERIVED_EXCEPTION( block_not_present, block_store_exception );
 KOINOS_DECLARE_DERIVED_EXCEPTION( unexpected_height, block_store_exception );
 KOINOS_DECLARE_DERIVED_EXCEPTION( db_error, block_store_exception );
 
+namespace {
+
+// The controller archives a receipt before finalization, then publishes its
+// completed root through block_accepted. Complete only that missing field;
+// never replace archived blocks, execution results, or an existing root.
+bool complete_receipt_root( koinos::block_store::block_record& record,
+                            const rpc::block_store::add_block_request& req )
+{
+  const auto& block = req.block_to_add();
+  if( !record.has_block() || record.block_id() != block.id()
+      || record.block_height() != block.header().height()
+      || record.block().SerializeAsString() != block.SerializeAsString() )
+    KOINOS_THROW( db_error, "conflicting archived block; preserve archive for diagnosis" );
+
+  if( !record.has_receipt() || !req.has_receipt_to_add()
+      || req.receipt_to_add().state_merkle_root().empty() )
+    return false;
+
+  const auto& incoming = req.receipt_to_add();
+  const auto& stored = record.receipt();
+  const auto& root = incoming.state_merkle_root();
+  if( incoming.id() != block.id() || stored.id() != block.id()
+      || incoming.height() != record.block_height()
+      || stored.height() != record.block_height()
+      || root.size() != 34 || static_cast< unsigned char >( root[ 0 ] ) != 0x12
+      || static_cast< unsigned char >( root[ 1 ] ) != 0x20 )
+    KOINOS_THROW( db_error, "invalid completed receipt identity or state root" );
+
+  auto expected = stored;
+  auto supplied = incoming;
+  expected.clear_state_merkle_root();
+  supplied.clear_state_merkle_root();
+  if( expected.SerializeAsString() != supplied.SerializeAsString()
+      || ( !stored.state_merkle_root().empty() && stored.state_merkle_root() != root ) )
+    KOINOS_THROW( db_error, "conflicting archived receipt; preserve archive for diagnosis" );
+
+  if( !stored.state_merkle_root().empty() )
+    return false;
+
+  record.mutable_receipt()->set_state_merkle_root( root );
+  return true;
+}
+
+} // namespace
+
 BlockStore::BlockStore( rocksdb::DB* db,
                         rocksdb::ColumnFamilyHandle* cf_handle,
                         rocksdb::ColumnFamilyHandle* cf_meta )
@@ -315,7 +360,19 @@ BlockStore::add_block( const rpc::block_store::add_block_request& req )
   // Check if already stored
   auto existing = get_record_bytes( block.id() );
   if( !existing.empty() )
+  {
+    koinos::block_store::block_record previous;
+    if( !previous.ParseFromString( existing ) )
+      KOINOS_THROW( db_error, "invalid archived block record; preserve archive for diagnosis" );
+    if( complete_receipt_root( previous, req ) )
+    {
+      std::string completed;
+      if( !previous.SerializeToString( &completed ) )
+        KOINOS_THROW( db_error, "failed to serialize completed block receipt" );
+      put_record_bytes( block.id(), completed );
+    }
     return resp; // Idempotent
+  }
 
   // Build the BlockRecord with skip-list pointers
   koinos::block_store::block_record record;

@@ -532,6 +532,21 @@ if(KOINOS_BUILD_TESTS)
   add_test(NAME koinos_historical_fast_replay_fixture_test
     COMMAND koinos_historical_fast_replay_fixture_test)
 
+  # Receipt completion uses the production store and a test-only failing Put.
+  add_executable(koinos_block_receipt_completion_test
+    ../tests/storage/block_receipt_completion_test.cpp
+    ../tests/storage/fault_db.cpp)
+  target_link_libraries(koinos_block_receipt_completion_test PRIVATE
+    koinos_block_store_lib)
+  if(NOT MSVC)
+    # Hunter RocksDB omits RTTI; isolate its StackableDB subclass accordingly.
+    set_source_files_properties(../tests/storage/fault_db.cpp
+      PROPERTIES COMPILE_OPTIONS "-fno-rtti")
+  endif()
+  add_test(NAME koinos_block_receipt_completion_test
+    COMMAND koinos_block_receipt_completion_test)
+  set_tests_properties(koinos_block_receipt_completion_test PROPERTIES TIMEOUT 45)
+
   add_executable(koinos_rocksdb_manager_test
     ../tests/storage/rocksdb_manager_test.cpp)
 
