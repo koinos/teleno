@@ -152,7 +152,10 @@ ghcr.io/koinos/teleno:1.1.0
 ghcr.io/koinos/teleno:beta
 ```
 
-The `beta` tag continues to track `main`.
+The `beta` tag continues to track `main`. Native prereleases publish explicit
+version/commit tags without replacing `latest`; only a matching stable native
+release tag advances `latest`. Manual dispatch on another branch does not
+automatically update `beta`.
 
 For local Docker builds, pass the exact Git revision so the binary build
 identity and the OCI revision label agree. The OCI version tag still comes

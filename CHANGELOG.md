@@ -24,6 +24,9 @@ See the [detailed alpha release notes](docs/releases/1.3.0-alpha.1.md).
 - Preserve the published 1.2.1 compatibility fixes, observer restart regression,
   hash-pinned GMP mirror, bounded downloads, explicit CI test roots and
   deterministic backup missing-object test alongside the accumulated changes.
+- Retain the clean Linux binary, native version/help, complete JUnit report,
+  linked-library hashes and committed-source manifest as CI release inputs.
+  Prerelease container tags cannot replace `latest`; `beta` follows `main`.
 - The alpha is an independent Teleno release. Koinos One GUI packaging and its
   native submodule pin are separate; no running node is upgraded by publishing it.
 

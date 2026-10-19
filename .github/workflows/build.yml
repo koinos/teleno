@@ -70,7 +70,7 @@ jobs:
           TELENO_TEST_BUILD_ROOT: ${{ github.workspace }}/build
         run: |
           mkdir -p "$TMPDIR" "$TELENO_TEST_ARTIFACT_ROOT"
-          ctest --test-dir "$TELENO_TEST_BUILD_ROOT" --output-on-failure --output-junit build/native-tests.xml
+          ctest --test-dir "$TELENO_TEST_BUILD_ROOT" --output-on-failure --output-junit "$TELENO_TEST_BUILD_ROOT/native-tests.xml"
 
       - name: Record exact native build provenance
         run: python3 -B scripts/record-native-build.py --binary build/teleno_node --output build/generated/teleno-node-build-info.json
