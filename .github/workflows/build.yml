@@ -44,12 +44,12 @@ jobs:
         run: ./scripts/build-cpp-libp2p-koinos.sh
 
       - name: Report version
-        run: ./build/teleno_node --version
+        run: ./build/teleno_node --version | tee build/native-version.txt
 
       - name: Smoke test CLI surface
         run: |
-          ./build/teleno_node --help >/tmp/teleno-node-help.txt
-          grep -q -- "--backup-public-list" /tmp/teleno-node-help.txt
+          ./build/teleno_node --help >build/native-help.txt
+          grep -q -- "--backup-public-list" build/native-help.txt
 
       - name: Test transaction TPS benchmark
         env:
@@ -70,4 +70,20 @@ jobs:
           TELENO_TEST_BUILD_ROOT: ${{ github.workspace }}/build
         run: |
           mkdir -p "$TMPDIR" "$TELENO_TEST_ARTIFACT_ROOT"
-          ctest --test-dir "$TELENO_TEST_BUILD_ROOT" --output-on-failure
+          ctest --test-dir "$TELENO_TEST_BUILD_ROOT" --output-on-failure --output-junit build/native-tests.xml
+
+      - name: Record exact native build provenance
+        run: python3 -B scripts/record-native-build.py --binary build/teleno_node --output build/generated/teleno-node-build-info.json
+
+      - name: Retain qualified native release inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: teleno-native-linux-amd64-${{ github.sha }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/teleno_node
+            build/native-version.txt
+            build/native-help.txt
+            build/native-tests.xml
+            build/generated/teleno-node-build-info.json
