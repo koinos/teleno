@@ -59,7 +59,7 @@ RUN --mount=type=cache,target=/opt/teleno-deps,sharing=locked \
     && install -Dm755 "${KOINOS_NODE_BUILD_DIR}/teleno_node" /out/teleno_node \
     && /out/teleno_node --version
 
-FROM ubuntu:${UBUNTU_VERSION} AS runtime
+FROM ubuntu:${UBUNTU_VERSION} AS runtime-base
 
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
@@ -79,7 +79,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data /usr/local/share/teleno/config /usr/local/share/teleno/public-bootstrap
 
-COPY --from=build /out/teleno_node /usr/local/bin/teleno_node
 COPY config/testnet-public-bootstrap-observer.yml /usr/local/share/teleno/config/testnet-public-bootstrap-observer.yml
 COPY config/testnet-public-bootstrap-observer.container.yml /usr/local/share/teleno/config/testnet-public-bootstrap-observer.container.yml
 COPY config/prodnet-docker-producer.yml /usr/local/share/teleno/config/prodnet-docker-producer.yml
@@ -100,3 +99,12 @@ EXPOSE 8080/tcp 8888/tcp 18088/tcp 18122/tcp 18888/tcp
 
 ENTRYPOINT ["teleno_node"]
 CMD ["--help"]
+
+# Explicit alpha packaging path. The CI workflow verifies the source, native
+# test run and ELF hash before supplying this file in its isolated context.
+FROM runtime-base AS native-artifact
+COPY .release-native/teleno_node /usr/local/bin/teleno_node
+
+# A normal Docker build still compiles the runtime from source.
+FROM runtime-base AS runtime
+COPY --from=build /out/teleno_node /usr/local/bin/teleno_node

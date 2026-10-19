@@ -12,6 +12,10 @@ on:
         required: true
         type: boolean
         default: true
+      native_run_id:
+        description: Successful same-commit Build run to package for a native alpha; empty builds from source.
+        required: false
+        default: ''
   push:
     branches:
       - main
@@ -52,6 +56,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   packages: write
 
 concurrency:
@@ -64,6 +69,9 @@ env:
 
 jobs:
   build-smoke-publish:
+    if: >-
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.native_run_id == '') &&
+      (!startsWith(github.ref, 'refs/tags/teleno-node-v') || !contains(github.ref_name, '-alpha.'))
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -153,3 +161,163 @@ jobs:
               docker push "$tag"
             fi
           done <<< "$IMAGE_TAGS"
+
+
+  package-verified-native:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.native_run_id != '') ||
+      (startsWith(github.ref, 'refs/tags/teleno-node-v') && contains(github.ref_name, '-alpha.'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      NATIVE_RUN_ID: ${{ github.event.inputs.native_run_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify trusted native build run
+        run: |
+          if [[ -z "$NATIVE_RUN_ID" ]]; then
+            NATIVE_RUN_ID="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build.yml \
+              --commit "$GITHUB_SHA" --event workflow_dispatch --status success \
+              --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          fi
+          [[ "$NATIVE_RUN_ID" =~ ^[0-9]+$ ]]
+          mkdir -p "$RUNNER_TEMP/teleno-qualified-image"
+          export NATIVE_RUN_ID
+          echo "NATIVE_RUN_ID=$NATIVE_RUN_ID" >> "$GITHUB_ENV"
+          echo "IMAGE_CONTEXT=$RUNNER_TEMP/teleno-qualified-image/context" >> "$GITHUB_ENV"
+          echo "NATIVE_ARTIFACT=$RUNNER_TEMP/teleno-qualified-image/native" >> "$GITHUB_ENV"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$NATIVE_RUN_ID" >"$RUNNER_TEMP/teleno-qualified-image/run.json"
+          python3 -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          run = json.loads((Path(os.environ['RUNNER_TEMP']) / 'teleno-qualified-image/run.json').read_text())
+          assert run['head_sha'] == os.environ['GITHUB_SHA']
+          assert run['head_repository']['full_name'] == os.environ['GITHUB_REPOSITORY']
+          assert run['event'] == 'workflow_dispatch' and run['path'] == '.github/workflows/build.yml'
+          assert run['status'] == 'completed' and run['conclusion'] == 'success'
+          PY
+          gh run download "$NATIVE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "teleno-native-linux-amd64-$GITHUB_SHA" --dir "$RUNNER_TEMP/teleno-qualified-image/native"
+
+      - name: Verify and stage exact native artifact
+        id: native
+        run: |
+          python3 -B - <<'PY'
+          import hashlib, json, os, re, shutil, struct, subprocess
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          source = Path.cwd()
+          native = Path(os.environ['NATIVE_ARTIFACT'])
+          context = Path(os.environ['IMAGE_CONTEXT'])
+          info = json.loads((native / 'generated/teleno-node-build-info.json').read_text())
+          version = (source / 'VERSION').read_text().strip()
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+', version)
+          if os.environ['GITHUB_REF_TYPE'] == 'tag':
+              assert os.environ['GITHUB_REF_NAME'] == 'teleno-node-v' + version
+          assert info['source_commit'] == os.environ['GITHUB_SHA'] and info['source_clean'] is True
+          assert info['native_version'] == version
+          names = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          actual = {}
+          for name in filter(None, names):
+              path = source / name
+              assert path.is_file() and not path.is_symlink()
+              actual[name] = {'bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+          assert actual == info['committed_source_files']
+          binary = (native / 'teleno_node').read_bytes()
+          digest = hashlib.sha256(binary).hexdigest()
+          assert binary[:5] == b'\x7fELF\x02' and binary[5] == 1 and struct.unpack('<H', binary[18:20])[0] == 62
+          assert digest == info['binary']['sha256'] and len(binary) == info['binary']['bytes']
+          cases = list(ET.parse(native / 'native-tests.xml').getroot().iter('testcase'))
+          assert len(cases) >= 64 and 'koinos_compatibility_node_test' in {case.attrib['name'] for case in cases}
+          assert all(case.find('failure') is None and case.find('error') is None and case.find('skipped') is None for case in cases)
+          for name in actual:
+              if name == 'Dockerfile' or name.startswith('config/') or name == 'docker/teleno-prod-producer':
+                  target = context / name
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(source / name, target)
+          target = context / '.release-native/teleno_node'
+          target.parent.mkdir(parents=True)
+          target.write_bytes(binary)
+          target.chmod(0o755)
+          reported = subprocess.check_output([str(target), '--version'], text=True).strip()
+          assert reported == info['native_build_version'] == (native / 'native-version.txt').read_text().strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('version=' + version + '\nsha256=' + digest + '\n')
+          (native / 'verified-image-input.json').write_text(json.dumps({'source_commit': info['source_commit'], 'native_version': version, 'native_build_version': reported, 'binary_sha256': digest, 'native_run_id': os.environ['NATIVE_RUN_ID'], 'normal_tests_passed': len(cases)}, indent=2) + '\n')
+          PY
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve build date
+        id: build-date
+        run: echo "value=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Package verified native image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.IMAGE_CONTEXT }}
+          target: native-artifact
+          load: true
+          tags: |
+            teleno-node:qualified
+            ghcr.io/${{ github.repository }}:${{ steps.native.outputs.version }}
+            ghcr.io/${{ github.repository }}:teleno-node-v${{ steps.native.outputs.version }}
+            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.native.outputs.version }}
+            org.teleno.native.binary.sha256=${{ steps.native.outputs.sha256 }}
+          build-args: |
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.build-date.outputs.value }}
+
+      - name: Verify packaged native identity and producer guard
+        env:
+          EXPECTED_SHA256: ${{ steps.native.outputs.sha256 }}
+        run: |
+          docker run --rm teleno-node:qualified --version >"$NATIVE_ARTIFACT/image-version.txt"
+          cmp "$NATIVE_ARTIFACT/native-version.txt" "$NATIVE_ARTIFACT/image-version.txt"
+          docker run --rm teleno-node:qualified --help >"$NATIVE_ARTIFACT/image-help.txt"
+          grep -q -- '--backup-public-list' "$NATIVE_ARTIFACT/image-help.txt"
+          docker run --rm --entrypoint sha256sum teleno-node:qualified /usr/local/bin/teleno_node >"$NATIVE_ARTIFACT/image-elf-sha256.txt"
+          [[ "$(cut -d ' ' -f1 "$NATIVE_ARTIFACT/image-elf-sha256.txt")" == "$EXPECTED_SHA256" ]]
+          guard_status=0
+          docker run --rm --entrypoint teleno-prod-producer teleno-node:qualified \
+            2>"$NATIVE_ARTIFACT/image-producer-guard.txt" || guard_status=$?
+          [[ "$guard_status" == 1 ]]
+          grep -q 'TELENO_ENABLE_PROD_PRODUCER=I_UNDERSTAND_MAINNET_BLOCK_PRODUCTION' "$NATIVE_ARTIFACT/image-producer-guard.txt"
+
+      - name: Login to GitHub Container Registry
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.push_image == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish only explicit alpha image tags
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.push_image == 'true'
+        env:
+          NATIVE_VERSION: ${{ steps.native.outputs.version }}
+        run: |
+          docker push "ghcr.io/$GITHUB_REPOSITORY:$NATIVE_VERSION"
+          docker push "ghcr.io/$GITHUB_REPOSITORY:teleno-node-v$NATIVE_VERSION"
+          docker push "ghcr.io/$GITHUB_REPOSITORY:sha-$GITHUB_SHA"
+
+      - name: Retain verified image evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: teleno-image-linux-amd64-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ${{ env.NATIVE_ARTIFACT }}/verified-image-input.json
+            ${{ env.NATIVE_ARTIFACT }}/image-version.txt
+            ${{ env.NATIVE_ARTIFACT }}/image-help.txt
+            ${{ env.NATIVE_ARTIFACT }}/image-elf-sha256.txt
+            ${{ env.NATIVE_ARTIFACT }}/image-producer-guard.txt

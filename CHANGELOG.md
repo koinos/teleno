@@ -32,6 +32,9 @@ See the [detailed alpha release notes](docs/releases/1.3.0-alpha.1.md).
   Protobuf package in directory scope so fresh Hunter builds retain its version.
   Keep reusable dependency state after build failures and avoid recompiling
   the container's native runtime for a timestamp-only image publication.
+- Link the restored compatibility fixture against the current mempool library.
+  Alpha containers package the exact tested CI executable after source/hash/test
+  verification; native downloads and the image retain the same ELF identity.
 - The alpha is an independent Teleno release. Koinos One GUI packaging and its
   native submodule pin are separate; no running node is upgraded by publishing it.
 

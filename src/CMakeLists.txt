@@ -545,7 +545,7 @@ if(KOINOS_BUILD_TESTS)
     set_tests_properties(teleno_preflight_cli_test PROPERTIES TIMEOUT 90)
     add_executable(teleno_compatibility_fixture
       ../tests/integration/compatibility_fixture.cpp)
-    target_link_libraries(teleno_compatibility_fixture PRIVATE chain koinos_storage_lib)
+    target_link_libraries(teleno_compatibility_fixture PRIVATE chain koinos_storage_lib mempool_lib)
     add_test(NAME koinos_compatibility_node_test
       COMMAND ${Python3_EXECUTABLE} -B
         ${CMAKE_CURRENT_SOURCE_DIR}/../tests/integration/compatibility_node_test.py

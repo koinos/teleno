@@ -157,6 +157,27 @@ version/commit tags without replacing `latest`; only a matching stable native
 release tag advances `latest`. Manual dispatch on another branch does not
 automatically update `beta`.
 
+### Alpha images from verified native CI
+
+Native `-alpha.N` tags use the successful same-commit **Build** workflow's
+retained executable. The Container workflow verifies the source/repository/run,
+all committed file hashes, the native version and ELF hash, and the normal test
+report before using the Dockerfile's explicit `native-artifact` target. It
+checks the packaged ELF again and tests version/help and the producer refusal
+before pushing version, native-tag and full-commit image tags. The downloaded
+native archive and alpha image therefore contain the same executable.
+
+Before tagging, validate that path with a manual Container run on the intended
+source ref, `native_run_id` set to its successful Build run and `push_image`
+set to `false`. Publishing the matching native alpha tag repeats those checks
+and publishes the image. A missing/failed/different-source native run refuses
+publication; it does not fall back to an unverified executable. This qualifies
+the package, not the whole-node issue-9 resource/history requirements.
+
+Leaving `native_run_id` empty on an ordinary manual run retains the full source
+build. Standard Docker builds also retain the default source-built `runtime`
+target; `native-artifact` is reserved for already verified CI inputs.
+
 For local Docker builds, pass the exact Git revision so the binary build
 identity and the OCI revision label agree. The OCI version tag still comes
 from `VERSION`:

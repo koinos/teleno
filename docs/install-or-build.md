@@ -86,8 +86,8 @@ selected basedir.
 The published image packages the Linux `teleno_node` runtime:
 
 ```bash
-docker pull ghcr.io/pgarciagon/teleno-node:beta
-docker run --rm ghcr.io/pgarciagon/teleno-node:beta --version
+docker pull ghcr.io/koinos/teleno:beta
+docker run --rm ghcr.io/koinos/teleno:beta --version
 ```
 
 The container is useful when an operator does not want to install the native
