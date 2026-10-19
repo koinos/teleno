@@ -96,6 +96,28 @@ docker run --rm --entrypoint /bin/sh \
 
 After restore, start the observer using `/data/config.yml` as shown above.
 
+## Single-Copy Direct Restore Container Boundary
+
+The standalone native SC4 CLI adds explicit direct stage/resume/activation, but
+this does not imply the currently published image includes it. Check the exact
+image's `--version`/`--help` and use a reviewed source build; local SC4 container
+validation is blocked when no Docker daemon is available. See the
+[native workflow](../backup-restore-cli.md#direct-stage-resume-and-explicit-activation-sc4)
+and [validation limits](../validation/single-copy-restore-sc4-cli.md).
+
+For direct mode, mount the **shared parent** containing target, attempt and
+sibling storage gate, not only the target DB. For example, a mount at `/node`
+can contain `/node/observer`, `/node/owned-attempt` and the owner-only gate;
+use separate metadata scratch and reviewed config. Keep the same absolute
+container paths and process UID across staging, activation/recovery and startup.
+Mounting just `/data` while the gate lives in each container's private `/` does
+not establish cross-container exclusion. Do not unlink/chmod the gate to bypass
+ownership or mutate an existing deployment to make a test pass.
+
+Direct container qualification, Linux filesystem behavior and 40 GB whole-machine
+capacity remain separate authorization-gated work. No runtime direct admin or
+production activation is enabled by this CLI workflow.
+
 ## Private Remote Backups
 
 Do not bake SSH private keys, password files, or public-bootstrap signing private keys into a Docker image. Mount them at runtime and reference those mounted paths from the node backup config:

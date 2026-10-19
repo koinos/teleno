@@ -13,7 +13,12 @@
 
 #include <chrono>
 #include <future>
+#include <memory>
 #include <string>
+
+#include "transaction_work_budget.hpp"
+
+namespace koinos::protocol { class transaction; }
 
 namespace koinos::node {
 
@@ -32,6 +37,10 @@ public:
        retry_policy = retry_policy::none ) = 0;
 
   virtual void broadcast( const std::string& topic, const std::string& payload ) = 0;
+
+  // Native-only admission hook. Existing/reference clients keep legacy behavior.
+  virtual std::unique_ptr< TransactionWorkReservation >
+  reserve_transaction_work( const protocol::transaction& ) { return {}; }
 
   virtual void connect( const std::string& /* url */ ) {}
 };

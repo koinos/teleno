@@ -114,7 +114,7 @@ public:
     _map.put( k, v );
   }
 
-  const value_type* get( const key_type& k ) const override
+  value_ptr get( const key_type& k ) const override
   {
     return _map.get( k );
   }

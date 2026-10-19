@@ -18,6 +18,7 @@ class abstract_backend
 public:
   using key_type   = detail::key_type;
   using value_type = detail::value_type;
+  using value_ptr  = detail::value_ptr;
   using size_type  = detail::size_type;
 
   abstract_backend();
@@ -27,7 +28,11 @@ public:
   virtual iterator end()   = 0;
 
   virtual void put( const key_type& k, const value_type& v ) = 0;
-  virtual const value_type* get( const key_type& ) const     = 0;
+  // Caller supplies immutable lifetime ownership, never a mutable alias.
+  // Persistent/default backends retain ordinary write/batch semantics by copy.
+  virtual void put_owned( const key_type& k, value_ptr v );
+  // Immutable ownership follows a read through eviction, replacement and close.
+  virtual value_ptr get( const key_type& ) const            = 0;
   virtual void erase( const key_type& k )                    = 0;
   virtual void clear()                                       = 0;
 
@@ -51,6 +56,9 @@ public:
 
   virtual void start_write_batch() = 0;
   virtual void end_write_batch( write_durability durability = write_durability::default_async ) = 0;
+  // Failed persistent sessions must not be retried through mutated caches.
+  // Nonpersistent backends have no durable session to invalidate.
+  virtual void abort_write_batch() noexcept {}
 
   virtual void store_metadata() = 0;
 

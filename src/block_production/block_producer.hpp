@@ -36,11 +36,22 @@ struct ProductionResult
     not_our_turn
   };
 
+  enum class RetryReason
+  {
+    none,
+    head_changed,
+    mempool_unavailable
+  };
+
   Status status = Status::not_ready;
   uint64_t height = 0;
   std::string id;
   uint64_t transaction_count = 0;
   uint64_t removed_failed_transactions = 0;
+  RetryReason retry_reason = RetryReason::none;
+  std::string retry_parent;
+  bool candidate_prepared = false;
+  bool pob_evaluated = false;
   std::chrono::milliseconds retry_after = std::chrono::seconds( 5 );
 };
 
@@ -83,6 +94,8 @@ private:
   ProductionResult produce_pob_once();
 
   protocol::block next_block( const std::string& signer );
+  protocol::block next_block( const std::string& signer,
+                              const rpc::chain::get_head_info_response& head );
   void fill_block( protocol::block& block );
   void set_merkle_roots( protocol::block& block ) const;
   bool submit_block( protocol::block& block, ProductionResult& result );
@@ -107,6 +120,7 @@ private:
 
   std::optional< PobAuxiliaryData > _pob_auxiliary_data;
   std::optional< PobBundle > _pob_bundle;
+  uint32_t _consecutive_head_retries = 0;
 };
 
 } // namespace koinos::node::block_production

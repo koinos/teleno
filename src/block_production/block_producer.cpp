@@ -8,6 +8,7 @@
 #include <koinos/contracts/vhp/vhp.pb.h>
 #include <koinos/crypto/merkle_tree.hpp>
 #include <koinos/log.hpp>
+#include <koinos/mempool/mempool.hpp>
 #include <koinos/rpc/chain/chain_rpc.pb.h>
 #include <koinos/rpc/mempool/mempool_rpc.pb.h>
 #include <koinos/util/base58.hpp>
@@ -21,6 +22,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
+#include <exception>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -38,6 +40,17 @@ constexpr uint32_t get_consensus_parameters_entry_point = 0x5fd7ac0f;
 constexpr uint32_t effective_balance_of_entry_point     = 0x629f31e6;
 constexpr uint32_t decimals_entry_point                 = 0xee80fd2f;
 constexpr uint32_t symbol_entry_point                   = 0xb76a7ca1;
+
+// Only these candidate-assembly conditions receive a short retry. Storage,
+// allocation, contract and other failures retain their original behavior.
+struct CandidateUnavailable
+{
+  ProductionResult::RetryReason reason;
+  std::string parent;
+  std::exception_ptr cause;
+};
+
+constexpr uint32_t maximum_consecutive_head_retries = 100;
 
 uint64_t to_ms( std::chrono::system_clock::time_point time )
 {
@@ -178,12 +191,40 @@ void BlockProducer::write_public_key_file( const std::filesystem::path& path ) c
 
 ProductionResult BlockProducer::produce_once()
 {
-  if( _config.algorithm == "pob" )
-    return produce_pob_once();
-  if( _config.algorithm == "federated" )
-    return produce_federated_once();
+  try
+  {
+    ProductionResult result;
+    if( _config.algorithm == "pob" )
+      result = produce_pob_once();
+    else if( _config.algorithm == "federated" )
+      result = produce_federated_once();
+    else
+      throw std::invalid_argument( "unsupported block_producer.algorithm: " + _config.algorithm );
 
-  throw std::invalid_argument( "unsupported block_producer.algorithm: " + _config.algorithm );
+    _consecutive_head_retries = 0;
+    return result;
+  }
+  catch( const CandidateUnavailable& unavailable )
+  {
+    // A failed replacement must never leave the previous cached PoB candidate
+    // eligible for reuse. Retry the real requested parent; do not use an empty
+    // transaction response or another fork's pending transactions.
+    _pob_bundle.reset();
+    if( _consecutive_head_retries < maximum_consecutive_head_retries )
+      ++_consecutive_head_retries;
+    if( _consecutive_head_retries >= maximum_consecutive_head_retries )
+    {
+      if( unavailable.cause )
+        std::rethrow_exception( unavailable.cause );
+      throw std::runtime_error( "producer head changed during 100 consecutive candidate attempts" );
+    }
+
+    ProductionResult result;
+    result.retry_reason = unavailable.reason;
+    result.retry_parent = unavailable.parent;
+    result.retry_after = std::chrono::milliseconds( 10 );
+    return result;
+  }
 }
 
 ProductionResult BlockProducer::produce_federated_once()
@@ -192,6 +233,7 @@ ProductionResult BlockProducer::produce_federated_once()
   result.retry_after = std::chrono::seconds( 5 );
 
   auto block = next_block( _signing_key.get_public_key().to_address_bytes() );
+  result.candidate_prepared = true;
   block.set_id( util::converter::as< std::string >( crypto::hash( crypto::multicodec::sha2_256, block.header() ) ) );
   block.set_signature( util::converter::as< std::string >(
     _signing_key.sign_compact( util::converter::to< crypto::multihash >( block.id() ) ) ) );
@@ -217,16 +259,22 @@ ProductionResult BlockProducer::produce_pob_once()
   if( !_pob_auxiliary_data )
     refresh_pob_auxiliary_data();
 
+  ProductionResult result;
   if( !_pob_bundle )
+  {
     _pob_bundle = next_pob_bundle();
+    result.candidate_prepared = true;
+  }
   else
   {
     const auto head = _chain.get_head_info();
     if( _pob_bundle->block.header().previous() != head.head_topology().id() )
+    {
       _pob_bundle = next_pob_bundle();
+      result.candidate_prepared = true;
+    }
   }
 
-  ProductionResult result;
   const auto quantum_length = std::chrono::milliseconds{ _pob_auxiliary_data->quantum_length };
   result.retry_after        = quantum_length.count() > 0 ? quantum_length : std::chrono::milliseconds( 10 );
 
@@ -256,12 +304,17 @@ ProductionResult BlockProducer::produce_pob_once()
 
   _pob_bundle->block.set_signature( util::converter::as< std::string >( signature_data ) );
 
+  result.pob_evaluated = true;
   if( !difficulty_met( proof_hash, _pob_bundle->vhp_balance, _pob_bundle->difficulty ) )
   {
     _pob_bundle->time_quantum = next_time_quantum( _pob_bundle->time_quantum );
     result.status            = ProductionResult::Status::not_our_turn;
     return result;
   }
+
+  if( _chain.get_head_info().head_topology().id() != _pob_bundle->block.header().previous() )
+    throw CandidateUnavailable{ ProductionResult::RetryReason::head_changed,
+                                _pob_bundle->block.header().previous(), {} };
 
   while( submit_block( _pob_bundle->block, result ) )
   {
@@ -278,7 +331,12 @@ ProductionResult BlockProducer::produce_pob_once()
 
 protocol::block BlockProducer::next_block( const std::string& signer )
 {
-  auto head_info = _chain.get_head_info();
+  return next_block( signer, _chain.get_head_info() );
+}
+
+protocol::block BlockProducer::next_block( const std::string& signer,
+                                           const rpc::chain::get_head_info_response& head_info )
+{
 
   protocol::block block;
   block.mutable_header()->set_previous( head_info.head_topology().id() );
@@ -291,6 +349,8 @@ protocol::block BlockProducer::next_block( const std::string& signer )
 
   fill_block( block );
   set_merkle_roots( block );
+  if( _chain.get_head_info().head_topology().id() != block.header().previous() )
+    throw CandidateUnavailable{ ProductionResult::RetryReason::head_changed, block.header().previous(), {} };
   return block;
 }
 
@@ -299,7 +359,16 @@ void BlockProducer::fill_block( protocol::block& block )
   rpc::mempool::get_pending_transactions_request pending_req;
   pending_req.set_limit( _config.max_inclusion_attempts );
   pending_req.set_block_id( block.header().previous() );
-  auto pending_resp = _mempool.get_pending_transactions( pending_req );
+  rpc::mempool::get_pending_transactions_response pending_resp;
+  try
+  {
+    pending_resp = _mempool.get_pending_transactions( pending_req );
+  }
+  catch( const mempool::pending_transaction_unknown_block& )
+  {
+    throw CandidateUnavailable{ ProductionResult::RetryReason::mempool_unavailable,
+                                block.header().previous(), std::current_exception() };
+  }
 
   auto resource_resp = _chain.get_resource_limits( rpc::chain::get_resource_limits_request() );
   const auto& limits = resource_resp.resource_limit_data();
@@ -477,15 +546,19 @@ void BlockProducer::refresh_pob_auxiliary_data()
 
 BlockProducer::PobBundle BlockProducer::next_pob_bundle()
 {
+  const auto head = _chain.get_head_info();
   refresh_pob_auxiliary_data();
 
   PobBundle bundle;
   auto metadata       = get_pob_metadata();
-  bundle.block        = next_block( util::from_base58< std::string >( _config.producer_address ) );
+  bundle.block        = next_block( util::from_base58< std::string >( _config.producer_address ), head );
   bundle.seed         = metadata.seed();
   bundle.difficulty   = metadata.difficulty();
   bundle.vhp_balance  = get_vhp_balance();
   bundle.time_quantum = next_time_quantum( from_ms( bundle.block.header().timestamp() ) );
+
+  if( _chain.get_head_info().head_topology().id() != head.head_topology().id() )
+    throw CandidateUnavailable{ ProductionResult::RetryReason::head_changed, head.head_topology().id(), {} };
 
   if( bundle.vhp_balance == 0 )
     throw std::runtime_error( "configured producer has no effective VHP balance" );

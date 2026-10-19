@@ -84,6 +84,24 @@ Check:
 
 ## Backup Dry Run Fails
 
+### Storage Or Source Refusal In LR1 Native Development
+
+Direct restore JSON now distinguishes missing/conflicting chain identity,
+signature, HTTP, transport, TLS-trust and metadata failures. Use `failure_code`
+and the [backup diagnostics](backup-restore-cli.md#direct-source-failure-codes),
+not a generic authentication phase, to choose the next read-only check. An old
+snapshot with empty chain identity needs a new backup from the corrected writer;
+do not edit its manifest to invent validation or disable trust requirements.
+
+Read/flush/write failures are errors, not missing state or successful commits.
+After a failed state batch, that in-memory session is unusable. Preserve the
+database and collect diagnostics; validate/reopen it through the recovery-first
+workflow before reuse. A returned Write error may leave complete pre-state or
+post-state, so do not blindly retry a mutated context. Explicit close reports
+failure; destructors log a safe diagnostic rather than throwing. Corrupt or
+partial archive topology/metadata is refused, not reset to genesis. No automatic
+repair or existing-data deletion is introduced.
+
 Run:
 
 ```bash
@@ -124,6 +142,24 @@ Fetch public objects without activation to isolate transport issues:
   --backup-id latest \
   --backup-json
 ```
+
+## Direct Restore Interrupted Or Refused
+
+Inspect the structured `failure_phase`, attempt state and the original source,
+chain identity, HTTPS/signature policy, paths and available reserve. Stop other
+writers; do not delete the common gate or canonical state. `paused`/incomplete
+transfer resumes with the same direct stage command plus
+`--backup-restore-resume`. Omit backup ID or use the pinned concrete ID, never
+`latest`. `validating`, `verified` and `activation_pending` recover via the
+explicit direct activation command, not source-file download.
+
+Activation/recovery re-authenticates selected metadata and can fail if its source
+is unavailable or changed. Preserve the sole stage/target DB and external intent;
+restore access to the original trusted metadata rather than bypassing identity
+checks. Configuration is never generated or replaced by direct mode. Review
+[the exact CLI workflow](backup-restore-cli.md#direct-stage-resume-and-explicit-activation-sc4)
+and [SC4 blockers](validation/single-copy-restore-sc4-cli.md). Runtime audit fixes,
+Linux qualification and 40 GB capacity are separate gates.
 
 ## Restore Activated But Node Is Not Producing
 

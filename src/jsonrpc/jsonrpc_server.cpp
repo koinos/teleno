@@ -1,9 +1,13 @@
 #include "jsonrpc_server.hpp"
 
 #include "core/node_version.hpp"
+#include "core/transaction_work_budget.hpp"
 
 #include <algorithm>
+#include <exception>
+#include <optional>
 #include <sstream>
+#include <streambuf>
 #include <utility>
 
 #include <google/protobuf/descriptor.h>
@@ -17,6 +21,31 @@
 namespace koinos::node::jsonrpc {
 
 namespace {
+
+// Serialize into the final HTTP body without a second per-item string. This
+// is not network streaming: no bytes are sent until the complete body exists.
+class StringAppendBuffer final : public std::streambuf
+{
+public:
+  explicit StringAppendBuffer( std::string& output ) : _output( output ) {}
+
+protected:
+  std::streamsize xsputn( const char* data, std::streamsize size ) override
+  {
+    _output.append( data, static_cast< std::size_t >( size ) );
+    return size;
+  }
+
+  int_type overflow( int_type value ) override
+  {
+    if( !traits_type::eq_int_type( value, traits_type::eof() ) )
+      _output.push_back( traits_type::to_char_type( value ) );
+    return traits_type::not_eof( value );
+  }
+
+private:
+  std::string& _output;
+};
 
 bool has_hex_prefix( const std::string& value )
 {
@@ -444,6 +473,121 @@ nlohmann::json read_contract_to_json( const rpc::chain::read_contract_response& 
 // Construction / destruction
 // ---------------------------------------------------------------------------
 
+struct JSONRPCServer::Session: std::enable_shared_from_this< Session >
+{
+  JSONRPCServer& server;
+  beast::tcp_stream stream;
+  beast::flat_buffer buffer;
+  std::optional< http::request_parser< http::string_body > > parser;
+  std::optional< http::response< http::string_body > > response;
+  bool closed = false;
+  std::size_t attributed_request_capacity = 0;
+  std::size_t attributed_response_capacity = 0;
+
+  Session( JSONRPCServer& s, tcp::socket socket ): server( s ), stream( std::move( socket ) ) {}
+  ~Session()
+  {
+    server.replace_body_capacities( attributed_request_capacity,
+                                   attributed_response_capacity, 0, 0 );
+  }
+  void account_bodies( bool completed_request = true )
+  {
+    const auto request_capacity = parser && completed_request ? parser->get().body().capacity() : 0;
+    const auto response_capacity = response ? response->body().capacity() : 0;
+    server.replace_body_capacities( attributed_request_capacity, attributed_response_capacity,
+                                   request_capacity, response_capacity );
+    attributed_request_capacity = request_capacity;
+    attributed_response_capacity = response_capacity;
+  }
+  void start() { net::dispatch( stream.get_executor(), [self=shared_from_this()] { self->read(); } ); }
+  void cancel() { net::post( stream.get_executor(), [self=shared_from_this()] { self->close(); } ); }
+  void close()
+  {
+    if( closed ) return;
+    closed = true;
+    beast::error_code ec;
+    stream.socket().cancel( ec );
+    stream.socket().shutdown( tcp::socket::shutdown_both, ec );
+    stream.socket().close( ec );
+    server.release_session( this );
+  }
+  void read()
+  {
+    if( closed || !server._running ) { close(); return; }
+    parser.emplace();
+    account_bodies( false );
+    // Preserve Beast's previous defaults. Deadline covers the complete read,
+    // including idle keepalive and incomplete headers/body, not each byte.
+    parser->body_limit( 1024 * 1024 );
+    parser->header_limit( 8192 );
+    stream.expires_after( server._io_timeout );
+    http::async_read( stream, buffer, *parser,
+      [self=shared_from_this()]( beast::error_code ec, std::size_t ) {
+        if( ec || self->closed || !self->server._running ) { self->close(); return; }
+        try { self->account_bodies(); self->respond(); }
+        catch( const std::exception& e ) {
+          LOG( warning ) << "[jsonrpc] Session exception: " << e.what(); self->close();
+        }
+        catch( ... ) { self->close(); }
+      } );
+  }
+  void respond()
+  {
+    const auto& req = parser->get();
+    response.emplace();
+    response->version( req.version() );
+    response->keep_alive( req.keep_alive() );
+    response->set( http::field::content_type, "application/json" );
+    response->set( http::field::access_control_allow_origin, "*" );
+    response->set( http::field::access_control_allow_methods, "POST, OPTIONS" );
+    response->set( http::field::access_control_allow_headers, "Content-Type" );
+    if( req.method() == http::verb::options )
+      response->result( http::status::no_content );
+    else if( req.method() == http::verb::get &&
+             (req.target() == "/health" || req.target() == "/healthz" || req.target() == "/") )
+    {
+      response->result( http::status::ok );
+      response->body() = nlohmann::json( {
+        { "status", "ok" }, { "node", ::koinos::node::node_name() },
+        { "version", ::koinos::node::build_version() } } ).dump();
+    }
+    else if( req.method() != http::verb::post )
+    {
+      response->result( http::status::method_not_allowed );
+      response->body() = R"({"jsonrpc":"2.0","error":{"code":-32600,"message":"Only POST allowed"},"id":null})";
+    }
+    else
+    {
+      response->result( http::status::ok );
+      // Already-admitted service calls run to completion, including mutations.
+      // Disconnect/stop cannot imply rollback; stop joins dispatch before the
+      // registry releases dependencies. Service execution has no forced timeout.
+      response->body() = server.process_body( req.body() );
+    }
+    // Observe both completed bodies before releasing the request, so the
+    // transition high water does not hide this real ownership overlap.
+    account_bodies();
+    // Dispatch has finished using the request. Destroy its string rather than
+    // clear/empty-assign: those operations may retain capacity on Linux.
+    // Preserve the flat_buffer's unread pipelined bytes for the next read.
+    parser.reset();
+    account_bodies();
+    if( !server._running ) { close(); return; }
+    response->prepare_payload();
+    stream.expires_after( server._io_timeout );
+    http::async_write( stream, *response,
+      [self=shared_from_this()]( beast::error_code ec, std::size_t ) {
+        // async_write no longer borrows the response after this callback.
+        // Cancellation must not destroy it earlier, while writes still use it.
+        const bool close_connection = ec || self->closed || self->response->need_eof();
+        self->response.reset();
+        self->account_bodies();
+        if( close_connection ) { self->close(); return; }
+        self->read();
+      } );
+  }
+};
+
 JSONRPCServer::JSONRPCServer( IChain* chain,
                               IMempool* mempool,
                               IBlockStore* block_store,
@@ -453,7 +597,8 @@ JSONRPCServer::JSONRPCServer( IChain* chain,
                               const std::string& listen_address,
                               uint16_t port,
                               unsigned int threads,
-                              koinos::node::RpcAccessPolicy access_policy )
+                              koinos::node::RpcAccessPolicy access_policy,
+                              std::chrono::milliseconds io_timeout )
     : _chain( chain ),
       _mempool( mempool ),
       _block_store( block_store ),
@@ -462,9 +607,14 @@ JSONRPCServer::JSONRPCServer( IChain* chain,
       _acct_history( acct_history ),
       _ioc( std::max( threads, 1u ) ),
       _acceptor( _ioc, { net::ip::make_address( listen_address ), port } ),
+      _endpoint( _acceptor.local_endpoint() ),
+      _accept_strand( net::make_strand( _ioc ) ),
       _thread_count( std::max( threads, 1u ) ),
-      _access_policy( std::move( access_policy ) )
+      _access_policy( std::move( access_policy ) ),
+      _io_timeout( io_timeout )
 {
+  if( threads > 64 || io_timeout.count() <= 0 || io_timeout > std::chrono::seconds( 300 ) )
+    throw std::invalid_argument( "JSON-RPC jobs must be at most 64 and I/O timeout must be positive and at most 300 seconds" );
 }
 
 JSONRPCServer::~JSONRPCServer()
@@ -478,13 +628,49 @@ JSONRPCServer::~JSONRPCServer()
 
 void JSONRPCServer::start()
 {
-  _running = true;
-  do_accept();
-
-  _threads.reserve( _thread_count );
-  for( unsigned int i = 0; i < _thread_count; ++i )
+  std::lock_guard lifecycle( _lifecycle_mutex );
+  if( _running )
+    return;
+  _ioc.restart();
+  if( !_acceptor.is_open() )
   {
-    _threads.emplace_back( [this]() { _ioc.run(); } );
+    try
+    {
+      _acceptor.open( _endpoint.protocol() );
+      _acceptor.set_option( tcp::acceptor::reuse_address( true ) );
+      _acceptor.bind( _endpoint );
+      _acceptor.listen();
+    }
+    catch( ... )
+    {
+      beast::error_code ec; _acceptor.close( ec );
+      throw;
+    }
+  }
+  _running = true;
+  try
+  {
+    _threads.reserve( _thread_count );
+    do_accept();
+    for( unsigned int i = 0; i < _thread_count; ++i )
+      _threads.emplace_back( [this]() { _ioc.run(); } );
+  }
+  catch( ... )
+  {
+    _running = false;
+    // Closing an acceptor concurrently with its handler is unsafe. Queue the
+    // same cancellation path used by stop, then drain whichever workers exist.
+    net::post( _accept_strand, [this] {
+      beast::error_code ec; _acceptor.close( ec );
+      std::vector< std::shared_ptr< Session > > sessions;
+      { std::lock_guard lock( _sessions_mutex );
+        for( const auto& entry: _sessions ) sessions.push_back( entry.second ); }
+      for( const auto& session: sessions ) session->cancel();
+    } );
+    if( _threads.empty() ) _ioc.run();
+    for( auto& thread: _threads ) if( thread.joinable() ) thread.join();
+    _threads.clear();
+    throw;
   }
 
   LOG( info ) << "[jsonrpc] Listening on "
@@ -495,10 +681,20 @@ void JSONRPCServer::start()
 
 void JSONRPCServer::stop()
 {
+  std::lock_guard lifecycle( _lifecycle_mutex );
   if( !_running.exchange( false ) )
     return;
 
-  _ioc.stop();
+  // Drain handlers instead of abandoning them with io_context::stop(). Session
+  // strands serialize cancellation with reads/writes and service dispatch.
+  net::post( _accept_strand, [this] {
+    beast::error_code ec;
+    _acceptor.close( ec );
+    std::vector< std::shared_ptr< Session > > sessions;
+    { std::lock_guard lock( _sessions_mutex );
+      for( const auto& entry: _sessions ) sessions.push_back( entry.second ); }
+    for( const auto& session: sessions ) session->cancel();
+  } );
   for( auto& t: _threads )
   {
     if( t.joinable() )
@@ -507,141 +703,69 @@ void JSONRPCServer::stop()
   _threads.clear();
 }
 
+std::size_t JSONRPCServer::active_sessions() const
+{
+  std::lock_guard lock( _sessions_mutex );
+  return _sessions.size();
+}
+
+void JSONRPCServer::release_session( Session* session )
+{
+  std::lock_guard lock( _sessions_mutex );
+  _sessions.erase( session );
+}
+
+JSONRPCServer::HTTPBodyMemory JSONRPCServer::http_body_memory() const
+{
+  std::lock_guard lock( _http_body_mutex );
+  return _http_body_memory;
+}
+
+void JSONRPCServer::replace_body_capacities( std::size_t old_request, std::size_t old_response,
+                                           std::size_t new_request, std::size_t new_response )
+{
+  std::lock_guard lock( _http_body_mutex );
+  _http_body_memory.completed_request_capacity -= old_request;
+  _http_body_memory.completed_request_capacity += new_request;
+  _http_body_memory.materialized_response_capacity -= old_response;
+  _http_body_memory.materialized_response_capacity += new_response;
+  _http_body_memory.peak_combined_capacity = std::max( _http_body_memory.peak_combined_capacity,
+    _http_body_memory.completed_request_capacity + _http_body_memory.materialized_response_capacity );
+}
+
 // ---------------------------------------------------------------------------
 // Accept loop
 // ---------------------------------------------------------------------------
 
 void JSONRPCServer::do_accept()
 {
-  _acceptor.async_accept( [this]( beast::error_code ec, tcp::socket socket ) {
+  _acceptor.async_accept( net::make_strand( _ioc ), net::bind_executor( _accept_strand,
+    [this]( beast::error_code ec, tcp::socket socket ) {
     if( !ec && _running )
     {
-      bool accepted = false;
-      auto active = _active_sessions.load();
-      while( active < _thread_count )
+      if( active_sessions() < _thread_count )
       {
-        if( _active_sessions.compare_exchange_weak( active, active + 1 ) )
-        {
-          accepted = true;
-          std::thread(
-            [this, s = std::move( socket )]() mutable {
-              struct SessionGuard
-              {
-                std::atomic< unsigned int >& active_sessions;
-                ~SessionGuard() { active_sessions.fetch_sub( 1 ); }
-              } guard{ _active_sessions };
-
-              handle_session( std::move( s ) );
-            }
-          ).detach();
-          break;
-        }
+        auto session = std::make_shared< Session >( *this, std::move( socket ) );
+        { std::lock_guard lock( _sessions_mutex ); _sessions.emplace( session.get(), session ); }
+        session->start();
       }
-
-      if( !accepted )
+      else
       {
         http::response< http::string_body > res{ http::status::service_unavailable, 11 };
         res.set( http::field::content_type, "application/json" );
         res.body() = R"({"jsonrpc":"2.0","error":{"code":-32001,"message":"JSON-RPC session limit reached"},"id":null})";
         res.prepare_payload();
         beast::error_code write_ec;
-        http::write( socket, res, write_ec );
+        // Best-effort small rejection, never wait for an overloaded peer or
+        // allocate another worker/session beyond the configured bound.
+        socket.non_blocking( true, write_ec );
+        if( !write_ec ) http::write( socket, res, write_ec );
       }
     }
 
     if( _running )
       do_accept();
-  } );
-}
-
-// ---------------------------------------------------------------------------
-// HTTP session
-// ---------------------------------------------------------------------------
-
-void JSONRPCServer::handle_session( tcp::socket socket )
-{
-  try
-  {
-    beast::flat_buffer buffer;
-    for( ;; )
-    {
-      http::request< http::string_body > req;
-      http::read( socket, buffer, req );
-
-      http::response< http::string_body > res;
-      res.version( req.version() );
-      res.keep_alive( req.keep_alive() );
-      res.set( http::field::content_type, "application/json" );
-      res.set( http::field::access_control_allow_origin, "*" );
-      res.set( http::field::access_control_allow_methods, "POST, OPTIONS" );
-      res.set( http::field::access_control_allow_headers, "Content-Type" );
-
-      // Handle CORS preflight
-      if( req.method() == http::verb::options )
-      {
-        res.result( http::status::no_content );
-        res.prepare_payload();
-        http::write( socket, res );
-        if( res.need_eof() )
-          break;
-        continue;
-      }
-
-      // GET /health — simple health check for load balancers and Teleno
-      if( req.method() == http::verb::get )
-      {
-        auto target = req.target();
-        if( target == "/health" || target == "/healthz" || target == "/" )
-        {
-          res.result( http::status::ok );
-          nlohmann::json health;
-          health[ "status" ]  = "ok";
-          health[ "node" ]    = ::koinos::node::node_name();
-          health[ "version" ] = ::koinos::node::build_version();
-          res.body()          = health.dump();
-          res.prepare_payload();
-          http::write( socket, res );
-          if( res.need_eof() )
-            break;
-          continue;
-        }
-      }
-
-      if( req.method() != http::verb::post )
-      {
-        res.result( http::status::method_not_allowed );
-        res.body() = R"({"jsonrpc":"2.0","error":{"code":-32600,"message":"Only POST allowed"},"id":null})";
-        res.prepare_payload();
-        http::write( socket, res );
-        if( res.need_eof() )
-          break;
-        continue;
-      }
-
-      res.result( http::status::ok );
-      res.body() = process_body( req.body() );
-      res.prepare_payload();
-      http::write( socket, res );
-      if( res.need_eof() )
-        break;
-    }
-
-    beast::error_code ec;
-    socket.shutdown( tcp::socket::shutdown_send, ec );
-  }
-  catch( const beast::system_error& se )
-  {
-    if( se.code() != http::error::end_of_stream )
-      LOG( debug ) << "[jsonrpc] Session error: " << se.code().message();
-  }
-  catch( const std::exception& e )
-  {
-    LOG( warning ) << "[jsonrpc] Session exception: " << e.what();
-  }
-  catch( ... )
-  {
-    LOG( warning ) << "[jsonrpc] Session exception: unknown exception";
-  }
+  } ) );
 }
 
 // ---------------------------------------------------------------------------
@@ -663,10 +787,38 @@ std::string JSONRPCServer::process_body( const std::string& body )
   // Batch request (JSON array)
   if( parsed.is_array() )
   {
-    nlohmann::json batch_resp = nlohmann::json::array();
+    std::string body = "[";
+    StringAppendBuffer buffer( body );
+    std::ostream output( &buffer );
+    output.exceptions( std::ios::badbit | std::ios::failbit );
+    std::exception_ptr serialization_error;
+    bool first = true;
     for( const auto& item: parsed )
-      batch_resp.push_back( process_single_request( item ) );
-    return batch_resp.dump();
+    {
+      auto response = process_single_request( item );
+      if( serialization_error )
+        continue;
+      try
+      {
+        if( !first )
+          output.put( ',' );
+        output << response;
+        first = false;
+      }
+      catch( const nlohmann::json::type_error& error )
+      {
+        if( error.id != 316 )
+          throw;
+        // Previously every item ran before strict UTF-8 dump failed. Preserve
+        // those later service calls, but discard the unusable partial body.
+        serialization_error = std::current_exception();
+        std::string().swap( body );
+      }
+    }
+    if( serialization_error )
+      std::rethrow_exception( serialization_error );
+    output.put( ']' );
+    return body;
   }
 
   // Single request
@@ -706,8 +858,18 @@ nlohmann::json JSONRPCServer::process_single_request( const nlohmann::json& requ
   // Dispatch to service
   try
   {
-    auto result = dispatch( service, method, normalize_koinos_params( service, method, params ) );
-    return make_result( result, id );
+    // Prepare envelope/ID ownership before a potentially mutating service call.
+    // Moving into the existing slot avoids copying the returned result tree.
+    auto response = make_result( id );
+    auto& result = response.at( "result" );
+    result = dispatch( service, method, normalize_koinos_params( service, method, params ) );
+    return response;
+  }
+  catch( const LocalCapacityExceeded& e )
+  {
+    auto error = make_error( -32005, e.what(), id );
+    error[ "error" ][ "data" ] = { { "retryable", true }, { "reason", e.reason_code() }, { "scope", "local" } };
+    return error;
   }
   catch( const std::exception& e )
   {
@@ -1044,11 +1206,11 @@ nlohmann::json JSONRPCServer::make_error( int code, const std::string& message, 
   };
 }
 
-nlohmann::json JSONRPCServer::make_result( const nlohmann::json& result, const nlohmann::json& id )
+nlohmann::json JSONRPCServer::make_result( const nlohmann::json& id )
 {
   return {
     { "jsonrpc", "2.0" },
-    { "result", result },
+    { "result", nullptr },
     { "id", id }
   };
 }

@@ -3,6 +3,7 @@
 #include <koinos/chain/exceptions.hpp>
 #include <koinos/chain/execution_context.hpp>
 #include <koinos/chain/system_calls.hpp>
+#include <koinos/vm_manager/host_api.hpp>
 
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/message.h>
@@ -303,7 +304,7 @@ call_thunk_impl( const std::function< ThunkReturn( execution_context&, ThunkArgs
                  uint32_t* bytes_written )
 {
   auto thunk_args = std::tuple_cat( std::tuple< execution_context& >( ctx ), message_to_tuple< ThunkArgs... >( arg ) );
-  *bytes_written  = 0;
+  vm_manager::store_bytes_written( bytes_written, 0 );
 
   std::apply( thunk, thunk_args );
 }
@@ -330,7 +331,7 @@ call_thunk_impl( const std::function< ThunkReturn( execution_context&, ThunkArgs
                  "return buffer is not large enough for the return value" );
 
   ret.SerializeToArray( ret_ptr, uint32_t( byte_size ) );
-  *bytes_written = uint32_t( byte_size );
+  vm_manager::store_bytes_written( bytes_written, uint32_t( byte_size ) );
 }
 
 } // namespace detail

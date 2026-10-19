@@ -5,6 +5,7 @@
 #include <koinos/log.hpp>
 
 #include <stdexcept>
+#include <rocksdb/write_batch.h>
 
 namespace koinos::node::block_store {
 
@@ -15,6 +16,51 @@ KOINOS_DECLARE_EXCEPTION( block_store_exception );
 KOINOS_DECLARE_DERIVED_EXCEPTION( block_not_present, block_store_exception );
 KOINOS_DECLARE_DERIVED_EXCEPTION( unexpected_height, block_store_exception );
 KOINOS_DECLARE_DERIVED_EXCEPTION( db_error, block_store_exception );
+
+namespace {
+
+// The controller archives a receipt before finalization, then publishes its
+// completed root through block_accepted. Complete only that missing field;
+// never replace archived blocks, execution results, or an existing root.
+bool complete_receipt_root( koinos::block_store::block_record& record,
+                            const rpc::block_store::add_block_request& req )
+{
+  const auto& block = req.block_to_add();
+  if( !record.has_block() || record.block_id() != block.id()
+      || record.block_height() != block.header().height()
+      || record.block().SerializeAsString() != block.SerializeAsString() )
+    KOINOS_THROW( db_error, "conflicting archived block; preserve archive for diagnosis" );
+
+  if( !record.has_receipt() || !req.has_receipt_to_add()
+      || req.receipt_to_add().state_merkle_root().empty() )
+    return false;
+
+  const auto& incoming = req.receipt_to_add();
+  const auto& stored = record.receipt();
+  const auto& root = incoming.state_merkle_root();
+  if( incoming.id() != block.id() || stored.id() != block.id()
+      || incoming.height() != record.block_height()
+      || stored.height() != record.block_height()
+      || root.size() != 34 || static_cast< unsigned char >( root[ 0 ] ) != 0x12
+      || static_cast< unsigned char >( root[ 1 ] ) != 0x20 )
+    KOINOS_THROW( db_error, "invalid completed receipt identity or state root" );
+
+  auto expected = stored;
+  auto supplied = incoming;
+  expected.clear_state_merkle_root();
+  supplied.clear_state_merkle_root();
+  if( expected.SerializeAsString() != supplied.SerializeAsString()
+      || ( !stored.state_merkle_root().empty() && stored.state_merkle_root() != root ) )
+    KOINOS_THROW( db_error, "conflicting archived receipt; preserve archive for diagnosis" );
+
+  if( !stored.state_merkle_root().empty() )
+    return false;
+
+  record.mutable_receipt()->set_state_merkle_root( root );
+  return true;
+}
+
+} // namespace
 
 BlockStore::BlockStore( rocksdb::DB* db,
                         rocksdb::ColumnFamilyHandle* cf_handle,
@@ -53,7 +99,9 @@ bool BlockStore::get_highest_block_topology( koinos::block_topology& topo ) cons
     return false;
   if( !s.ok() )
     KOINOS_THROW( db_error, "RocksDB meta get failed: ${msg}", ( "msg", s.ToString() ) );
-  return topo.ParseFromString( value );
+  if( !topo.ParseFromString( value ) )
+    KOINOS_THROW( db_error, "invalid persisted block topology; preserve archive for diagnosis" );
+  return true;
 }
 
 void BlockStore::update_highest_block( const koinos::block_topology& topo )
@@ -172,6 +220,10 @@ void BlockStore::initialize()
   koinos::block_topology topo;
   if( !get_highest_block_topology( topo ) )
   {
+    std::unique_ptr<rocksdb::Iterator> it(_db->NewIterator({},_cf_blocks));
+    it->SeekToFirst();
+    if(!it->status().ok() || it->Valid())
+      KOINOS_THROW(db_error,"stored blocks without readable topology; preserve archive for diagnosis");
     // Initialize with genesis (height 0, empty ID)
     topo.set_height( 0 );
     topo.set_id( std::string( 34, '\0' ) ); // 34-byte zero multihash
@@ -315,7 +367,23 @@ BlockStore::add_block( const rpc::block_store::add_block_request& req )
   // Check if already stored
   auto existing = get_record_bytes( block.id() );
   if( !existing.empty() )
+  {
+    koinos::block_store::block_record previous;
+    koinos::block_topology highest;
+    if(!previous.ParseFromString(existing) || previous.block_id()!=block.id()
+      || !get_highest_block_topology(highest) || previous.block_height()>highest.height())
+      KOINOS_THROW(db_error,"inconsistent existing block/topology; preserve archive for diagnosis");
+    if( complete_receipt_root( previous, req ) )
+    {
+      std::string completed;
+      if( !previous.SerializeToString( &completed ) )
+        KOINOS_THROW( db_error, "failed to serialize completed block receipt" );
+      // One existing record changes under the same exclusive store lock.
+      // Preserve skip-list/topology and the archive's existing WAL policy.
+      put_record_bytes( block.id(), completed );
+    }
     return resp; // Idempotent
+  }
 
   // Build the BlockRecord with skip-list pointers
   koinos::block_store::block_record record;
@@ -368,7 +436,9 @@ BlockStore::add_block( const rpc::block_store::add_block_request& req )
   if( !record.SerializeToString( &record_bytes ) )
     KOINOS_THROW( db_error, "failed to serialize block record" );
 
-  put_record_bytes( block.id(), record_bytes );
+  rocksdb::WriteBatch batch;
+  auto status=batch.Put(_cf_blocks,block.id(),record_bytes);
+  if(!status.ok()) KOINOS_THROW(db_error,"cannot stage block record");
 
   // Update highest block if this is the new tip
   koinos::block_topology current_highest;
@@ -380,9 +450,18 @@ BlockStore::add_block( const rpc::block_store::add_block_request& req )
       new_highest.set_id( block.id() );
       new_highest.set_height( height );
       new_highest.set_previous( header.previous() );
-      update_highest_block( new_highest );
+      std::string bytes;
+      if(!new_highest.SerializeToString(&bytes)) KOINOS_THROW(db_error,"cannot serialize new topology");
+      status=batch.Put(_cf_meta,META_KEY,bytes);
+      if(!status.ok()) KOINOS_THROW(db_error,"cannot stage block topology");
     }
   }
+
+  else KOINOS_THROW(db_error,"block-store topology missing; initialize or diagnose before adding blocks");
+  // Preserve existing asynchronous archive durability, but publish the record
+  // and highest topology as one atomic cross-CF unit. State commits stay sync.
+  status=_db->Write(rocksdb::WriteOptions(),&batch);
+  if(!status.ok()) KOINOS_THROW(db_error,"RocksDB block batch failed: ${msg}",("msg",status.ToString()));
 
   return resp;
 }

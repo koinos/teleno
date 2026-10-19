@@ -3,6 +3,13 @@
 Date: 2026-09-05. Source: `main` at
 `9936a78d482716be1f2ca4bae81a3d786981bbe0`.
 
+Follow-up, 2026-10-03: separately authorized LR1 implements scoped storage,
+backup/publication and cache-clear corrections, with fault/reopen/process tests.
+See the [LR1 evidence](../validation/low-resource-lr1-prerequisites.md) and updated
+remediation plan. The dated findings/measurements below remain the original audit
+baseline, not claims about the corrected checkout. Other cache/RPC/index issues,
+historical/differential gates and physical/Linux qualification remain open.
+
 ## Scope and outcome
 
 This is a functional correctness, memory, and disk-efficiency review, not an
@@ -319,6 +326,20 @@ functional/operational impact, not an externally assessed security rating.
   idle sessions expire; well-behaved clients regain capacity; repeated
   start/stop and in-flight request tests pass under supported lifetime tooling.
 
+Subsequent scoped RPC evidence: [LR2 R1-A](../validation/low-resource-lr2-rpc-bodies.md)
+reproduces unnecessary already-sent response retention in the owned-session
+implementation and corrects body lifetimes after service/write completion.
+Five instrumented Mac comparisons measure idle capacity, not independent node
+RSS or Linux limits. This follow-up does not close TQ-03's supported lifetime/
+race gates, aggregate output admission or the whole software audit.
+
+The later [R1-B checkpoint](../validation/low-resource-lr2-rpc-batch.md) measures
+batch result-tree duplication/retention and replaces it with per-item
+serialization into the complete body. Exact bytes, ordered service invocation
+and deterministic serialization-failure side effects are covered locally.
+This reduces a measured working set, not TQ-03 race qualification, aggregate
+input/output policy or whole-audit closure.
+
 ### TQ-04 — Object-cache invariants
 
 - Location: `object_cache::put()` and `clear()` in
@@ -359,6 +380,13 @@ functional/operational impact, not an externally assessed security rating.
 - Acceptance: duplicate and concurrent same-ID insertion retain correct
   membership/capacity; unchanged execution results; no speculative speedup claim.
 
+The subsequent [V1-C checkpoint](../validation/low-resource-lr2-vm-capacity.md)
+extends TQ-05's scoped retention work with opt-in attributed parsed-module
+capacity, failure-atomic replacements and native metrics. It preserves held
+owners/execution/metering; reduced cache retention can increase reparsing CPU.
+Allocator/caller/instance/queue memory and Linux/race qualification remain
+unproven. This is not whole-audit/WP3 closure.
+
 ### TQ-06 — Optional index consistency
 
 - Locations: `AccountHistory::handle_block_accepted()`/`next_sequence()`,
@@ -389,6 +417,14 @@ functional/operational impact, not an externally assessed security rating.
   canonical/fork/reverted ABI fixtures match the agreed behavior.
 
 ### TQ-07 — Retained P2P seen IDs
+
+Scoped LR2 follow-up, 2026-10-03: accepted-ID sets are replaced by bounded
+FIFO/string-capacity/expiry caches with LIB/stop cleanup and exact pending-ID
+duplicate checks. See [implementation and measurements](../validation/low-resource-lr2-p2p-retention.md).
+The original source-only finding below describes the audit baseline, not the
+updated code. Local dedup-cache bounds do not establish total P2P/node bounds;
+transport queues, peer/error tracking, watchdog and thread lifetimes still need
+representative workload/race qualification. No whole-audit exit is claimed.
 
 - Location: `_seen_blocks`/`_seen_transactions` in `src/p2p/p2p_node.hpp`; inserts
   in sync/gossip handlers. Source search finds no erase/clear path for either
@@ -486,6 +522,15 @@ functional/operational impact, not an externally assessed security rating.
   writes, valid old-or-new published snapshot, preserved observer-first recovery.
 
 ### TQ-12 — State ownership under eviction and failed commit
+
+Subsequent LR2 S1 evidence confirms the read-eviction hypothesis: an actual
+backend read freed the first reader's live buffer before consumption, observed
+without dereferencing freed storage. State reads now return immutable owners,
+including iterator results, and map clones share immutable payloads. Oversized
+values bypass cache retention safely. See
+[S1 evidence](../validation/low-resource-lr2-state-ownership.md). Supported
+integrated ASan/TSan, retained/fork accounting and current differential/Linux
+qualification remain open; the original audit hypotheses below are historical.
 
 - Locations: `rocksdb_backend::get()` returns a raw value pointer after releasing
   cache ownership/lock; `state_delta::commit()` resets the root backend pointer
@@ -657,3 +702,81 @@ sanitized extracts. No operational credentials are needed for reproduction.
 Completion means the requested review areas have evidence or exact documented
 gaps and the plan is ready for review. It does **not** mean all bugs were found,
 all compatibility gates passed, or any memory/disk optimization was achieved.
+
+### Subsequent LR2 implementation evidence (2026-10-03)
+
+The later [native admission checkpoint](../validation/low-resource-lr2-admission.md)
+reproduces ordinary mempool insertion refusal being swallowed by main's accepted
+event subscriber. Native insertion now precedes accepted observers; subsequent
+notification failure is counted without retrying retained work. Pending metrics
+now count visible keys instead of always returning zero. These fixes do not
+complete aggregate fork/byte admission or whole-node qualification. Linux VPS
+optimization is primary; Mac comparisons do not prove Linux resource budgets.
+
+The explicit LR2 completion goal also reproduces and corrects disconnected
+sync-worker ownership in local fake-transport tests, with generation cancellation
+and count backpressure. See [worker evidence](../validation/low-resource-lr2-workers.md).
+This does not resolve all TQ-07/P2P consumers or TQ-12, and no whole-audit,
+supported race/lifetime or representative resource qualification is claimed.
+
+The original measurements above remain an audit snapshot. Later authorized
+LR2 development corrects TQ-03's detached/idle session lifecycle, TQ-04's
+oversize termination and TQ-05's duplicate module LRU, and removes TQ-08 warm-hit
+allocations in the measured fixture. A single oversized object remains owned
+under a soft payload budget; this is not an uncached raw-pointer bypass or a
+hard RSS limit. See the [LR2 report](../validation/low-resource-lr2-memory.md)
+for current code/tests, measured allocation results and unchanged cache RSS.
+Integrated lifetime/race checks, TQ-12 read concurrency, all-consumer byte budgets
+and representative Linux/mainnet capacity remain open. No full-audit remediation,
+disk saving, mainnet throughput improvement or small-server support is claimed.
+
+Further authorized LR2 [M1-C](../validation/low-resource-lr2-admission-atomicity.md)
+confirms allocator-induced partial mempool insertion and terminating allocating
+map iterators. Write-only multi-fork publication now prepares/resets before
+allocation-free map transfer; original nonce/resource and anonymous tombstone/
+root behavior remains. One-shot failure/retry tests and scoped allocation
+measurements support this correction, not real OOM/race, every lifecycle path,
+aggregate resource capacity, Linux or historical qualification. Original audit
+measurements remain snapshots; the whole-audit TODO stays open.
+
+Authorized LR2 [M1-F](../validation/low-resource-lr2-cleanup-atomicity.md) also
+reproduces allocator-induced partial fork-head cleanup and incomplete stream
+decoding followed by a null-resource read. Checked direct decoding and staged
+map/tombstone publication correct the covered expiry/removal branches. Temporary
+workspace and increased expiry allocation count are disclosed; no aggregate cap,
+Linux/whole-node, block/LIB, sanitizer or historical qualification is inferred.
+These are additional reproduced LR2 defects, not closure of the complete audit.
+
+Authorized LR2 [M1-G](../validation/low-resource-lr2-pending-records.md) removes
+duplicate encoded pending records across forks and adds opt-in lifetime-owned
+record reservations. Synthetic owner inventories verify less retained payload,
+not total heap or a Linux whole-node improvement. Other metadata/encoding/
+cleanup workspace remains additional, and the complete audit stays open.
+
+Authorized LR2 [V1-A](../validation/low-resource-lr2-vm-lifetime.md) reproduces a
+parsed-module leak when shared-owner allocation fails and protects that raw
+ownership. Optional/failure-atomic cache publication and cold-parse coalescing
+extend TQ-05's cache work; this is not whole VM byte/instance or Linux proof.
+The old cache eviction ordering is source-supported; its old fault path was not
+executed. Controlled same-ID bursts have fewer parsed owners, while ordinary
+single-thread tracked heap remains unchanged and distinct cold IDs serialize.
+
+A separate confirmed LR2 VM defect was reproduced: pinned Fizzy allocates execution
+contexts inside noexcept without catching allocation failure. An isolated
+one-shot failure invokes the fixture's terminate handler (exit 77), not the
+runner's null check. [V1-B](../validation/low-resource-lr2-vm-allocation.md) adds a
+hash-pinned build-owned correction and local allocation-error propagation;
+supported integrated diagnostics and whole-machine/Linux qualification remain
+required before V1/LR2 closure. This newly reproduced defect is
+not a revised claim about the original audit coverage or whole-audit completion.
+
+A further confirmed LR2 memory-access defect is reproduced by
+[V1-D / D1](../validation/low-resource-lr2-host-memory.md): in-bounds unaligned
+result-count addresses reach typed stores in the production dispatcher/host,
+including through actual Fizzy execution. Working UBSan reports these stores;
+same-site four-byte copies remove the undefined access without changing accepted
+addresses or alias/write ordering. No heap/RSS/CPU/disk gain is claimed. This is
+additional authorized LR2 evidence, not proof that the original audit covered
+it or that all bugs are fixed. Separate clean standalone ASan/TSan programs fail
+before main with both installed compilers; immediate failure is outside Teleno,
+deeper runtime cause and required integrated qualification remain unresolved.

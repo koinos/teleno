@@ -35,11 +35,16 @@
 
 #include <koinos/log.hpp>
 #include <nlohmann/json.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include "core/config.hpp"
+#include "core/preflight.hpp"
+#include "core/process_memory.hpp"
 #include "core/event_bus.hpp"
 #include "core/node_version.hpp"
 #include "core/restore_startup.hpp"
+#include "core/storage_lease.hpp"
+#include "backup/direct_restore_cli.hpp"
 #include "core/service_registry.hpp"
 
 #include "interfaces/i_block_store.hpp"
@@ -123,6 +128,7 @@
 #define REQUIRE_ROCKSDB_COMPRESSION_OPTION "require-rocksdb-compression"
 #define COMPACT_DB_OPTION "compact-db"
 #define COMPACT_CF_OPTION "compact-cf"
+#define COMPACT_REWRITE_OPTION "compact-rewrite"
 #define BACKUP_DRY_RUN_OPTION "backup-dry-run"
 #define BACKUP_CHECKPOINT_OPTION "backup-checkpoint"
 #define BACKUP_CREATE_OPTION "backup-create"
@@ -138,8 +144,13 @@
 #define BACKUP_SCOPE_OPTION "backup-scope"
 #define BACKUP_DELETE_CONFIRM_OPTION "backup-delete-confirm"
 #define BACKUP_RESTORE_OPTION "backup-restore"
+#define BACKUP_RESTORE_MODE_OPTION "backup-restore-mode"
+#define BACKUP_RESTORE_RESERVE_PROFILE_OPTION "backup-restore-reserve-profile"
+#define BACKUP_METADATA_DIR_OPTION "backup-metadata-dir"
+#define BACKUP_EXPECTED_CHAIN_OPTION "backup-expected-chain-id"
 #define BACKUP_RESTORE_PREFLIGHT_OPTION "backup-restore-preflight"
 #define BACKUP_RESTORE_STAGE_OPTION "backup-restore-stage"
+#define BACKUP_RESTORE_RESUME_OPTION "backup-restore-resume"
 #define BACKUP_RESTORE_ACTIVATE_OPTION "backup-restore-activate"
 #define BACKUP_RESTORE_FETCH_OPTION "backup-restore-fetch"
 #define BACKUP_OUTPUT_OPTION "backup-output"
@@ -161,13 +172,7 @@ uint64_t current_process_rss_bytes()
     return static_cast< uint64_t >( info.resident_size );
 #elif defined( __linux__ )
   std::ifstream statm( "/proc/self/statm" );
-  uint64_t pages = 0;
-  if( statm >> pages )
-  {
-    const auto page_size = sysconf( _SC_PAGESIZE );
-    if( page_size > 0 )
-      return pages * static_cast< uint64_t >( page_size );
-  }
+  return node::linux_statm_rss_bytes( statm, sysconf( _SC_PAGESIZE ) );
 #endif
   return 0;
 }
@@ -328,6 +333,14 @@ void print_storage_report( std::ostream& os,
   os << "compression.supported: " << join_strings( compression.supported_compressions, "," ) << "\n";
   if( !compression.fallback_note.empty() )
     os << "compression.fallback: " << compression.fallback_note << "\n";
+  const auto memory = storage_db.memory_stats();
+  os << "memory.block_cache_capacity: " << memory.block_cache_capacity << "\n"
+     << "memory.block_cache_usage: " << memory.block_cache_usage << "\n"
+     << "memory.block_cache_pinned_usage: " << memory.block_cache_pinned_usage << "\n"
+     << "memory.aggregate_memtable_flush_threshold: " << memory.aggregate_memtable_flush_threshold << "\n"
+     << "memory.all_memtables: " << ( memory.all_memtables ? std::to_string(*memory.all_memtables) : "unavailable" ) << "\n"
+     << "memory.table_readers: " << ( memory.table_readers ? std::to_string(*memory.table_readers) : "unavailable" ) << "\n"
+     << "memory.hard_process_limit: false\n";
   os << "column_families:\n";
   for( const auto& row: storage_db.column_family_stats() )
   {
@@ -559,6 +572,8 @@ void write_observer_config_for_public_restore( const std::filesystem::path& conf
   out << "p2p:\n";
   out << "  listen: " << p2p_listen << "\n";
   out << "  peer-log-interval-seconds: 60\n";
+  out << "  max-peer-error-records: 4096\n";
+  out << "  peer-error-key-capacity-bytes: 1048576\n";
   if( cfg.backup.public_restore.network == "testnet" )
   {
     out << "  peer:\n";
@@ -691,6 +706,8 @@ int main( int argc, char** argv )
     desc.add_options()
       ( HELP_OPTION ",h",    "Print help" )
       ( VERSION_OPTION ",v", "Print version" )
+      ( "preflight", "Check local startup prerequisites without writing files or starting services, then exit" )
+      ( "preflight-json", "Output --preflight report as JSON" )
       ( BASEDIR_OPTION ",d", po::value< std::string >()->default_value( "" ),
         "Base data directory (default: ~/.koinos)" )
       ( CONFIG_OPTION ",c",  po::value< std::string >()->default_value( "" ),
@@ -719,6 +736,8 @@ int main( int argc, char** argv )
         "Compact the shared RocksDB database, then exit" )
       ( COMPACT_CF_OPTION, po::value< std::vector< std::string > >()->multitoken(),
         "Column family to compact; repeat or use with multiple names" )
+      ( COMPACT_REWRITE_OPTION,
+        "With --compact-db, explicitly rewrite existing tables including bottommost using configured compression" )
       ( BACKUP_DRY_RUN_OPTION,
         "Validate native backup configuration and print the backup plan, then exit without opening RocksDB" )
       ( BACKUP_CHECKPOINT_OPTION,
@@ -740,7 +759,7 @@ int main( int argc, char** argv )
       ( BACKUP_PUBLIC_RESTORE_OPTION,
         "Restore latest or selected public read-only backup over HTTP(S), preflight, stage, activate, then exit" )
       ( BACKUP_PUBLIC_URL_OPTION, po::value< std::string >()->default_value( "" ),
-        "Public read-only backup base URL override for --backup-public-list/fetch/restore" )
+        "Public backup URL override for public list/fetch/restore or direct restore actions" )
       ( BACKUP_DELETE_OPTION,
         "Delete the selected native backup snapshot. Dry-run by default; requires --backup-delete-confirm=<backup-id> to mutate" )
       ( BACKUP_SCOPE_OPTION, po::value< std::string >()->default_value( "local" ),
@@ -749,18 +768,28 @@ int main( int argc, char** argv )
         "Exact backup ID confirmation required to execute --backup-delete; omit for dry-run" )
       ( BACKUP_RESTORE_OPTION,
         "Restore the configured native backup: fetch remote data when enabled, preflight, stage, activate, then exit" )
+      ( BACKUP_RESTORE_MODE_OPTION, po::value< std::string >()->default_value( "repository" ),
+        "Restore mode: repository (default) or direct (explicit preflight, stage/resume, activation)" )
+      ( BACKUP_RESTORE_RESERVE_PROFILE_OPTION, po::value< std::string >()->default_value( "standard" ),
+        "Direct restore reserve: standard (default, >=10 GiB) or experimental-8gib (>=8 GiB; not qualified)" )
+      ( BACKUP_METADATA_DIR_OPTION, po::value< std::string >()->default_value( "" ),
+        "Separate scratch directory for bounded direct metadata authentication; never an object cache" )
+      ( BACKUP_EXPECTED_CHAIN_OPTION, po::value< std::string >()->default_value( "" ),
+        "Independently expected chain identity; required for direct stage/activation, optional for preflight" )
       ( BACKUP_RESTORE_PREFLIGHT_OPTION,
-        "Validate the latest local backup snapshot and target disk space before restore, then exit without opening RocksDB" )
+        "Validate local repository or direct public metadata and target space, then exit without opening RocksDB" )
       ( BACKUP_RESTORE_STAGE_OPTION,
-        "Rebuild the latest local backup snapshot into a restore staging directory, then exit without opening RocksDB" )
+        "Stage a snapshot without activation; direct mode streams to an owned --backup-output attempt without DB open" )
+      ( BACKUP_RESTORE_RESUME_OPTION,
+        "With direct --backup-restore-stage, explicitly resume the same pinned attempt; never resolve latest again" )
       ( BACKUP_RESTORE_ACTIVATE_OPTION,
-        "Activate a staged local backup restore while the node is stopped, then exit without opening RocksDB" )
+        "Explicitly activate a staged restore while stopped; direct mode validates read-only and retains observer hold" )
       ( BACKUP_RESTORE_FETCH_OPTION,
         "Fetch selected or latest remote backup metadata and missing objects over native libssh SFTP, then exit without opening RocksDB" )
       ( BACKUP_OUTPUT_OPTION, po::value< std::string >()->default_value( "" ),
         "Output directory for --backup-checkpoint, staging directory for --backup-restore/--backup-restore-stage, or staged dir for --backup-restore-activate" )
       ( BACKUP_ID_OPTION, po::value< std::string >()->default_value( "" ),
-        "Backup ID to use with backup list/fetch/restore/preflight/stage commands; omit or use latest by default" )
+        "Selected backup ID; default latest for new requests, pinned ID on direct resume/activation (never latest)" )
       ( BACKUP_JSON_OPTION,
         "Print backup command output as JSON when used with backup command modes" )
       ( ALL_OPTION,
@@ -790,8 +819,6 @@ int main( int argc, char** argv )
       basedir = home ? std::filesystem::path( home ) / ".koinos"
                      : std::filesystem::current_path() / ".koinos";
     }
-    std::filesystem::create_directories( basedir );
-
     // ── Load config ──
     std::filesystem::path config_path = vm[ CONFIG_OPTION ].as< std::string >();
     if( config_path.empty() )
@@ -800,6 +827,144 @@ int main( int argc, char** argv )
     auto enables  = vm.count( ENABLE_OPTION )  ? vm[ ENABLE_OPTION ].as< std::vector< std::string > >()  : std::vector< std::string >{};
     auto disables = vm.count( DISABLE_OPTION ) ? vm[ DISABLE_OPTION ].as< std::vector< std::string > >() : std::vector< std::string >{};
 
+    if( vm.count( "preflight" ) || vm.count( "preflight-json" ) )
+    {
+      node::PreflightReport report;
+      bool valid_mode = vm.count( "preflight" ) > 0;
+      const std::vector< std::string > allowed = {
+        "preflight", "preflight-json", BASEDIR_OPTION, CONFIG_OPTION, ENABLE_OPTION,
+        DISABLE_OPTION, JOBS_OPTION, LOG_LEVEL_OPTION, P2P_LISTEN_OPTION, JSONRPC_LISTEN_OPTION,
+        REQUIRE_ROCKSDB_COMPRESSION_OPTION
+      };
+      for( const auto& option: vm )
+        if( !option.second.defaulted() && std::find( allowed.begin(), allowed.end(), option.first ) == allowed.end() )
+          valid_mode = false;
+      if( !valid_mode )
+        report.add( "arguments", "error", "Preflight requires --preflight and cannot be combined with maintenance or backup commands." );
+      else
+      {
+        try
+        {
+          if( !std::filesystem::is_regular_file( config_path ) )
+            report.add( "config", "fail", "An existing regular configuration file is required.", "Select an explicit configuration file with --config." );
+          else
+          {
+            auto checked = node::load_config( config_path, enables, disables, true );
+            checked.basedir = basedir;
+            if( auto jobs = vm[ JOBS_OPTION ].as< uint64_t >(); jobs > 0 ) checked.chain_jobs = jobs;
+            if( auto value = vm[ LOG_LEVEL_OPTION ].as< std::string >(); !value.empty() ) checked.log_level = value;
+            if( auto value = vm[ P2P_LISTEN_OPTION ].as< std::string >(); !value.empty() ) checked.p2p_listen = value;
+            if( auto value = vm[ JSONRPC_LISTEN_OPTION ].as< std::string >(); !value.empty() ) checked.jsonrpc_listen = value;
+            if( vm.count( REQUIRE_ROCKSDB_COMPRESSION_OPTION ) ) checked.rocksdb_require_compression = true;
+            report = node::run_preflight( checked );
+          }
+        }
+        catch( const std::invalid_argument& )
+        {
+          report.add( "config", "fail", "Invalid configuration value or feature; values omitted to protect secrets.", "Check value types and supported feature names." );
+        }
+        catch( const YAML::Exception& )
+        {
+          report.add( "config", "fail", "Invalid YAML configuration; values are omitted to protect secrets.", "Check configuration syntax and value types." );
+        }
+        catch( const std::exception& )
+        {
+          report.add( "preflight", "error", "Configuration validation or local inspection failed; details omitted to protect secrets.", "Check configuration types, feature names and filesystem access." );
+        }
+      }
+      std::cout << ( vm.count( "preflight-json" ) ? report.json() : report.text() );
+      return report.exit_code();
+    }
+
+    const auto restore_mode = node::backup::parse_restore_mode( vm[ BACKUP_RESTORE_MODE_OPTION ].as< std::string >() );
+    if( restore_mode == node::backup::RestoreMode::direct )
+    {
+      // Standalone CLI dispatch before basedir initialization and legacy routing.
+      // The engine owns its common lifetime gate; do not double-lock it here.
+      const std::vector< std::string > allowed = {
+        BACKUP_RESTORE_MODE_OPTION, BACKUP_RESTORE_PREFLIGHT_OPTION, BACKUP_METADATA_DIR_OPTION,
+        BACKUP_RESTORE_RESERVE_PROFILE_OPTION,
+        BACKUP_EXPECTED_CHAIN_OPTION, BACKUP_PUBLIC_URL_OPTION, BACKUP_ID_OPTION, BACKUP_JSON_OPTION,
+        BACKUP_RESTORE_STAGE_OPTION, BACKUP_RESTORE_RESUME_OPTION, BACKUP_RESTORE_ACTIVATE_OPTION,
+        BACKUP_OUTPUT_OPTION, BASEDIR_OPTION, CONFIG_OPTION };
+      node::backup::DirectRestoreCliOptions direct;
+      direct.target = basedir; direct.config = config_path;
+      direct.metadata = vm[ BACKUP_METADATA_DIR_OPTION ].as<std::string>();
+      direct.attempt = vm[ BACKUP_OUTPUT_OPTION ].as<std::string>();
+      direct.source_url = vm[ BACKUP_PUBLIC_URL_OPTION ].as<std::string>();
+      direct.backup_id = vm[ BACKUP_ID_OPTION ].as<std::string>();
+      direct.expected_chain_id = vm[ BACKUP_EXPECTED_CHAIN_OPTION ].as<std::string>();
+      direct.reserve_profile = vm[ BACKUP_RESTORE_RESERVE_PROFILE_OPTION ].as<std::string>();
+      direct.resume = vm.count(BACKUP_RESTORE_RESUME_OPTION) > 0;
+      direct.json = vm.count(BACKUP_JSON_OPTION) > 0;
+      for( const auto& option: vm )
+        if( !option.second.defaulted() && std::find( allowed.begin(), allowed.end(), option.first ) == allowed.end() )
+          direct.arguments_valid = false;
+      unsigned actions = 0;
+      for(const auto& action: std::vector<std::pair<const char*,const char*>>{
+        {BACKUP_RESTORE_PREFLIGHT_OPTION,"preflight"},{BACKUP_RESTORE_STAGE_OPTION,"stage"},{BACKUP_RESTORE_ACTIVATE_OPTION,"activate"}})
+        if(vm.count(action.first)) { ++actions; direct.action = action.second; }
+      direct.arguments_valid = direct.arguments_valid && actions == 1;
+      const auto result = node::backup::run_direct_restore_cli(direct);
+      std::cout << result.output;
+      return result.exit_code;
+    }
+    if( !vm[ BACKUP_METADATA_DIR_OPTION ].defaulted() || !vm[ BACKUP_EXPECTED_CHAIN_OPTION ].defaulted()
+        || !vm[ BACKUP_RESTORE_RESERVE_PROFILE_OPTION ].defaulted() || vm.count(BACKUP_RESTORE_RESUME_OPTION) )
+      throw std::runtime_error( "metadata, expected-chain, reserve-profile and resume options require direct restore mode" );
+    if( !vm[ BACKUP_RESTORE_MODE_OPTION ].defaulted() )
+    {
+      unsigned actions = 0;
+      for( const auto* action: { BACKUP_RESTORE_OPTION, BACKUP_RESTORE_PREFLIGHT_OPTION, BACKUP_RESTORE_STAGE_OPTION,
+        BACKUP_RESTORE_ACTIVATE_OPTION, BACKUP_RESTORE_FETCH_OPTION, BACKUP_PUBLIC_RESTORE_OPTION,
+        BACKUP_PUBLIC_FETCH_OPTION } ) actions += vm.count( action );
+      if( actions != 1 ) throw std::runtime_error( "explicit repository restore mode requires exactly one restore action" );
+    }
+
+    if( vm.count( COMPACT_REWRITE_OPTION ) )
+    {
+      bool valid = vm.count( COMPACT_DB_OPTION )
+                   && ( bool( vm.count( ALL_OPTION ) ) != bool( vm.count( COMPACT_CF_OPTION ) ) );
+      const std::vector< std::string > allowed = {
+        COMPACT_DB_OPTION, COMPACT_CF_OPTION, COMPACT_REWRITE_OPTION, ALL_OPTION,
+        STORAGE_REPORT_OPTION, BASEDIR_OPTION, CONFIG_OPTION, LOG_LEVEL_OPTION,
+        REQUIRE_ROCKSDB_COMPRESSION_OPTION, ENABLE_OPTION, DISABLE_OPTION
+      };
+      for( const auto& option: vm )
+        if( !option.second.defaulted() && std::find( allowed.begin(), allowed.end(), option.first ) == allowed.end() )
+          valid = false;
+      if( valid && vm.count( COMPACT_CF_OPTION ) )
+      {
+        try
+        {
+          for( const auto& name: vm[ COMPACT_CF_OPTION ].as< std::vector< std::string > >() )
+            (void)node::storage::column_family_from_name( name );
+        }
+        catch( const std::runtime_error& ) { valid = false; }
+      }
+      if( !valid )
+      {
+        std::cerr << "--compact-rewrite requires --compact-db and exactly one of --all or valid --compact-cf names; other maintenance modes cannot be combined\n";
+        return 2;
+      }
+      if( !std::filesystem::is_regular_file( basedir / "db" / "CURRENT" ) )
+      {
+        std::cerr << "--compact-rewrite requires an existing shared database\n";
+        return 2;
+      }
+    }
+
+    // Hold the same gate as direct staging/validation/activation before any
+    // basedir initialization, maintenance, legacy restore or database open.
+#if defined(__unix__) || defined(__APPLE__)
+    std::filesystem::create_directories( std::filesystem::absolute( basedir ).parent_path() );
+    node::StorageLease storage_lease( basedir );
+    if( std::filesystem::symlink_status( storage_lease.intent_path() ).type()
+        != std::filesystem::file_type::not_found )
+      throw std::runtime_error( "unfinished direct restore activation; explicitly recover its owned attempt before node startup" );
+    node::validate_direct_startup_markers(basedir);
+#endif
+    std::filesystem::create_directories( basedir );
     node::NodeConfig cfg = node::load_config( config_path, enables, disables );
     cfg.basedir = basedir;
 
@@ -1268,6 +1433,7 @@ int main( int argc, char** argv )
     LOG( info ) << "[runtime] Thread topology: main_ioc=1"
                 << " chain_jobs=" << std::max< uint64_t >( 1, cfg.chain_jobs )
                 << " jsonrpc_session_limit=" << std::max< uint64_t >( 1, cfg.jsonrpc_jobs )
+                << " jsonrpc_io_timeout_seconds=" << cfg.jsonrpc_io_timeout_seconds
                 << " grpc_pollers=" << std::max< uint64_t >( 1, cfg.grpc_jobs )
                 << " p2p_requested_io_threads=" << std::max< uint64_t >( 1, cfg.p2p_jobs )
                 << " p2p_effective_io_threads=1"
@@ -1319,13 +1485,15 @@ int main( int argc, char** argv )
     chain::controller controller(
       cfg.read_compute_bandwidth_limit,
       64'000,
-      pending_limit
+      pending_limit,
+      cfg.vm_module_cache_max_capacity_bytes
     );
 
     auto state_dir = basedir / "chain" / "blockchain";
 
     // ── Mempool ──
-    koinos::mempool::mempool mempool_impl;
+    koinos::mempool::mempool mempool_impl( koinos::state_db::fork_resolution_algorithm::fifo,
+      { cfg.mempool_pending_record_max_owners, cfg.mempool_pending_record_max_capacity_bytes } );
     node::MempoolAdapter mempool_adapter( mempool_impl );
 
     // ── Phase 2: RocksDB + Block Store ──
@@ -1490,16 +1658,20 @@ int main( int argc, char** argv )
 
       if( vm.count( ALL_OPTION ) )
       {
-        storage_db.compact_all_column_families();
-        std::cout << "Compacted all shared RocksDB column families\n";
+        storage_db.compact_all_column_families( vm.count( COMPACT_REWRITE_OPTION ) > 0 );
+        std::cout << ( vm.count( COMPACT_REWRITE_OPTION )
+          ? "Rewrote existing tables in all shared RocksDB column families\n"
+          : "Compacted all shared RocksDB column families\n" );
       }
       else
       {
         for( const auto& cf_name: vm[ COMPACT_CF_OPTION ].as< std::vector< std::string > >() )
         {
           const auto cf = node::storage::column_family_from_name( cf_name );
-          storage_db.compact_column_family( cf );
-          std::cout << "Compacted RocksDB column family: " << node::storage::column_family_name( cf ) << "\n";
+          storage_db.compact_column_family( cf, vm.count( COMPACT_REWRITE_OPTION ) > 0 );
+          std::cout << ( vm.count( COMPACT_REWRITE_OPTION )
+            ? "Rewrote existing tables in RocksDB column family: "
+            : "Compacted RocksDB column family: " ) << node::storage::column_family_name( cf ) << "\n";
         }
       }
 
@@ -1610,6 +1782,11 @@ int main( int argc, char** argv )
     std::atomic< bool > producer_gossip_enabled{ false };
     std::thread producer_thread;
     std::unique_ptr< node::block_production::BlockProducer > block_producer;
+    std::atomic< uint64_t > producer_candidates_prepared{ 0 };
+    std::atomic< uint64_t > producer_pob_evaluations{ 0 };
+    std::atomic< uint64_t > producer_head_retries{ 0 };
+    std::atomic< uint64_t > producer_mempool_retries{ 0 };
+    std::atomic< uint64_t > producer_errors{ 0 };
 
     if( cfg.is_enabled( "block_producer" ) )
     {
@@ -1671,6 +1848,7 @@ int main( int argc, char** argv )
           producer_thread  = std::thread( [&]() {
               LOG( info ) << "[block_producer] Production loop started";
               uint64_t blocks_produced = 0;
+              uint64_t handoff_retries = 0;
               while( producer_running )
               {
                 std::chrono::milliseconds retry_after{ 5000 };
@@ -1685,6 +1863,29 @@ int main( int argc, char** argv )
                 {
                   auto result = block_producer->produce_once();
                   retry_after = result.retry_after;
+                  if( result.candidate_prepared )
+                    producer_candidates_prepared.fetch_add( 1, std::memory_order_relaxed );
+                  if( result.pob_evaluated )
+                    producer_pob_evaluations.fetch_add( 1, std::memory_order_relaxed );
+                  using RetryReason = node::block_production::ProductionResult::RetryReason;
+                  if( result.retry_reason != RetryReason::none )
+                  {
+                    if( result.retry_reason == RetryReason::mempool_unavailable )
+                      producer_mempool_retries.fetch_add( 1, std::memory_order_relaxed );
+                    else
+                      producer_head_retries.fetch_add( 1, std::memory_order_relaxed );
+                    if( handoff_retries++ == 0 )
+                      LOG( info ) << "[block_producer] Candidate deferred: "
+                                  << ( result.retry_reason == RetryReason::mempool_unavailable
+                                         ? "mempool parent unavailable" : "head changed" )
+                                  << ", parent=" << util::to_hex( result.retry_parent );
+                  }
+                  else if( handoff_retries )
+                  {
+                    LOG( info ) << "[block_producer] Candidate preparation recovered after "
+                                << handoff_retries << " handoff retry/retries";
+                    handoff_retries = 0;
+                  }
 
                   if( result.removed_failed_transactions > 0 )
                   {
@@ -1702,6 +1903,7 @@ int main( int argc, char** argv )
                 }
                 catch( const std::exception& e )
                 {
+                  producer_errors.fetch_add( 1, std::memory_order_relaxed );
                   retry_after = std::chrono::seconds( 5 );
                   LOG( warning ) << "[block_producer] " << e.what();
                 }
@@ -1763,26 +1965,12 @@ int main( int argc, char** argv )
       );
     }
 
-    // Mempool subscribes to accepted transactions, block events, and local expiry.
+    // Mempool admission is synchronous in MonolithRpcClient, before notifying
+    // accepted-transaction observers. Block/finality events and expiry remain here.
     boost::asio::steady_timer mempool_prune_timer( main_ioc );
     std::function< void( const boost::system::error_code& ) > mempool_prune_tick;
     if( cfg.is_enabled( "mempool" ) )
     {
-      event_bus.on_transaction_accepted.connect(
-        [&mempool_adapter]( const broadcast::transaction_accepted& ta ) {
-          try
-          {
-            auto rc_used = mempool_adapter.add_transaction_accepted( ta );
-            LOG( debug ) << "[mempool] accepted transaction id="
-                         << util::to_hex( ta.transaction().id() )
-                         << " reserved_rc=" << rc_used;
-          }
-          catch( const std::exception& e )
-          {
-            LOG( warning ) << "[mempool] failed to add accepted transaction: " << e.what();
-          }
-        }
-      );
       event_bus.on_block_accepted.connect(
         [&mempool_impl]( const broadcast::block_accepted& ba ) {
           mempool_impl.handle_block( ba );
@@ -1857,6 +2045,8 @@ int main( int argc, char** argv )
 	      p2p_opts.peer_discovery_enabled   = cfg.p2p_peer_discovery_enabled;
 	      p2p_opts.target_peer_count        = static_cast< uint32_t >( cfg.p2p_target_peer_count );
 	      p2p_opts.max_peer_candidates      = static_cast< uint32_t >( cfg.p2p_max_peer_candidates );
+      p2p_opts.max_peer_error_records = static_cast< size_t >( cfg.p2p_max_peer_error_records );
+      p2p_opts.peer_error_key_capacity_bytes = static_cast< size_t >( cfg.p2p_peer_error_key_capacity_bytes );
 	      p2p_opts.max_candidate_dials_per_cycle =
 	        static_cast< uint32_t >( cfg.p2p_max_candidate_dials_per_cycle );
 	      p2p_opts.peer_acquisition_interval = std::chrono::seconds( cfg.p2p_peer_acquisition_interval_seconds );
@@ -1873,7 +2063,10 @@ int main( int argc, char** argv )
           p2p_opts.seed_peers.push_back( { seed.substr( marker + 5 ), seed } );
       }
       p2p_node = std::make_unique< node::p2p::P2PNode >(
-        p2p_opts, &chain_adapter, &block_store_impl, &event_bus, std::move( transport ) );
+        p2p_opts, &chain_adapter, &block_store_impl, &event_bus, std::move( transport ),
+        [&]( const std::string& id ) {
+          return cfg.is_enabled( "mempool" ) && mempool_impl.has_pending_transaction( id );
+        } );
 
       registry.add(
         "p2p",
@@ -1900,6 +2093,8 @@ int main( int argc, char** argv )
 	      p2p_opts.peer_discovery_enabled   = cfg.p2p_peer_discovery_enabled;
 	      p2p_opts.target_peer_count        = static_cast< uint32_t >( cfg.p2p_target_peer_count );
 	      p2p_opts.max_peer_candidates      = static_cast< uint32_t >( cfg.p2p_max_peer_candidates );
+      p2p_opts.max_peer_error_records = static_cast< size_t >( cfg.p2p_max_peer_error_records );
+      p2p_opts.peer_error_key_capacity_bytes = static_cast< size_t >( cfg.p2p_peer_error_key_capacity_bytes );
 	      p2p_opts.max_candidate_dials_per_cycle =
 	        static_cast< uint32_t >( cfg.p2p_max_candidate_dials_per_cycle );
 	      p2p_opts.peer_acquisition_interval = std::chrono::seconds( cfg.p2p_peer_acquisition_interval_seconds );
@@ -1916,7 +2111,10 @@ int main( int argc, char** argv )
           p2p_opts.seed_peers.push_back( { seed.substr( marker + 5 ), seed } );
       }
       p2p_node = std::make_unique< node::p2p::P2PNode >(
-        p2p_opts, &chain_adapter, &block_store_impl, &event_bus, std::move( transport ) );
+        p2p_opts, &chain_adapter, &block_store_impl, &event_bus, std::move( transport ),
+        [&]( const std::string& id ) {
+          return cfg.is_enabled( "mempool" ) && mempool_impl.has_pending_transaction( id );
+        } );
 
       registry.add(
         "p2p",
@@ -1954,8 +2152,14 @@ int main( int argc, char** argv )
 
     // Wire MonolithClient so the chain controller routes RPC/broadcast
     // through IBlockStore + EventBus instead of AMQP
+    node::MonolithRpcClient::TransactionAdmission transaction_admission;
+    if( cfg.is_enabled( "mempool" ) )
+      transaction_admission = [&mempool_adapter]( const broadcast::transaction_accepted& ta ) {
+        mempool_adapter.add_transaction_accepted( ta );
+      };
     auto monolith_client = std::make_shared< node::MonolithRpcClient >(
-      &block_store_impl, &mempool_adapter, &event_bus );
+      &block_store_impl, &mempool_adapter, &event_bus, std::move( transaction_admission ),
+      node::TransactionWorkLimits{ cfg.transaction_work_max_jobs, cfg.transaction_work_max_wire_bytes } );
     controller.set_client( monolith_client );
 
     // Indexer will run after registry.start_all() — see below
@@ -1973,7 +2177,8 @@ int main( int argc, char** argv )
         jsonrpc_host,
         jsonrpc_port,
         static_cast< unsigned int >( cfg.jsonrpc_jobs ),
-        node::RpcAccessPolicy{ cfg.rpc_blacklist, cfg.rpc_whitelist }
+        node::RpcAccessPolicy{ cfg.rpc_blacklist, cfg.rpc_whitelist },
+        std::chrono::seconds( cfg.jsonrpc_io_timeout_seconds )
       );
 
       registry.add(
@@ -2179,11 +2384,45 @@ int main( int argc, char** argv )
         const auto peer_count = p2p_node ? p2p_node->connected_peer_count() : 0;
         const auto rss_bytes = current_process_rss_bytes();
         const auto rss_mb = static_cast< double >( rss_bytes ) / ( 1024.0 * 1024.0 );
+        const auto transaction_work = monolith_client->transaction_work_snapshot();
+        const auto pending_record = mempool_impl.get_pending_record_usage();
+        const auto vm_cache = controller.vm_cache_memory();
 
         LOG( info ) << "[metrics] head_height=" << head.head_topology().height()
                     << " lib=" << head.last_irreversible_block()
                     << " blocks_per_sec=" << std::fixed << std::setprecision( 3 ) << blocks_per_sec
-                    << " pending_txs=" << mempool_impl.get_pending_transactions( 0 ).size()
+                    << " pending_txs=" << mempool_impl.pending_transaction_count()
+                    << " producer_running=" << producer_running.load( std::memory_order_relaxed )
+                    << " producer_candidates_prepared=" << producer_candidates_prepared.load( std::memory_order_relaxed )
+                    << " producer_pob_evaluations=" << producer_pob_evaluations.load( std::memory_order_relaxed )
+                    << " producer_head_retries=" << producer_head_retries.load( std::memory_order_relaxed )
+                    << " producer_mempool_retries=" << producer_mempool_retries.load( std::memory_order_relaxed )
+                    << " producer_errors=" << producer_errors.load( std::memory_order_relaxed )
+                    << " pending_record_enabled=" << pending_record.enabled
+                    << " pending_record_owners=" << pending_record.owners
+                    << " pending_record_capacity_bytes=" << pending_record.capacity_bytes
+                    << " pending_record_peak_owners=" << pending_record.peak_owners
+                    << " pending_record_peak_capacity_bytes=" << pending_record.peak_capacity_bytes
+                    << " pending_record_refusals=" << pending_record.refusals
+                    << " pending_record_max_owners=" << pending_record.limits.max_owners
+                    << " pending_record_max_capacity_bytes=" << pending_record.limits.max_capacity_bytes
+                    << " transaction_notification_failures=" << monolith_client->transaction_notification_failures()
+                    << " transaction_work_enabled=" << transaction_work.enabled
+                    << " transaction_work_jobs=" << transaction_work.jobs
+                    << " transaction_work_wire_bytes=" << transaction_work.wire_bytes
+                    << " transaction_work_peak_jobs=" << transaction_work.peak_jobs
+                    << " transaction_work_peak_wire_bytes=" << transaction_work.peak_wire_bytes
+                    << " transaction_work_refusals=" << transaction_work.refusals
+                    << " transaction_work_max_jobs=" << transaction_work.limits.max_jobs
+                    << " transaction_work_max_wire_bytes=" << transaction_work.limits.max_wire_bytes
+                    << " vm_cache_available=" << vm_cache.available
+                    << " vm_cache_entries=" << vm_cache.entries
+                    << " vm_cache_capacity_bytes=" << vm_cache.capacity_bytes
+                    << " vm_cache_max_capacity_bytes=" << vm_cache.max_capacity_bytes
+                    << " vm_cache_lookup_hits=" << vm_cache.lookup_hits
+                    << " vm_cache_lookup_misses=" << vm_cache.lookup_misses
+                    << " vm_cache_evictions=" << vm_cache.evictions
+                    << " vm_cache_retention_bypasses=" << vm_cache.retention_bypasses
                     << " peer_count=" << peer_count
                     << " rss_bytes=" << rss_bytes
                     << " rss_mb=" << std::fixed << std::setprecision( 3 ) << rss_mb

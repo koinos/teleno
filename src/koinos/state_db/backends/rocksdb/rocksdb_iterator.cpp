@@ -58,6 +58,14 @@ const rocksdb_iterator::key_type& rocksdb_iterator::key() const
   return *_key;
 }
 
+rocksdb_iterator::value_ptr rocksdb_iterator::share_value() const
+{
+  // operator* validates and populates the owner; copy it before the iterator
+  // moves or dies, rather than exporting a borrowed cache pointer.
+  static_cast<void>(operator*());
+  return _cache_value;
+}
+
 abstract_iterator& rocksdb_iterator::operator++()
 {
   KOINOS_ASSERT( valid(), iterator_exception, "iterator operation is invalid" );

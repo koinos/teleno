@@ -3,6 +3,11 @@ build/
 build*/
 build-win/
 *.exe
+CMakeFiles/
+
+# Python diagnostic bytecode
+__pycache__/
+*.py[cod]
 
 # Dependency builds
 .deps/

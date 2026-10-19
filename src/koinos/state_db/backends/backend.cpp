@@ -1,10 +1,17 @@
 #include <koinos/state_db/backends/backend.hpp>
+#include <stdexcept>
 
 namespace koinos::state_db::backends {
 
 abstract_backend::abstract_backend():
     _id( crypto::multihash::zero( crypto::multicodec::sha2_256 ) )
 {}
+
+void abstract_backend::put_owned( const key_type& k, value_ptr v )
+{
+  if( !v ) throw std::invalid_argument( "owned state value is null" );
+  put( k, *v );
+}
 
 bool abstract_backend::empty() const
 {

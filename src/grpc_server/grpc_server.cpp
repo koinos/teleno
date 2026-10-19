@@ -1,4 +1,5 @@
 #include "grpc_server.hpp"
+#include "core/transaction_work_budget.hpp"
 
 #include <koinos/log.hpp>
 
@@ -42,6 +43,10 @@ grpc::Status invoke_service( const std::string& method, Handler&& handler )
   {
     handler();
     return grpc::Status::OK;
+  }
+  catch( const LocalCapacityExceeded& e )
+  {
+    return grpc::Status( grpc::StatusCode::RESOURCE_EXHAUSTED, e.what() );
   }
   catch( const std::exception& e )
   {

@@ -43,6 +43,82 @@ transaction store, contract meta store, and account history when those
 components are enabled. It does not expose native backup or restore admin
 methods.
 
+LR2 native development adds owned sessions and
+`jsonrpc.io-timeout-seconds: 30` (range `1..300`). Idle/partial reads and blocked
+writes expire; keepalive works within that deadline. `jobs` remains the worker
+and active-session limit (default four; maximum 64); excess connections get a
+best-effort 503 then close. Stop drains sessions and already-admitted service
+work before releasing dependencies. It does not forcibly interrupt execution or
+roll back a submitted request on disconnect. See
+[configuration](configuration.md#json-rpc-memory-and-lifecycle-policy-lr2-development).
+
+[R1-A](validation/low-resource-lr2-rpc-bodies.md) additionally releases the request
+after dispatch and the response after completed writing, while preserving full
+responses, pipelining and healthy keepalive. Stop/cancellation does not release a
+body still borrowed by a write or undo admitted service work. This selects no
+output-size limit or Linux profile and adds no endpoint/configuration setting;
+service/JSON/serialization and aggregate output admission remain open.
+
+[R1-B](validation/low-resource-lr2-rpc-batch.md) serializes one batch result at a
+time into the complete retained HTTP body, without keeping all earlier result
+trees or copying returned trees into success envelopes. Response bytes/order
+are preserved. Strict invalid-UTF8 serialization still executes later batch
+calls before closing without partial output; disconnect does not imply rollback.
+This is not network streaming or an output-size reservation. The final body and
+simultaneous service/input/transport memory still require aggregate policy.
+
+## Native transaction admission (LR2 development)
+
+In current native LR2 development, enabled mempool insertion finishes before
+accepted-transaction observers are notified. Ordinary insertion refusal now
+propagates to the submitting controller instead of being caught/logged as a
+successful bridge return. A post-insertion observer failure is counted/logged
+without retrying already-retained work. RPC schemas and disabled-mempool
+notification-only behavior are unchanged; this is not a new aggregate overload
+policy or complete memory bound. See [the checkpoint](validation/low-resource-lr2-admission.md).
+
+The [M1-C follow-up](validation/low-resource-lr2-admission-atomicity.md) corrects
+partial mempool insertion after C++ allocation failure across mutable forks.
+All fallible write/reset preparation precedes publication; debug-log failure
+after publication does not report rejection for retained work. Per-fork nonce
+conflicts and resource rules are unchanged. This limited write-only map batch
+does not establish atomicity for block/LIB/prune/removal failures, aggregate
+capacity, peer overload classification or a global memory limit.
+
+The [M1-E follow-up](validation/low-resource-lr2-transaction-work.md) adds
+opt-in pre-execution standalone transaction-work count/input-wire-byte limits
+under `chain`. Both default to zero/unlimited. Exhaustion returns a JSON-RPC
+error `-32005`, preserving the request ID, with
+`data: {retryable: true, reason: "transaction_work_capacity", scope: "local"}`;
+it is not a transaction receipt or consensus rejection. gRPC uses
+`RESOURCE_EXHAUSTED`. A client may retry later with its own bounded/backoff
+policy; the node does not queue or automatically retry refused work. P2P does
+not assign misconduct score or an accepted-ID cache entry for this refusal.
+Normal validity failures retain their existing classification. Configuration
+does not change endpoints or protocol schemas. Returned-output, ingress and
+retained-fork memory remain outside this work budget; Linux profile selection
+and whole-node qualification are still pending.
+
+The [M1-G follow-up](validation/low-resource-lr2-pending-records.md) additionally
+shares immutable pending records across eligible forks and provides opt-in
+live-record owner/capacity limits under `mempool`. Local refusal uses the same
+JSON-RPC `-32005`/retryable/local contract with reason `pending_record_capacity`,
+and the same gRPC/P2P handling. No receipt/result is returned on refusal and no
+partial insertion/accepted notification follows. Expiry can empty the visible
+head while ancestors still hold charged records. Those limits exclude other
+mempool structures and encoding workspace; they are not a complete memory cap
+or qualified VPS profile. Defaults remain unlimited; endpoints are unchanged.
+
+## Development receipt completeness
+
+The native development block-store path completes a previously missing
+`state_merkle_root` when the validated controller publishes an otherwise
+identical accepted receipt. Existing blocks, execution fields, roots and topology
+are preserved; contradictory completion is refused. This is not historical
+archive repair or an independent proof of the root. The correction has component
+evidence, with Linux/whole-node and producer update acceptance still pending.
+See [the receipt-completion checkpoint](validation/block-receipt-completion.md).
+
 ## gRPC
 
 gRPC is disabled by default:
@@ -86,6 +162,19 @@ p2p:
 
 P2P logs peer connection activity and periodic connected-peer snapshots at
 `p2p.peer-log-interval-seconds`.
+
+Native development bounds optional peer advice and known/connected projections
+with internal C++ policies. Queries read native published metadata; they are not
+a complete SDK address/connection inventory. Projection credits follow the
+returned storage, including across transport restarts. Capacity refusal is local
+and does not score peers or return a truncated successful result. Periodic
+discovery waits its normal interval before another attempt.
+
+The protected `GET /admin/p2p/peers` provider uses those projections. A provider
+failure uses the existing HTTP 500 error response with `ok: false`; formatting,
+serialization and caller copies remain outside the projection ledger. The
+route's loopback/token protection is unchanged. See the
+[P2-F contract and exclusions](validation/low-resource-lr2-peer-snapshots.md).
 
 ## Backup Admin API
 

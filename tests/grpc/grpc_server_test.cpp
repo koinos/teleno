@@ -1,10 +1,12 @@
 #include "grpc_server/grpc_server.hpp"
+#include "core/transaction_work_budget.hpp"
 
 #include <koinos/rpc/services.grpc.pb.h>
 
 #include <grpcpp/grpcpp.h>
 
 #include <cassert>
+#include <atomic>
 #include <chrono>
 #include <stdexcept>
 #include <string>
@@ -17,6 +19,8 @@ namespace {
 class FakeChain final : public IChain
 {
 public:
+  std::atomic< bool > full = true;
+  std::atomic< LocalCapacityReason > reason = LocalCapacityReason::transaction_work;
   rpc::chain::submit_block_response
   submit_block( const rpc::chain::submit_block_request& ) override
   {
@@ -26,6 +30,7 @@ public:
   rpc::chain::submit_transaction_response
   submit_transaction( const rpc::chain::submit_transaction_request& ) override
   {
+    if( full ) throw LocalCapacityExceeded( reason.load() );
     return {};
   }
 
@@ -206,6 +211,23 @@ int main()
   assert( channel->WaitForConnected( std::chrono::system_clock::now() + std::chrono::seconds( 5 ) ) );
 
   auto stub = services::koinos::NewStub( channel );
+
+  rpc::chain::submit_transaction_response transaction_resp;
+  auto overload = call< rpc::chain::submit_transaction_response >(
+    [&]( auto* ctx, const auto& req, auto* resp ) { return stub->submit_transaction( ctx, req, resp ); },
+    rpc::chain::submit_transaction_request{}, transaction_resp );
+  assert( overload.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED );
+  chain.reason = LocalCapacityReason::pending_record;
+  overload = call< rpc::chain::submit_transaction_response >(
+    [&]( auto* ctx, const auto& req, auto* resp ) { return stub->submit_transaction( ctx, req, resp ); },
+    rpc::chain::submit_transaction_request{}, transaction_resp );
+  assert( overload.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED );
+  assert( overload.error_message() == LocalCapacityExceeded( LocalCapacityReason::pending_record ).what() );
+  chain.full = false;
+  overload = call< rpc::chain::submit_transaction_response >(
+    [&]( auto* ctx, const auto& req, auto* resp ) { return stub->submit_transaction( ctx, req, resp ); },
+    rpc::chain::submit_transaction_request{}, transaction_resp );
+  assert( overload.ok() );
 
   rpc::chain::get_head_info_response head_resp;
   auto status = call< rpc::chain::get_head_info_response >(

@@ -61,12 +61,12 @@ int32_t host_api::invoke_thunk( uint32_t tid,
     if( msg_len <= ret_len )
     {
       std::memcpy( ret_ptr, error_bytes.data(), msg_len );
-      *bytes_written = uint32_t( msg_len );
+      vm_manager::store_bytes_written( bytes_written, uint32_t( msg_len ) );
     }
     else
     {
       code           = chain::insufficient_return_buffer;
-      *bytes_written = 0;
+      vm_manager::store_bytes_written( bytes_written, 0 );
     }
   }
 
@@ -80,7 +80,7 @@ void host_api::call( uint32_t sid,
                      uint32_t arg_len,
                      uint32_t* bytes_written )
 {
-  *bytes_written = 0;
+  vm_manager::store_bytes_written( bytes_written, 0 );
 
   with_stack_frame(
     _ctx,
@@ -99,7 +99,7 @@ void host_api::call( uint32_t sid,
                          insufficient_return_buffer_exception,
                          "return buffer is not large enough for the return value" );
           memcpy( ret_ptr, exec_res.res.object().data(), obj_len );
-          *bytes_written = uint32_t( obj_len );
+          vm_manager::store_bytes_written( bytes_written, uint32_t( obj_len ) );
         }
       }
       else
@@ -160,12 +160,12 @@ int32_t host_api::invoke_system_call( uint32_t sid,
     if( msg_len <= ret_len )
     {
       std::memcpy( ret_ptr, error_bytes.data(), msg_len );
-      *bytes_written = uint32_t( msg_len );
+      vm_manager::store_bytes_written( bytes_written, uint32_t( msg_len ) );
     }
     else
     {
       code           = chain::insufficient_return_buffer;
-      *bytes_written = 0;
+      vm_manager::store_bytes_written( bytes_written, 0 );
     }
   }
 

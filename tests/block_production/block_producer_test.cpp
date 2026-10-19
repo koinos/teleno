@@ -1,4 +1,5 @@
 #include "block_production/block_producer.hpp"
+#include "mempool/mempool_adapter.hpp"
 
 #include <koinos/bigint.hpp>
 #include <koinos/contracts/name_service/name_service.pb.h>
@@ -7,15 +8,20 @@
 #include <koinos/contracts/vhp/vhp.pb.h>
 #include <koinos/crypto/elliptic.hpp>
 #include <koinos/crypto/multihash.hpp>
+#include <koinos/mempool/mempool.hpp>
 #include <koinos/mempool/mempool.pb.h>
 #include <koinos/protocol/protocol.pb.h>
 #include <koinos/util/base58.hpp>
 #include <koinos/util/conversion.hpp>
 
 #include <cassert>
+#include <barrier>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -76,6 +82,14 @@ public:
   {
     last_requested_block_id = req.block_id();
     last_requested_limit    = req.limit();
+    if( before_pending )
+      before_pending();
+    if( unavailable_requests > 0 )
+    {
+      --unavailable_requests;
+      KOINOS_THROW( mempool::pending_transaction_unknown_block,
+                    "cannot retrieve pending transactions from an unknown block" );
+    }
 
     rpc::mempool::get_pending_transactions_response resp;
     for( const auto& pending: pending_transactions )
@@ -116,6 +130,8 @@ public:
   std::vector< mempool::pending_transaction > pending_transactions;
   std::string last_requested_block_id;
   uint64_t last_requested_limit = 0;
+  uint64_t unavailable_requests = 0;
+  std::function< void() > before_pending;
 };
 
 class FakeChain final : public IChain
@@ -156,6 +172,8 @@ public:
 
   rpc::chain::read_contract_response read_contract( const rpc::chain::read_contract_request& req ) override
   {
+    if( before_contract )
+      before_contract( req.entry_point() );
     rpc::chain::read_contract_response resp;
 
     if( req.entry_point() == get_consensus_parameters_entry_point )
@@ -263,6 +281,7 @@ public:
   bool fail_first_proposal = false;
   std::vector< uint32_t > failed_indices;
   std::vector< protocol::block > proposed_blocks;
+  std::function< void( uint32_t ) > before_contract;
 };
 
 crypto::private_key test_private_key()
@@ -328,6 +347,8 @@ void test_federated_block_assembly_and_acceptance()
   assert( result.status == ProductionResult::Status::produced );
   assert( result.height == 42 );
   assert( result.transaction_count == 2 );
+  assert( result.candidate_prepared );
+  assert( !result.pob_evaluated );
   assert( mempool.last_requested_block_id == "previous-block" );
   assert( mempool.last_requested_limit == 2'000 );
   assert( chain.proposed_blocks.size() == 1 );
@@ -396,6 +417,7 @@ void test_pob_candidate_refreshes_when_head_advances()
 
   assert( produced.status == ProductionResult::Status::produced );
   assert( produced.height == 43 );
+  assert( produced.candidate_prepared && produced.pob_evaluated );
   assert( chain.proposed_blocks.size() == 1 );
 
   const auto& block = chain.proposed_blocks.front();
@@ -403,6 +425,211 @@ void test_pob_candidate_refreshes_when_head_advances()
   assert( block.header().height() == 43 );
   assert( block.header().previous_state_merkle_root() == "new-previous-root" );
   assert( block.header().signer() == util::from_base58< std::string >( test_producer_address ) );
+}
+
+void test_real_mempool_head_publication_handoff()
+{
+  // Deterministic interleaving: chain publishes B before the real mempool
+  // receives B's block event. A is already present, so bootstrap fallback
+  // cannot conceal the missing fork. No scheduling or injected exception.
+  FakeChain chain;
+  mempool::mempool impl;
+  MempoolAdapter adapter( impl );
+  auto a = util::converter::as< std::string >( crypto::hash( crypto::multicodec::sha2_256, std::string( "handoff-a" ) ) );
+  auto b = util::converter::as< std::string >( crypto::hash( crypto::multicodec::sha2_256, std::string( "handoff-b" ) ) );
+  broadcast::block_accepted accepted;
+  accepted.mutable_block()->set_id( a );
+  accepted.mutable_block()->mutable_header()->set_previous(
+    util::converter::as< std::string >( crypto::multihash::zero( crypto::multicodec::sha2_256 ) ) );
+  accepted.mutable_block()->mutable_header()->set_height( 41 );
+  assert( impl.handle_block( accepted ) );
+  chain.head.mutable_head_topology()->set_id( b );
+  chain.head.mutable_head_topology()->set_height( 42 );
+
+  ProducerConfig config;
+  config.algorithm = "federated";
+  BlockProducer producer( chain, adapter, test_private_key(), config );
+  auto waiting = producer.produce_once();
+  assert( waiting.status == ProductionResult::Status::not_ready );
+  assert( waiting.retry_after == std::chrono::milliseconds( 10 ) );
+  assert( chain.proposed_blocks.empty() );
+
+  accepted.mutable_block()->set_id( b );
+  accepted.mutable_block()->mutable_header()->set_previous( a );
+  accepted.mutable_block()->mutable_header()->set_height( 42 );
+  assert( impl.handle_block( accepted ) );
+  auto result = producer.produce_once();
+  assert( result.status == ProductionResult::Status::produced );
+  assert( chain.proposed_blocks.size() == 1 );
+  assert( chain.proposed_blocks.front().header().previous() == b );
+
+  // Exercise actual simultaneous reader/writer entry as well. Chain state is
+  // immutable while the worker runs; only the real mempool is shared/mutated.
+  for( uint64_t round = 0; round < 8; ++round )
+  {
+    auto next = util::converter::as< std::string >(
+      crypto::hash( crypto::multicodec::sha2_256, std::string( "concurrent-handoff-" ) + std::to_string( round ) ) );
+    chain.head.mutable_head_topology()->set_id( next );
+    chain.head.mutable_head_topology()->set_height( 43 + round );
+    chain.proposed_blocks.clear();
+    accepted.mutable_block()->set_id( next );
+    accepted.mutable_block()->mutable_header()->set_previous( b );
+    accepted.mutable_block()->mutable_header()->set_height( 43 + round );
+    std::barrier<> start( 2 );
+    ProductionResult raced;
+    std::exception_ptr failure;
+    std::thread reader( [&] {
+      start.arrive_and_wait();
+      try { raced = producer.produce_once(); }
+      catch( ... ) { failure = std::current_exception(); }
+    } );
+    start.arrive_and_wait();
+    const bool handled = impl.handle_block( accepted );
+    reader.join();
+    assert( handled );
+    if( failure ) std::rethrow_exception( failure );
+    if( raced.status == ProductionResult::Status::not_ready )
+      raced = producer.produce_once();
+    assert( raced.status == ProductionResult::Status::produced );
+    assert( chain.proposed_blocks.size() == 1 );
+    assert( chain.proposed_blocks.front().header().previous() == next );
+    b = next;
+  }
+}
+
+void test_transient_handoff_keeps_transactions()
+{
+  for( const auto* algorithm: { "federated", "pob" } )
+  {
+    FakeChain chain;
+    FakeMempool mempool;
+    mempool.unavailable_requests = 1;
+    mempool.pending_transactions.push_back( make_pending_transaction( "retained", 100, 100, 100 ) );
+    ProducerConfig config;
+    config.algorithm = algorithm;
+    config.producer_address = test_producer_address;
+    BlockProducer producer( chain, mempool, test_private_key(), config );
+    auto waiting = producer.produce_once();
+    assert( waiting.status == ProductionResult::Status::not_ready );
+    assert( waiting.retry_after == std::chrono::milliseconds( 10 ) );
+    assert( waiting.retry_reason == ProductionResult::RetryReason::mempool_unavailable );
+    assert( chain.proposed_blocks.empty() );
+    auto result = producer.produce_once();
+    assert( result.status == ProductionResult::Status::produced );
+    assert( result.candidate_prepared );
+    assert( chain.proposed_blocks.size() == 1 );
+    assert( chain.proposed_blocks.front().transactions_size() == 1 );
+    assert( chain.proposed_blocks.front().transactions( 0 ).id() == "retained" );
+  }
+}
+
+void test_persistent_unknown_parent_is_not_suppressed()
+{
+  FakeChain chain;
+  FakeMempool mempool;
+  mempool.unavailable_requests = 100;
+  ProducerConfig config;
+  config.algorithm = "federated";
+  BlockProducer producer( chain, mempool, test_private_key(), config );
+  for( size_t i = 0; i < 99; ++i )
+  {
+    auto waiting = producer.produce_once();
+    assert( waiting.status == ProductionResult::Status::not_ready );
+    assert( chain.proposed_blocks.empty() );
+  }
+  bool refused = false;
+  try { producer.produce_once(); }
+  catch( const mempool::pending_transaction_unknown_block& ) { refused = true; }
+  assert( refused );
+  assert( chain.proposed_blocks.empty() );
+  assert( producer.produce_once().status == ProductionResult::Status::produced );
+}
+
+void test_head_change_during_candidate_assembly_is_discarded()
+{
+  for( const auto* algorithm: { "federated", "pob" } )
+  {
+    FakeChain chain;
+    FakeMempool mempool;
+    mempool.pending_transactions.push_back( make_pending_transaction( "kept", 100, 100, 100 ) );
+    mempool.before_pending = [&] {
+      chain.head.mutable_head_topology()->set_id( "advanced-parent" );
+      chain.head.mutable_head_topology()->set_height( 42 );
+      chain.head.set_head_state_merkle_root( "advanced-root" );
+    };
+    ProducerConfig config;
+    config.algorithm = algorithm;
+    config.producer_address = test_producer_address;
+    BlockProducer producer( chain, mempool, test_private_key(), config );
+    auto waiting = producer.produce_once();
+    assert( waiting.status == ProductionResult::Status::not_ready );
+    assert( chain.proposed_blocks.empty() );
+    mempool.before_pending = {};
+    auto result = producer.produce_once();
+    assert( result.status == ProductionResult::Status::produced );
+    assert( chain.proposed_blocks.front().header().previous() == "advanced-parent" );
+    assert( chain.proposed_blocks.front().header().previous_state_merkle_root() == "advanced-root" );
+    assert( chain.proposed_blocks.front().transactions_size() == 1 );
+  }
+}
+
+void test_unrelated_mempool_failures_propagate()
+{
+  FakeChain chain;
+  FakeMempool mempool;
+  ProducerConfig config;
+  config.algorithm = "federated";
+  BlockProducer producer( chain, mempool, test_private_key(), config );
+  mempool.before_pending = [] { throw std::runtime_error( "unrelated storage failure" ); };
+  bool refused = false;
+  try { producer.produce_once(); }
+  catch( const std::runtime_error& e ) { refused = std::string( e.what() ) == "unrelated storage failure"; }
+  assert( refused );
+  mempool.before_pending = [] { throw std::bad_alloc(); };
+  refused = false;
+  try { producer.produce_once(); }
+  catch( const std::bad_alloc& ) { refused = true; }
+  assert( refused );
+  assert( chain.proposed_blocks.empty() );
+}
+
+void test_pob_metadata_head_change_and_failed_cached_replacement()
+{
+  FakeChain chain;
+  FakeMempool mempool;
+  ProducerConfig config;
+  config.algorithm = "pob";
+  config.producer_address = test_producer_address;
+  BlockProducer producer( chain, mempool, test_private_key(), config );
+  chain.before_contract = [&]( uint32_t entry ) {
+    if( entry == get_metadata_entry_point )
+    {
+      chain.head.mutable_head_topology()->set_id( "metadata-advanced-parent" );
+      chain.head.mutable_head_topology()->set_height( 42 );
+    }
+  };
+  auto deferred = producer.produce_once();
+  assert( deferred.status == ProductionResult::Status::not_ready );
+  assert( deferred.retry_reason == ProductionResult::RetryReason::head_changed );
+  assert( chain.proposed_blocks.empty() );
+  chain.before_contract = {};
+  chain.head.set_head_block_time( now_ms() + 5'500 );
+  auto waiting = producer.produce_once();
+  assert( waiting.status == ProductionResult::Status::not_our_turn );
+  assert( waiting.candidate_prepared && !waiting.pob_evaluated );
+  chain.head.mutable_head_topology()->set_id( "replacement-parent" );
+  chain.head.mutable_head_topology()->set_height( 43 );
+  chain.head.set_head_block_time( now_ms() - 1'000 );
+  mempool.unavailable_requests = 1;
+  deferred = producer.produce_once();
+  assert( deferred.status == ProductionResult::Status::not_ready );
+  assert( deferred.retry_reason == ProductionResult::RetryReason::mempool_unavailable );
+  assert( chain.proposed_blocks.empty() );
+  auto result = producer.produce_once();
+  assert( result.status == ProductionResult::Status::produced );
+  assert( result.candidate_prepared && result.pob_evaluated );
+  assert( chain.proposed_blocks.size() == 1 );
+  assert( chain.proposed_blocks.front().header().previous() == "replacement-parent" );
 }
 
 } // anonymous namespace
@@ -413,5 +640,11 @@ int main()
   test_federated_block_assembly_and_acceptance();
   test_failed_transactions_are_pruned_and_retried();
   test_pob_candidate_refreshes_when_head_advances();
+  test_real_mempool_head_publication_handoff();
+  test_transient_handoff_keeps_transactions();
+  test_persistent_unknown_parent_is_not_suppressed();
+  test_head_change_during_candidate_assembly_is_discarded();
+  test_unrelated_mempool_failures_propagate();
+  test_pob_metadata_head_change_and_failed_cached_replacement();
   return 0;
 }

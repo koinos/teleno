@@ -1,4 +1,5 @@
 #include <koinos/state_db/state_delta.hpp>
+#include <koinos/state_db/retained_memory.hpp>
 
 #include <koinos/crypto/merkle_tree.hpp>
 
@@ -6,6 +7,26 @@ namespace koinos::state_db::detail {
 
 using backend_type = state_delta::backend_type;
 using value_type   = state_delta::value_type;
+
+void state_delta::inventory_retained_memory( retained_memory_accumulator& inventory ) const
+{
+  auto& usage = inventory.usage;
+  inventory.add( usage.state_nodes, 1 );
+  inventory.add( _finalized ? usage.finalized_state_nodes : usage.writable_state_nodes, 1 );
+  inventory.add( usage.tombstone_bucket_count, _removed_objects.bucket_count() );
+  for( const auto& key: _removed_objects )
+    inventory.tombstone( key );
+  if( inventory.first_backend( _backend.get() ) )
+  {
+    if( const auto* map = dynamic_cast< const backends::map::map_backend* >( _backend.get() ) )
+    {
+      inventory.add( usage.map_backends, 1 );
+      map->inventory_retained_memory( inventory );
+    }
+    else
+      inventory.add( usage.unmeasured_backends, 1 );
+  }
+}
 
 state_delta::state_delta( const std::optional< std::filesystem::path >& p )
 {
@@ -39,6 +60,11 @@ void state_delta::put( const key_type& k, const value_type& v )
   _backend->put( k, v );
 }
 
+void state_delta::put_owned( const key_type& k, value_ptr v )
+{
+  _backend->put_owned( k, std::move( v ) );
+}
+
 void state_delta::erase( const key_type& k, bool preserve_tombstone )
 {
   if( find( k ) || preserve_tombstone )
@@ -48,7 +74,7 @@ void state_delta::erase( const key_type& k, bool preserve_tombstone )
   }
 }
 
-const value_type* state_delta::find( const key_type& key ) const
+state_delta::value_ptr state_delta::find( const key_type& key ) const
 {
   if( auto val_ptr = _backend->get( key ); val_ptr )
     return val_ptr;
@@ -80,13 +106,110 @@ void state_delta::squash()
 
   for( auto itr = _backend->begin(); itr != _backend->end(); ++itr )
   {
-    _parent->_backend->put( itr.key(), *itr );
+    _parent->_backend->put_owned( itr.key(), itr.share_value() );
 
     if( !_parent->is_root() )
     {
       _parent->_removed_objects.erase( itr.key() );
     }
   }
+}
+
+void state_delta::squash_all_writes( const std::vector< std::shared_ptr< state_delta > >& children )
+{
+  using map_backend = backends::map::map_backend;
+  struct transfer
+  {
+    map_backend* source;
+    map_backend* target;
+    std::unordered_set< key_type >* removed;
+  };
+  std::vector< transfer > prepared;
+  prepared.reserve( children.size() );
+  std::unordered_set< state_delta* > parents;
+  parents.reserve( children.size() );
+  for( const auto& child: children )
+  {
+    KOINOS_ASSERT( child && child->_parent, illegal_argument, "write batch requires a child state delta" );
+    KOINOS_ASSERT( !child->_parent->is_finalized(), node_finalized, "cannot commit to a finalized node" );
+    KOINOS_ASSERT( child->_removed_objects.empty(), illegal_argument, "atomic write batch does not accept removals" );
+    KOINOS_ASSERT( parents.insert( child->_parent.get() ).second,
+                   illegal_argument, "atomic write batch requires distinct parents" );
+    auto* source = dynamic_cast< map_backend* >( child->_backend.get() );
+    auto* target = dynamic_cast< map_backend* >( child->_parent->_backend.get() );
+    KOINOS_ASSERT( source && target, illegal_argument, "atomic write batch requires map backends" );
+    prepared.push_back( { source, target, &child->_parent->_removed_objects } );
+  }
+  // Everything that allocates or can reject the batch is above this boundary.
+  // Fixed default map allocators allow node-handle transfer without allocation.
+  for( const auto& item: prepared )
+    item.target->merge_writes_from( *item.source, *item.removed );
+}
+
+state_delta::prepared_change_batch state_delta::prepare_all_changes(
+  const std::vector< std::shared_ptr< state_delta > >& children )
+{
+  prepared_change_batch batch;
+  batch._transfers.reserve( children.size() );
+  std::unordered_set< state_delta* > parents;
+  std::unordered_set< backend_type* > targets, sources;
+  parents.reserve( children.size() );
+  targets.reserve( children.size() );
+  sources.reserve( children.size() );
+  for( const auto& child: children )
+  {
+    KOINOS_ASSERT( child && child->_parent, illegal_argument, "change batch requires child state deltas" );
+    const auto& parent = child->_parent;
+    KOINOS_ASSERT( !parent->is_root(), illegal_argument, "change batch does not support root parents" );
+    KOINOS_ASSERT( !parent->is_finalized(), node_finalized, "cannot commit to a finalized node" );
+    KOINOS_ASSERT( parents.insert( parent.get() ).second,
+                   illegal_argument, "change batch requires distinct parents" );
+    auto* source = dynamic_cast< backends::map::map_backend* >( child->_backend.get() );
+    auto* target = dynamic_cast< backends::map::map_backend* >( parent->_backend.get() );
+    KOINOS_ASSERT( source && target, illegal_argument, "change batch requires map backends" );
+    KOINOS_ASSERT( targets.insert( target ).second && sources.insert( source ).second,
+                   illegal_argument, "change batch requires distinct backends" );
+    batch._transfers.push_back( { child, parent, source, target, {} } );
+    auto& prepared = batch._transfers.back().removed;
+    const auto old_size = parent->_removed_objects.size();
+    KOINOS_ASSERT( old_size <= prepared.max_size() &&
+                   child->_removed_objects.size() <= prepared.max_size() - old_size,
+                   illegal_argument, "change batch tombstone capacity overflow" );
+    const auto upper = old_size + child->_removed_objects.size();
+    // Reserve a separate bucket workspace, not the live parent's set: even a
+    // rejected preparation must preserve its original buckets and all records.
+    // Publication moves existing nodes rather than copying old keys/map values.
+    if( upper )
+      prepared.reserve( upper );
+  }
+  for( const auto& item: batch._transfers )
+    KOINOS_ASSERT( !parents.count( item.child.get() ) && !targets.count( item.source ),
+                   illegal_argument, "change batch parents and sources must be disjoint" );
+  return batch;
+}
+
+void state_delta::prepared_change_batch::apply() noexcept
+{
+  if( _applied )
+    return;
+  for( auto& item: _transfers )
+  {
+    auto& old_removed = item.parent->_removed_objects;
+    while( !old_removed.empty() )
+      item.removed.insert( old_removed.extract( old_removed.begin() ) );
+    auto& changes = item.child->_removed_objects;
+    while( !changes.empty() )
+    {
+      auto marker = changes.extract( changes.begin() );
+      item.target->erase( marker.value() );
+      item.removed.insert( std::move( marker ) );
+    }
+    // Original squash processes removals first, then writes; a source value
+    // wins even when that source also carries a tombstone for the same key.
+    item.target->merge_writes_from( *item.source, item.removed );
+    old_removed.swap( item.removed );
+  }
+  _applied = true;
 }
 
 void state_delta::commit()
@@ -116,9 +239,11 @@ void state_delta::commit()
   // Because we already asserted we were not root, there will always exist a minimum of two nodes in the stack,
   // this and root.
   auto backend = node_stack.back()->_backend;
-  node_stack.back()->_backend.reset();
+  auto previous_root = node_stack.back();
   node_stack.pop_back();
 
+  try
+  {
   // Start the write batch
   backend->start_write_batch();
 
@@ -134,7 +259,7 @@ void state_delta::commit()
 
     for( auto itr = node->_backend->begin(); itr != node->_backend->end(); ++itr )
     {
-      backend->put( itr.key(), *itr );
+      backend->put_owned( itr.key(), itr.share_value() );
     }
 
     node_stack.pop_back();
@@ -149,8 +274,11 @@ void state_delta::commit()
 
   // End the write batch making the entire merge atomic and durable.
   backend->end_write_batch( backends::write_durability::sync );
+  }
+  catch( ... ) { backend->abort_write_batch(); throw; }
 
   // Reset local variables to match new status as root delta
+  previous_root->_backend.reset();
   _removed_objects.clear();
   _backend = backend;
   _parent.reset();

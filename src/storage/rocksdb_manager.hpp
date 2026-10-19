@@ -2,10 +2,12 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <rocksdb/db.h>
+#include <rocksdb/cache.h>
 
 #include "core/config.hpp"
 
@@ -42,6 +44,16 @@ struct CompressionStatus
   std::vector< std::string > supported_compressions;
 };
 
+struct MemoryStats
+{
+  uint64_t block_cache_capacity = 0;
+  uint64_t block_cache_usage = 0;
+  uint64_t block_cache_pinned_usage = 0;
+  uint64_t aggregate_memtable_flush_threshold = 0;
+  std::optional< uint64_t > all_memtables;
+  std::optional< uint64_t > table_readers;
+};
+
 class RocksDBManager
 {
 public:
@@ -62,11 +74,12 @@ public:
   std::size_t column_family_count() const;
   std::vector< ColumnFamilyStats > column_family_stats() const;
   const CompressionStatus& compression_status() const;
+  MemoryStats memory_stats() const;
 
   std::string read_metadata( const std::string& key ) const;
   void write_metadata( const std::string& key, const std::string& value );
-  void compact_column_family( ColumnFamily cf );
-  void compact_all_column_families();
+  void compact_column_family( ColumnFamily cf, bool rewrite_existing = false );
+  void compact_all_column_families( bool rewrite_existing = false );
 
 private:
   void initialize_storage_metadata( const std::filesystem::path& basedir );
@@ -75,6 +88,8 @@ private:
   std::unique_ptr< rocksdb::DB > _db;
   std::vector< rocksdb::ColumnFamilyHandle* > _handles;
   CompressionStatus _compression_status;
+  std::shared_ptr< rocksdb::Cache > _block_cache;
+  uint64_t _memtable_threshold = 0;
 };
 
 const char* column_family_name( ColumnFamily cf );

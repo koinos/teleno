@@ -1,8 +1,19 @@
+<p align="center">
+  <img src="assets/branding/icon.png" alt="Teleno logo" width="180" />
+</p>
+
 # Teleno
 
-Teleno (`teleno_node`) is a monolithic, Koinos-compatible blockchain node: a
-single native binary that replaces the legacy Koinos microservice cluster
-while preserving Koinos protocol compatibility and mainnet behavior.
+> [!IMPORTANT]
+> Teleno is an experimental node implementation intended for node-architecture
+> experimentation. The official reference architecture for Koinos remains the
+> microservice architecture. Teleno does not replace or redefine that reference
+> implementation.
+
+Teleno (`teleno_node`) is an experimental, monolithic, Koinos-compatible
+blockchain node. It explores operating the services required by a Koinos node
+inside a single native binary while preserving Koinos protocol compatibility
+and mainnet behavior.
 
 It runs as an observer or block-producing node, exposes JSON-RPC and gRPC
 endpoints, and includes native backup and restore tooling.
@@ -76,6 +87,11 @@ manages Teleno nodes. It consumes this repository as a git submodule and
 bundles the `teleno_node` binary into its packaged builds. This repository is
 fully standalone: cloning and building it is enough to run a node from the
 CLI.
+
+The experimental native **1.3.0-alpha.1** release publishes the accumulated
+startup, full-history storage/restore, memory, networking and producer work.
+Read the [detailed updates and qualification limits](docs/releases/1.3.0-alpha.1.md)
+before selecting this prerelease. Issue 9 remains open.
 
 ## License
 

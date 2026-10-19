@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <map>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -18,6 +19,7 @@
 #include "error_handler.hpp"
 #include "fork_watchdog.hpp"
 #include "gossip_toggle.hpp"
+#include "seen_cache.hpp"
 #include "transport.hpp"
 #include "types.hpp"
 
@@ -37,11 +39,13 @@ namespace koinos::node::p2p {
 class P2PNode
 {
 public:
+  using PendingTransactionLookup = std::function< bool( const std::string& ) >;
   P2PNode( const P2POptions& opts,
            IChain* chain,
            IBlockStore* block_store,
            EventBus* event_bus,
-           std::unique_ptr< ITransport > transport );
+           std::unique_ptr< ITransport > transport,
+           PendingTransactionLookup pending_transaction = {} );
 
   ~P2PNode();
 
@@ -49,16 +53,30 @@ public:
   void stop();
 
   uint32_t connected_peer_count() const;
-  std::vector< PeerID > connected_peers() const;
-  std::vector< PeerID > known_peers() const;
+  PeerSnapshot connected_peers() const;
+  PeerSnapshot known_peers() const;
+
+  struct SeenStats { SeenCache::Stats blocks; SeenCache::Stats transactions; };
+  SeenStats seen_stats();
+  struct WorkerStats { size_t connected; size_t owned; size_t retired; size_t limit; uint64_t refused; };
+  WorkerStats worker_stats();
+  struct BookkeepingStats
+  {
+    size_t candidates = 0, candidate_limit = 0, candidate_effective_limit = 0, configured_seeds = 0;
+    size_t protected_candidates = 0, candidate_string_capacity_bytes = 0;
+    uint64_t candidate_evictions = 0, candidate_allocation_refusals = 0, discovery_allocation_refusals = 0, discovery_snapshot_refusals = 0;
+    PeerErrorHandler::Stats errors{};
+  };
+  BookkeepingStats bookkeeping_stats();
 
 private:
   // ── Peer sync state ──
   struct PeerState
   {
     PeerID peer;
-    bool synced           = false;
-    bool handshake_done   = false;
+    std::atomic< bool > cancelled{ false };
+    std::atomic< bool > finished{ false };
+    uint32_t response_batch_limit = 0; // Worker-owned; zero uses the configured request count.
     std::thread sync_thread;
   };
 
@@ -71,6 +89,7 @@ private:
   };
 
   // ── Peer lifecycle ──
+  void start_runtime(); // caller holds lifecycle lock; start() owns rollback
   void on_peer_connected( const PeerID& peer );
   void on_peer_disconnected( const PeerID& peer );
   std::string handle_peer_rpc_request( const std::string& service,
@@ -78,9 +97,11 @@ private:
                                        const std::string& args );
 
   // ── Sync protocol (runs per peer in dedicated thread) ──
-  void peer_sync_loop( PeerID peer );
-  bool peer_handshake( const PeerID& peer );
-  bool request_sync_blocks( const PeerID& peer, bool& is_synced );
+  void peer_sync_loop( const std::shared_ptr< PeerState >& state );
+  bool peer_handshake( const std::shared_ptr< PeerState >& state );
+  bool request_sync_blocks( const std::shared_ptr< PeerState >& state, bool& is_synced );
+  bool worker_active( const std::shared_ptr< PeerState >& state ) const;
+  void reap_finished_workers_locked();
 
   // ── Gossip handlers ──
   void on_gossip_block( const PeerID& from, const protocol::block& block );
@@ -93,6 +114,8 @@ private:
   // ── Helpers ──
   void log_peer_snapshot();
   void add_peer_candidate( const PeerID& peer, bool seed );
+  void remember_peer_candidate_locked( const PeerID& peer, bool seed, bool replace ) noexcept;
+  void trim_peer_candidates_locked() noexcept;
   void refresh_known_peer_candidates();
   void run_peer_acquisition_cycle();
   bool is_peer_connected_locked( const std::string& peer_id ) const;
@@ -100,6 +123,7 @@ private:
   std::string get_local_ancestor_block_id( const std::string& head_block_id, uint64_t height );
   bool report_peer_error( const PeerID& peer, const std::string& error, uint64_t score );
   uint64_t score_for_error( const std::string& error ) const;
+  bool is_pending_transaction( const std::string& id );
 
   P2POptions _opts;
   IChain* _chain;
@@ -112,12 +136,19 @@ private:
   std::unique_ptr< GossipToggle > _gossip_toggle;
 
   std::mutex _peers_mutex;
-  std::map< std::string, std::unique_ptr< PeerState > > _peers; // peer.id → state
+  std::mutex _lifecycle_mutex; // serialize start/stop; never held by sync workers
+  std::map< std::string, std::shared_ptr< PeerState > > _peers; // current connected generations
+  std::list< std::shared_ptr< PeerState > > _sync_workers; // includes disconnected generations until join
+  uint64_t _worker_refusals = 0;
+  uint64_t _candidate_evictions = 0, _candidate_allocation_refusals = 0, _discovery_allocation_refusals = 0, _discovery_snapshot_refusals = 0;
+  size_t _draining_workers = 0;
   std::map< std::string, PeerCandidate > _peer_candidates;
   std::mutex _sync_mutex;
-  std::mutex _seen_mutex;
-  std::set< std::string > _seen_blocks;
-  std::set< std::string > _seen_transactions;
+  SeenCache _seen_blocks;
+  SeenCache _seen_transactions;
+  PendingTransactionLookup _pending_transaction;
+  boost::signals2::scoped_connection _accepted_connection;
+  boost::signals2::scoped_connection _irreversible_connection;
 
   std::atomic< bool > _running{ false };
   std::atomic< uint64_t > _lib_height{ 0 };

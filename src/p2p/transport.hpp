@@ -7,6 +7,8 @@
 #include <koinos/protocol/protocol.pb.h>
 
 #include "types.hpp"
+#include "local_transport_error.hpp"
+#include "peer_snapshot.hpp"
 
 namespace koinos::node::p2p {
 
@@ -28,8 +30,8 @@ public:
   virtual void connect_peer( const PeerID& peer )    = 0;
   virtual void disconnect_peer( const PeerID& peer )  = 0;
   virtual uint32_t connected_peer_count() const       = 0;
-  virtual std::vector< PeerID > connected_peers() const = 0;
-  virtual std::vector< PeerID > known_peers() const     = 0;
+  virtual PeerSnapshot connected_peers() const = 0;
+  virtual PeerSnapshot known_peers() const     = 0;
 
   // ── Peer RPC (outbound calls to a specific peer) ──
   virtual std::string peer_get_chain_id( const PeerID& peer ) = 0;

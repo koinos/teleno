@@ -80,6 +80,14 @@ The mandatory compatibility invariants are:
 
 ## WP1 — Propagate storage errors and make block persistence atomic
 
+LR1 status (2026-10-03): the separately authorized low-resource prerequisite work
+implements checked state Get/Flush, atomic archive record/topology and initial
+state metadata writes, failed-commit ownership/session refusal, and explicit-close
+error propagation with nonthrowing destructors. Local fault/reopen/process tests
+are recorded in the [LR1 report](../validation/low-resource-lr1-prerequisites.md).
+This is not completion of every audit gate: representative historical/differential
+validation, physical power loss and any existing-data repair remain pending.
+
 Findings: TQ-01, TQ-02; investigate TQ-12 without assuming it is confirmed.
 
 Likely components/files:
@@ -300,6 +308,13 @@ The currently unmeasured node growth rate must not be invented.
 
 ## WP6 — Explain disk growth and harden local backup/recovery boundaries
 
+LR1 implements a scoped subset: durable local publication, corrupt-object reuse
+refusal, checkpoint-derived backup identity, and bounded direct metadata
+transfer/cancellation with safe diagnostics. It fixes SC0's truncated-download
+exception path. WAL/compaction profiling, complete legacy-transfer deadline
+coverage, actual disk-full/physical-power-loss and Linux qualification are not
+completed. See the [LR1 report](../validation/low-resource-lr1-prerequisites.md).
+
 Findings: TQ-10, TQ-11; builds on WP1 and WP4.
 
 Likely files: `src/storage/rocksdb_manager.cpp/.hpp`, storage reporting,
@@ -455,3 +470,117 @@ unimplemented and the listed verification prerequisites remain open.
 | First-three-package selection | This document | Integrity, RPC ownership, cache correctness/resource targets | Ready for review |
 | Remaining work and gates | This document | Index contracts, memory bounds, disk/backup tests, measured simplification and compatibility prerequisites | Proposed; execution not started |
 | Production implementation | None | No fixes, no format changes, no deployment | Not authorized by the review |
+
+### Subsequent scoped LR2 authorization (2026-10-03)
+
+The user's next-milestone request authorizes LR2's local WP2/WP3 hardening,
+not the entire audit. Owned/drained RPC sessions, bounded HTTP I/O, unique
+object/module LRUs, safe single oversized-value ownership and allocation-free
+warm hits are implemented locally. Existing RocksDB memory budgets gain truthful
+accounting without changed defaults. See the
+[LR2 evidence](../validation/low-resource-lr2-memory.md).
+
+The later [R1-A checkpoint](../validation/low-resource-lr2-rpc-bodies.md)
+reproduces already-sent response retention on idle keepalive and releases
+request/response owners after service/write completion. Local full-response,
+pipeline/cancellation and attributed-capacity evidence is separate from the
+original audit. It is scoped WP2/LR2 progress, not aggregate output admission,
+supported integrated race proof, Linux qualification or whole-audit closure.
+
+Subsequent [R1-B evidence](../validation/low-resource-lr2-rpc-batch.md) reduces
+batch serialization retention without truncation, additional dispatch or
+post-service capacity refusal. Later calls remain executed if strict UTF-8
+serialization fails. This scoped WP2/LR2 working-set correction leaves aggregate
+service/DOM/input/output accounting/admission and supported Linux/race gates open.
+
+WP2/WP3 and LR2 are **not fully closed**: integrated supported lifetime/race
+checks, borrowed-pointer concurrency, parsed-module byte/instance budgets,
+global admission/response/P2P bounds and representative resource/miss/latency
+evidence remain open. Do not infer whole-audit remediation or actual small-server
+support from local regression success. All unrelated package authorizations,
+historical/source/trust and external deployment/release gates are unchanged.
+
+The subsequent "Procede" request authorizes a scoped WP5/LR2 accepted-ID P2P
+package: FIFO entry/owned-ID byte/lazy-expiry bounds, LIB/stop cleanup, exact
+pending-ID duplicate checks and local workload/fork/failure regressions. See
+[its report](../validation/low-resource-lr2-p2p-retention.md). This is not full
+WP5 execution: other retained P2P consumers, global admission, integrated
+lifetime/race tooling and representative Linux/mainnet evidence remain open.
+
+Subsequent S1 work reproduces read-caused cache eviction freeing an outstanding
+state value. Immutable ownership now follows direct and iterator results;
+map clones share immutable values with replacement-on-write, and oversized
+cache entries safely bypass retention. See
+[S1 evidence](../validation/low-resource-lr2-state-ownership.md) for actual
+memory/time measurements and small-value regressions. This is scoped WP3/LR2
+progress, not whole-audit completion or supported ASan/TSan/Linux qualification.
+
+The explicit LR2 completion goal authorizes the remaining LR2 scope, not other
+audit packages. Disconnected sync generations now remain owned through join,
+with cancellation boundaries and count backpressure; see
+[worker evidence](../validation/low-resource-lr2-workers.md) and the
+[completion matrix](../validation/low-resource-lr2-completion-matrix.md).
+The whole-audit TODO and all unproven lifetime/transport/source/resource gates
+remain open. Development data now uses the explicitly selected external volume;
+no live nodes, source trust, backup publishing or GUI integration are changed.
+
+The later [native admission checkpoint](../validation/low-resource-lr2-admission.md)
+corrects reproduced swallowed insertion refusal and zero-valued pending metrics.
+It is a local correctness prerequisite for global memory policy, not completion
+of WP5/LR2. All-fork/transient accounting, capacity, allocation-failure atomicity
+and representative Linux qualification remain open. Linux VPS optimization is
+the primary target; Mac count comparisons are supplementary diagnostics.
+
+Subsequent [M1-C](../validation/low-resource-lr2-admission-atomicity.md) locally
+corrects allocation-failure partial insertion across mutable mempool forks and
+allocating noexcept map iterators. Its limited write-only map batch prepares
+everything before allocation-free publication and preserves original per-fork
+nonce/resource and anonymous root/tombstone behavior. This closes that reproduced
+admission branch, not all block/LIB/prune/removal OOM paths, aggregate memory
+reservations/budgets, WP5/LR2 or whole-audit verification. Supported integrated
+sanitizers and historical/Linux whole-node evidence remain mandatory.
+
+Subsequent [M1-F](../validation/low-resource-lr2-cleanup-atomicity.md) stages
+fork-head expiry/removal and checks cleanup decoding, fixing reproduced partial
+cleanup and null-resource reads after allocation failure. Fixed map/tombstone
+publication allocates nothing, but preparation has workspace/iterator costs.
+This is a prerequisite for retained-fork capacity, not WP5/LR2 completion,
+block/LIB failure-atomicity, hard OOM recovery or Linux qualification. Budget
+emergency cleanup headroom before imposing aggregate limits.
+
+Subsequent [M1-G](../validation/low-resource-lr2-pending-records.md) shares
+immutable serialized pending records and adds optional live-owner/capacity
+reservations across retained ancestors, clones and map LIB. This implements
+one aggregate payload axis, not all mempool metadata/workspace or whole-node
+bounds. Final-owner release, failed preparation and local retryable refusal
+are covered separately. Linux policy and integrated/historical proof remain
+required; no whole-audit or WP5/LR2 closure follows.
+
+Subsequent [V1-A](../validation/low-resource-lr2-vm-lifetime.md) protects parsed
+ownership through allocation failure, adds optional/failure-atomic cache
+publication and coalesces retained same-ID cold parses without holding locks
+through execution. Warm hits, nested calls, fresh instances and metering are
+covered locally. This extends scoped WP3/LR2 work, not complete byte/instance/
+queue policy or Linux qualification. Subsequent
+[V1-B](../validation/low-resource-lr2-vm-allocation.md) corrects the reproduced
+pinned Fizzy context-allocation termination and keeps native allocation errors
+outside consensus reversion handling. Required supported integrated diagnostics,
+whole-machine exhaustion and representative Linux gates remain open.
+Distinct cold-ID latency and representative Linux measurements remain gates.
+
+Subsequent [V1-C](../validation/low-resource-lr2-vm-capacity.md) implements the
+cache-only parsed-capacity axis with optional limits and metrics, preserving
+owned execution and failure-atomic retention/replacement. Five Mac samples
+quantify reduced retained requests and increased cyclic reparsing at 512 KiB;
+default bytes remain unlimited. This is not all-consumer physical memory,
+instance/queue admission, supported integrated diagnostics or Linux proof.
+WP3/whole-audit and V1/LR2 gates remain open.
+
+Subsequent [V1-D / D1](../validation/low-resource-lr2-host-memory.md) independently
+reproduces unaligned production host/thunk result-count stores, including actual
+Fizzy execution. Byte copies at the original sites preserve existing alias/write
+ordering without adding allocation, limits or consensus rejection. It is scoped
+LR2 memory safety, not a measured resource gain or a retrospective expansion of
+the original audit. Standalone ASan/TSan pre-main failures with both installed
+compilers attribute the immediate problem outside Teleno, but do not resolve
+the runtime cause or waive integrated/Linux/history gates. Whole-audit TODO open.

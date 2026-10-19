@@ -1,12 +1,14 @@
 #include "backup/public_restore.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <random>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -17,6 +19,7 @@
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl.hpp>
+#include <boost/asio/ssl/host_name_verification.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
@@ -379,8 +382,9 @@ void emit_progress( const PublicRestoreOptions& options,
 class PublicBackupClient
 {
 public:
-  explicit PublicBackupClient( BackupPublicRestoreConfig config )
-    : _config( std::move( config ) )
+  explicit PublicBackupClient( BackupPublicRestoreConfig config,
+                               uint64_t max_response_bytes = std::numeric_limits< uint64_t >::max() )
+    : _config( std::move( config ) ), _max_response_bytes( max_response_bytes )
   {
     _config.base_url = trim_trailing_slash( _config.base_url );
     if( _config.base_url.empty() )
@@ -398,6 +402,16 @@ public:
   const BackupPublicRestoreConfig& config() const
   {
     return _config;
+  }
+
+  nlohmann::json metadata_json( const std::filesystem::path& path ) const
+  {
+    if( _max_response_bytes == std::numeric_limits< uint64_t >::max() )
+      return nlohmann::json::parse( read_file( path ) );
+    return nlohmann::json::parse( read_file( path ), []( int depth, nlohmann::json::parse_event_t, nlohmann::json& ) {
+      if( depth > 32 ) throw std::runtime_error( "restore metadata nesting exceeds limit" );
+      return true;
+    } );
   }
 
   uint64_t retry_count() const
@@ -421,7 +435,24 @@ public:
       throw_if_cancelled( options );
       try
       {
-        download_url_to_file( join_url( _config.base_url, relative ), destination, 0, progress );
+        if( _max_response_bytes != std::numeric_limits< uint64_t >::max() )
+        {
+          // Bounded metadata uses the same asynchronous deadline/cancellation
+          // engine as direct objects, but treats the size as an upper bound.
+          std::filesystem::create_directories( destination.parent_path() );
+          std::ofstream out( destination, std::ios::binary | std::ios::trunc );
+          if( !out ) throw RestoreSourceError( RestoreSourceFailure::invalid_metadata );
+          uint64_t written = 0;
+          stream_url( join_url( _config.base_url, relative ), _max_response_bytes,
+            [&]( const char* bytes, size_t count ) {
+              out.write( bytes, count ); written += count;
+              if( !out ) throw RestoreSourceError( RestoreSourceFailure::invalid_metadata );
+              if( progress ) progress( written );
+            }, options, 0, std::chrono::steady_clock::now() + std::chrono::seconds( _config.timeout_seconds ), false );
+          out.close();
+          if( !out ) throw RestoreSourceError( RestoreSourceFailure::invalid_metadata );
+        }
+        else download_url_to_file( join_url( _config.base_url, relative ), destination, 0, progress );
         ++_request_count;
         return;
       }
@@ -454,7 +485,153 @@ public:
     }
   }
 
+  void stream_object( const SnapshotFileEntry& file,
+                      const std::function< void( const char*, size_t ) >& consume,
+                      const PublicRestoreOptions& options )
+  {
+    if( file.sha256.size() != 64 || file.sha256.find_first_not_of( "0123456789abcdef" ) != std::string::npos )
+      throw std::runtime_error( "invalid direct object identity" );
+    const auto relative = "objects/sha256/" + file.sha256.substr( 0, 2 ) + "/" + file.sha256.substr( 2, 2 ) + "/" + file.sha256;
+    stream_url( join_url( _config.base_url, relative ), file.size_bytes, consume, options, 0,
+                std::chrono::steady_clock::now() + std::chrono::seconds( _config.timeout_seconds ) );
+  }
+
 private:
+  // Use async operations with a timer and cancellation polling. Do not reuse
+  // legacy synchronous expires_after(), which does not bound synchronous reads.
+  template< typename Start, typename Cancel >
+  void direct_step( asio::io_context& io, Start start, Cancel cancel,
+                    const PublicRestoreOptions& options, std::chrono::steady_clock::time_point deadline )
+  {
+    throw_if_cancelled( options );
+    if( std::chrono::steady_clock::now() >= deadline ) throw DirectTransferError( "direct transfer deadline exceeded" );
+    bool done = false, expired = false, cancelled = false;
+    std::exception_ptr cancellation_error;
+    beast::error_code result;
+    asio::steady_timer timer( io );
+    timer.expires_at( deadline );
+    timer.async_wait( [&]( beast::error_code ec ) { if( !ec && !done ) { expired = true; cancel(); } } );
+    start( [&]( beast::error_code ec ) { result = ec; done = true; beast::error_code ignored; timer.cancel( ignored ); } );
+    while( !done )
+    {
+      io.restart(); io.run_for( std::chrono::milliseconds( 50 ) );
+      if( !done && !cancelled && !expired && !cancellation_error && options.cancel_requested )
+      {
+        try { if( options.cancel_requested() ) { cancelled = true; cancel(); } }
+        catch( ... ) { cancellation_error = std::current_exception(); cancel(); }
+      }
+    }
+    // Drain the cancelled timer before its captured locals go out of scope.
+    beast::error_code ignored; timer.cancel( ignored ); io.restart(); io.poll();
+    if( cancellation_error ) std::rethrow_exception( cancellation_error );
+    if( cancelled ) throw std::runtime_error( "direct transfer cancelled" );
+    if( expired || std::chrono::steady_clock::now() >= deadline ) throw DirectTransferError( "direct transfer deadline exceeded" );
+    if( result && result != http::error::need_buffer )
+      // Avoid Boost system_error::what() across separately built dependencies.
+      throw DirectTransferError( "direct transfer protocol/I/O failure (code " + std::to_string( result.value() ) + ")",
+                                 result.value(),result==http::error::partial_message );
+  }
+
+  template< typename Stream >
+  void stream_response( asio::io_context& io, Stream& stream, tcp::resolver& resolver,
+                        const ParsedUrl& parsed, uint64_t expected,
+                        const std::function< void( const char*, size_t ) >& consume,
+                        const PublicRestoreOptions& options, uint64_t redirects,
+                        std::chrono::steady_clock::time_point deadline, bool exact = true )
+  {
+    const auto cancel = [&] { resolver.cancel(); beast::error_code ignored; beast::get_lowest_layer( stream ).socket().cancel( ignored ); };
+    http::request< http::empty_body > request{ http::verb::get, parsed.target, 11 };
+    request.set( http::field::host, parsed.host ); request.set( http::field::user_agent, "teleno_node-direct-restore" );
+    request.set( http::field::connection, "close" );
+    direct_step( io, [&]( auto done ) { http::async_write( stream, request, [done]( auto ec, size_t ) { done( ec ); } ); }, cancel, options, deadline );
+    beast::flat_buffer wire( 128 * 1024 );
+    // The constructor sets a maximum; reserve the existing body-chunk budget
+    // to avoid tiny transport reads and checked sink writes on a new buffer.
+    wire.reserve( 64 * 1024 );
+    http::response_parser< http::buffer_body > parser;
+    parser.header_limit( 16 * 1024 ); parser.body_limit( expected );
+    direct_step( io, [&]( auto done ) { http::async_read_header( stream, wire, parser, [done]( auto ec, size_t ) { done( ec ); } ); }, cancel, options, deadline );
+    if( parser.get().result_int() >= 300 && parser.get().result_int() < 400 )
+    {
+      auto location = parser.get()[ http::field::location ];
+      if( location.empty() ) throw DirectTransferError( "direct redirect missing location" );
+      beast::error_code ignored; beast::get_lowest_layer( stream ).socket().close( ignored );
+      stream_url( resolve_redirect( parsed, std::string( location ) ), expected, consume, options, redirects + 1, deadline, exact );
+      return;
+    }
+    if( parser.get().result() != http::status::ok )
+    {
+      if( !exact ) throw RestoreSourceError( RestoreSourceFailure::http_status, parser.get().result_int() );
+      throw DirectTransferError( "direct object HTTP status is not 200" );
+    }
+    if( auto length = parser.content_length(); length && (exact ? *length != expected : *length > expected) )
+      throw DirectTransferError( "direct response content length exceeds or differs from budget" );
+    std::array< char, 64 * 1024 > chunk; uint64_t total = 0;
+    while( !parser.is_done() )
+    {
+      parser.get().body().data = chunk.data(); parser.get().body().size = chunk.size();
+      direct_step( io, [&]( auto done ) { http::async_read_some( stream, wire, parser, [done]( auto ec, size_t ) { done( ec ); } ); }, cancel, options, deadline );
+      const auto count = chunk.size() - parser.get().body().size;
+      if( count > expected - total ) throw DirectTransferError( "direct object exceeds expected size" );
+      throw_if_cancelled( options ); consume( chunk.data(), count ); total += count;
+    }
+    if( exact && total != expected ) throw DirectTransferError( "direct object is truncated" );
+  }
+
+  void stream_url( const std::string& url, uint64_t expected,
+                   const std::function< void( const char*, size_t ) >& consume,
+                   const PublicRestoreOptions& options, uint64_t redirects,
+                   std::chrono::steady_clock::time_point deadline, bool exact = true )
+  {
+    if( std::chrono::steady_clock::now() >= deadline ) throw DirectTransferError( "direct transfer deadline exceeded" );
+    if( redirects > max_redirects ) throw DirectTransferError( "direct redirect limit exceeded" );
+    if( url.find_first_of( "@?#\\" ) != std::string::npos ) throw DirectTransferError( "unsupported direct source URL" );
+    const auto parsed = parse_url( url );
+    if( _config.require_https && parsed.scheme != "https" && parsed.scheme != "file" ) throw DirectTransferError( "direct redirect violates HTTPS policy" );
+    if( parsed.scheme == "file" )
+    {
+      if( !std::filesystem::is_regular_file( std::filesystem::symlink_status( parsed.file_path ) ) )
+        throw DirectTransferError( "direct source object is not a regular file" );
+      const auto size = std::filesystem::file_size( parsed.file_path );
+      if( exact ? size != expected : size > expected ) throw DirectTransferError( "direct source object size mismatch" );
+      std::ifstream in( parsed.file_path, std::ios::binary );
+      if( !in ) throw DirectTransferError( "cannot open direct source object" );
+      std::array< char, 64 * 1024 > chunk; uint64_t total = 0;
+      while( in )
+      {
+        if( std::chrono::steady_clock::now() >= deadline ) throw DirectTransferError( "direct transfer deadline exceeded" );
+        throw_if_cancelled( options ); in.read( chunk.data(), chunk.size() ); const auto count = uint64_t( in.gcount() );
+        if( count > expected - total ) throw DirectTransferError( "direct source object grew" );
+        consume( chunk.data(), size_t( count ) ); total += count;
+      }
+      if( in.bad() || (exact && total != expected) ) throw DirectTransferError( "direct source object read/size failure" );
+      return;
+    }
+    asio::io_context io; tcp::resolver resolver( io ); tcp::resolver::results_type addresses;
+    direct_step( io, [&]( auto done ) { resolver.async_resolve( parsed.host, parsed.port,
+      [&, done]( auto ec, auto resolved ) { addresses = std::move( resolved ); done( ec ); } ); }, [&] { resolver.cancel(); }, options, deadline );
+    if( parsed.scheme == "http" )
+    {
+      beast::tcp_stream stream( io );
+      const auto cancel = [&] { beast::error_code ignored; stream.socket().cancel( ignored ); };
+      direct_step( io, [&]( auto done ) { stream.async_connect( addresses, [done]( auto ec, auto ) { done( ec ); } ); }, cancel, options, deadline );
+      stream_response( io, stream, resolver, parsed, expected, consume, options, redirects, deadline, exact );
+    }
+    else
+    {
+      asio::ssl::context context( asio::ssl::context::tls_client );
+      if( !configure_certificate_verification( context ) ) throw RestoreSourceError( RestoreSourceFailure::tls_trust );
+      context.set_verify_mode( asio::ssl::verify_peer );
+      beast::ssl_stream< beast::tcp_stream > stream( io, context );
+      stream.set_verify_callback( asio::ssl::host_name_verification( parsed.host ) );
+      if( !SSL_set_tlsext_host_name( stream.native_handle(), parsed.host.c_str() ) ) throw DirectTransferError( "direct HTTPS SNI setup failed" );
+      const auto cancel = [&] { beast::error_code ignored; beast::get_lowest_layer( stream ).socket().cancel( ignored ); };
+      direct_step( io, [&]( auto done ) { beast::get_lowest_layer( stream ).async_connect( addresses, [done]( auto ec, auto ) { done( ec ); } ); }, cancel, options, deadline );
+      direct_step( io, [&]( auto done ) { stream.async_handshake( asio::ssl::stream_base::client, done ); }, cancel, options, deadline );
+      stream_response( io, stream, resolver, parsed, expected, consume, options, redirects, deadline, exact );
+    }
+  }
+
   void download_url_to_file( const std::string& url,
                              const std::filesystem::path& destination,
                              uint64_t redirect_count,
@@ -464,9 +641,36 @@ private:
       throw std::runtime_error( "too many redirects while fetching public backup URL: " + url );
 
     const auto parsed = parse_url( url );
+    if( _max_response_bytes != std::numeric_limits< uint64_t >::max() )
+    {
+      if( url.find_first_of( "@?#\\" ) != std::string::npos )
+        throw std::runtime_error( "direct metadata URL contains unsupported credentials/query/fragment" );
+      if( _config.require_https && parsed.scheme != "https" && parsed.scheme != "file" )
+        throw std::runtime_error( "direct metadata redirect violates HTTPS policy" );
+    }
     if( parsed.scheme == "file" )
     {
-      copy_file_atomic( parsed.file_path, destination );
+      if( _max_response_bytes == std::numeric_limits< uint64_t >::max() )
+        copy_file_atomic( parsed.file_path, destination );
+      else
+      {
+        if( std::filesystem::file_size( parsed.file_path ) > _max_response_bytes )
+          throw std::runtime_error( "restore metadata exceeds byte limit" );
+        std::filesystem::create_directories( destination.parent_path() );
+        std::ifstream in( parsed.file_path, std::ios::binary );
+        std::ofstream out( destination, std::ios::binary | std::ios::trunc );
+        if( !in || !out ) throw std::runtime_error( "cannot copy bounded restore metadata" );
+        char buffer[ 65536 ]; uint64_t total = 0;
+        while( in )
+        {
+          in.read( buffer, sizeof( buffer ) ); const auto count = uint64_t( in.gcount() );
+          if( count > _max_response_bytes - total ) throw std::runtime_error( "restore metadata exceeds byte limit" );
+          out.write( buffer, count ); total += count;
+          if( !out ) throw std::runtime_error( "restore metadata write failed" );
+        }
+        out.close();
+        if( in.bad() || !out ) throw std::runtime_error( "restore metadata copy failed" );
+      }
       if( progress )
       {
         std::error_code size_ec;
@@ -588,7 +792,7 @@ private:
 
     beast::flat_buffer buffer;
     http::response_parser< http::file_body > parser;
-    parser.body_limit( std::numeric_limits< std::uint64_t >::max() );
+    parser.body_limit( _max_response_bytes );
     beast::error_code file_ec;
     parser.get().body().open( partial.string().c_str(), beast::file_mode::write, file_ec );
     if( file_ec )
@@ -596,7 +800,14 @@ private:
 
     while( !parser.is_done() )
     {
-      http::read_some( stream, buffer, parser );
+      // Throwing Beast overloads format category-specific Boost errors while
+      // constructing system_error; that crashes the SC0 fixture linkage.
+      // Keep the actual failed read visible with a stable standard exception.
+      beast::error_code read_error;
+      http::read_some( stream, buffer, parser, read_error );
+      if( read_error ) throw RestoreSourceError(
+        read_error == http::error::partial_message ? RestoreSourceFailure::partial_message : RestoreSourceFailure::transport,
+        read_error.value() );
       if( progress )
       {
         std::error_code size_ec;
@@ -640,6 +851,7 @@ private:
   }
 
   BackupPublicRestoreConfig _config;
+  uint64_t _max_response_bytes;
   uint64_t _retry_count = 0;
   uint64_t _request_count = 0;
 };
@@ -659,6 +871,7 @@ struct PublicSnapshotMetadata
   std::filesystem::path complete_tmp;
   bool latest = false;
   bool signature_verified = false;
+  std::string authenticated_chain_id;
 };
 
 void cache_downloaded_snapshot_metadata( const std::filesystem::path& repository_dir,
@@ -736,7 +949,7 @@ void verify_public_bootstrap_signature( PublicSnapshotMetadata& metadata,
     return;
   ++metadata_file_count;
 
-  const auto envelope = nlohmann::json::parse( read_file( metadata.signature_tmp ) );
+  const auto envelope = client.metadata_json( metadata.signature_tmp );
   if( envelope.value( "format", std::string{} ) != "teleno-public-bootstrap-signature" )
     throw std::runtime_error( "public bootstrap signature has unexpected format" );
   if( envelope.value( "version", 0 ) != 1 )
@@ -763,26 +976,29 @@ void verify_public_bootstrap_signature( PublicSnapshotMetadata& metadata,
   if( payload.value( "public_metadata_sha256", std::string{} ) != sha256_file( metadata.public_metadata_tmp ) )
     throw std::runtime_error( "public bootstrap signature metadata hash mismatch" );
 
-  const auto manifest = nlohmann::json::parse( read_file( metadata.manifest_tmp ) );
+  const auto manifest = client.metadata_json( metadata.manifest_tmp );
   const auto snapshot = manifest.at( "snapshot" );
   if( payload.value( "object_count", 0ULL ) != snapshot.value( "object_count", 0ULL ) )
     throw std::runtime_error( "public bootstrap signature object_count mismatch" );
   if( payload.value( "total_bytes", 0ULL ) != snapshot.value( "total_bytes", 0ULL ) )
     throw std::runtime_error( "public bootstrap signature total_bytes mismatch" );
 
-  const auto public_metadata = nlohmann::json::parse( read_file( metadata.public_metadata_tmp ) );
+  const auto public_metadata = client.metadata_json( metadata.public_metadata_tmp );
   if( public_metadata.value( "backup_id", std::string{} ) != metadata.backup_id )
     throw std::runtime_error( "public bootstrap metadata backup_id mismatch" );
   if( public_metadata.value( "network", std::string{} ) != payload.value( "network", std::string{} ) )
     throw std::runtime_error( "public bootstrap metadata network mismatch" );
   metadata.signature_verified = true;
+  if( payload.contains( "chain_id" ) && payload.at( "chain_id" ).is_string() )
+    metadata.authenticated_chain_id = payload.at( "chain_id" ).get< std::string >();
 }
 
 PublicSnapshotMetadata fetch_public_metadata( const std::filesystem::path& repository_dir,
                                               PublicBackupClient& client,
                                               const std::string& requested_backup_id,
                                               const PublicRestoreOptions& options,
-                                              uint64_t& metadata_file_count )
+                                              uint64_t& metadata_file_count,
+                                              RestoreMetadataInput* capture = nullptr )
 {
   if( repository_dir.empty() )
     throw std::runtime_error( "local snapshot repository directory is required" );
@@ -804,7 +1020,10 @@ PublicSnapshotMetadata fetch_public_metadata( const std::filesystem::path& repos
       client.download_relative( "latest.json", latest_tmp, options );
       ++metadata_file_count;
 
-      const auto latest = nlohmann::json::parse( read_file( latest_tmp ) );
+      const auto latest = client.metadata_json( latest_tmp );
+      if( capture && ( latest.value( "format", std::string{} ) != "teleno-native-latest-snapshot"
+                        || latest.value( "version", 0 ) != 1 ) )
+        throw std::runtime_error( "unsupported latest restore metadata format/version" );
       metadata.backup_id = latest.at( "backup_id" ).get< std::string >();
       metadata.snapshot_dir_name = latest.value( "snapshot_dir", metadata.backup_id );
       metadata.manifest_rel = latest.value( "manifest", "snapshots/" + metadata.snapshot_dir_name + "/manifest.json" );
@@ -849,24 +1068,52 @@ PublicSnapshotMetadata fetch_public_metadata( const std::filesystem::path& repos
     emit_progress( options, "public-restore-metadata-snapshot", metadata.backup_id, 3, 3, 1, 3, 0 );
     metadata_file_count += 3;
 
-    verify_public_bootstrap_signature( metadata, client, latest_tmp, metadata_file_count, options );
+    try { verify_public_bootstrap_signature( metadata, client, latest_tmp, metadata_file_count, options ); }
+    catch( const RestoreSourceError& ) { throw; }
+    catch( const std::exception& )
+    {
+      if( capture ) throw RestoreSourceError( RestoreSourceFailure::signature_verification );
+      throw; // Preserve legacy diagnostics; bounded direct CLI never emits them.
+    }
 
-    const auto manifest = nlohmann::json::parse( read_file( metadata.manifest_tmp ) );
+    const auto manifest = client.metadata_json( metadata.manifest_tmp );
     const auto manifest_backup_id = manifest.value( "backup_id", metadata.backup_id );
     validate_backup_id_fragment( manifest_backup_id );
     if( manifest_backup_id != metadata.backup_id )
       throw std::runtime_error( "public backup manifest backup_id does not match requested metadata" );
 
-    cache_downloaded_snapshot_metadata( repository_dir,
-                                        metadata.snapshot_dir_name,
-                                        metadata.manifest_tmp,
-                                        metadata.files_tmp,
-                                        metadata.complete_tmp );
+    if( capture )
+    {
+      if( read_file( metadata.complete_tmp ) != "complete\n" )
+        throw std::runtime_error( "invalid restore metadata completion marker" );
+      capture->backup_id = metadata.backup_id;
+      capture->source_identity = client.base_url();
+      capture->manifest = read_file( metadata.manifest_tmp );
+      capture->inventory = read_file( metadata.files_tmp );
+      capture->expected_network = client.config().network;
+      capture->signature_required = client.config().signature_required;
+      capture->signature_verified = metadata.signature_verified;
+      capture->authenticated_chain_id = metadata.authenticated_chain_id;
+      if( metadata.signature_verified )
+      {
+        const auto published = client.metadata_json( metadata.public_metadata_tmp );
+        if( published.contains( "chain_id" ) && published.at( "chain_id" ) != metadata.authenticated_chain_id )
+          throw std::runtime_error( "public metadata authenticated chain identity mismatch" );
+      }
+    }
+    else
+    {
+      cache_downloaded_snapshot_metadata( repository_dir,
+                                          metadata.snapshot_dir_name,
+                                          metadata.manifest_tmp,
+                                          metadata.files_tmp,
+                                          metadata.complete_tmp );
 
-    if( !latest_tmp.empty() )
-      copy_file_atomic( latest_tmp, repository_dir / "latest.json" );
-    else if( !std::filesystem::exists( repository_dir / "latest.json" ) )
-      write_file_atomic( repository_dir / "latest.json", latest_json_for_backup_id( metadata.backup_id ) );
+      if( !latest_tmp.empty() )
+        copy_file_atomic( latest_tmp, repository_dir / "latest.json" );
+      else if( !std::filesystem::exists( repository_dir / "latest.json" ) )
+        write_file_atomic( repository_dir / "latest.json", latest_json_for_backup_id( metadata.backup_id ) );
+    }
 
     std::error_code ec;
     std::filesystem::remove_all( metadata_root, ec );
@@ -1001,6 +1248,61 @@ void fetch_missing_objects( PublicBackupClient& client,
 }
 
 } // namespace
+
+void stream_public_restore_object( const BackupPublicRestoreConfig& source, const SnapshotFileEntry& file,
+  const std::function< void( const char*, size_t ) >& consume, const PublicRestoreOptions& options )
+{
+  if( !consume || source.retries > 10 || source.timeout_seconds == 0 || source.timeout_seconds > 300 )
+    throw std::runtime_error( "invalid bounded direct transfer configuration" );
+  PublicBackupClient client( source ); client.stream_object( file, consume, options );
+}
+
+RestoreSpecification acquire_public_restore_specification(
+  const std::filesystem::path& scratch, const BackupPublicRestoreConfig& config,
+  const std::string& backup_id, const std::string& expected_chain_id,
+  const PublicRestoreOptions& options, const RestoreMetadataLimits& limits )
+{
+  if( scratch.empty() || limits.file_bytes == 0 || limits.file_bytes > 8ULL * 1024 * 1024 )
+    throw std::runtime_error( "invalid bounded metadata planning configuration" );
+  if( config.network.empty() ) throw std::runtime_error( "direct metadata planning requires an expected network" );
+  if( config.retries > 10 || config.timeout_seconds == 0 || config.timeout_seconds > 300 )
+    throw std::runtime_error( "direct metadata planning requires retries <= 10 and timeout in 1..300 seconds" );
+  std::filesystem::create_directories( scratch );
+  // Exclusively create and remove only this call's private workspace.
+  std::filesystem::path owned;
+  std::random_device random;
+  for( unsigned attempt = 0; attempt < 10; ++attempt )
+  {
+    auto candidate = scratch / ( "planning-" + std::to_string( random() ) + "-" + std::to_string( random() ) );
+    if( std::filesystem::create_directory( candidate ) ) { owned = candidate; break; }
+  }
+  if( owned.empty() ) throw std::runtime_error( "cannot create owned metadata workspace" );
+  try
+  {
+    PublicBackupClient client( config, limits.file_bytes );
+    RestoreMetadataInput input; input.expected_chain_id = expected_chain_id;
+    uint64_t count = 0;
+    fetch_public_metadata( owned, client, backup_id == "latest" ? std::string{} : backup_id, options, count, &input );
+    auto spec = validate_restore_metadata( input, limits );
+    std::filesystem::remove_all( owned );
+    return spec;
+  }
+  catch( const RestoreSourceError& )
+  {
+    std::error_code ec; std::filesystem::remove_all( owned, ec ); throw;
+  }
+  catch( const DirectTransferError& error )
+  {
+    std::error_code ec; std::filesystem::remove_all( owned, ec );
+    throw RestoreSourceError( error.partial_message ? RestoreSourceFailure::partial_message : RestoreSourceFailure::transport,
+                              error.transport_code );
+  }
+  catch( const std::exception& )
+  {
+    std::error_code ec; std::filesystem::remove_all( owned, ec );
+    throw RestoreSourceError( RestoreSourceFailure::invalid_metadata );
+  }
+}
 
 BackupSnapshotListResult list_public_backup_snapshots(
   const std::filesystem::path& repository_dir,

@@ -127,7 +127,7 @@ void test_final_root_survives_commit_and_reopen()
     auto root = db.get_root( lock );
     assert( root->id() == child_id );
     assert( root->merkle_root() == expected_root );
-    const auto* stored = root->get_object( space, key );
+    const auto stored = root->get_object( space, key );
     assert( stored );
     assert( *stored == value );
     db.close( lock );

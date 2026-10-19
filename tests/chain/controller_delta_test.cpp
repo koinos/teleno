@@ -1,8 +1,11 @@
 #include "koinos/chain/controller.hpp"
 #include "koinos/chain/rectify.hpp"
 #include "koinos/chain/state.hpp"
+#include "koinos/chain/system_calls.hpp"
 #include "koinos/state_db/backends/map/map_backend.hpp"
 #include "koinos/state_db/state_db.hpp"
+#include "core/monolith_rpc_client.hpp"
+#include "mempool/mempool_adapter.hpp"
 
 #include <koinos/crypto/elliptic.hpp>
 #include <koinos/crypto/merkle_tree.hpp>
@@ -18,6 +21,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -644,6 +648,213 @@ void test_kfs_project_order_delta_requires_preserved_tombstone()
   assert( pending_root_string( preserved_tombstone_replay_node ) == expected_root );
 }
 
+protocol::transaction make_signed_noop_transaction( chain::controller& controller, uint64_t nonce_value = 1 )
+{
+  protocol::transaction tx;
+  auto* header = tx.mutable_header();
+  header->set_payer( block_signing_key().get_public_key().to_address_bytes() );
+  header->set_chain_id( controller.get_chain_id().chain_id() );
+  header->set_rc_limit( 1'000'000 );
+  chain::value_type nonce; nonce.set_uint64_value( nonce_value );
+  header->set_nonce( util::converter::as< std::string >( nonce ) );
+  const std::vector< crypto::multihash > operations;
+  header->set_operation_merkle_root( util::converter::as< std::string >(
+    crypto::merkle_tree( crypto::multicodec::sha2_256, operations ).root()->hash() ) );
+  tx.set_id( util::converter::as< std::string >( crypto::hash( crypto::multicodec::sha2_256, *header ) ) );
+  tx.add_signatures( util::converter::as< std::string >(
+    block_signing_key().sign_compact( util::converter::to< crypto::multihash >( tx.id() ) ) ) );
+  return tx;
+}
+
+void test_transaction_work_lifetime_and_receipt_parity()
+{
+  using namespace node;
+  auto early = std::make_shared< MonolithRpcClient >( nullptr, nullptr, nullptr,
+    MonolithRpcClient::TransactionAdmission{}, TransactionWorkLimits{ 1, 0 } );
+  chain::controller unopened;
+  unopened.set_client( early );
+  protocol::transaction empty;
+  auto occupied = early->reserve_transaction_work( empty );
+  bool local = false;
+  try { unopened.submit_transaction( {} ); }
+  catch( const LocalCapacityExceeded& ) { local = true; }
+  assert( local && early->transaction_work_snapshot().jobs == 1 );
+  occupied.reset();
+  bool invalid = false;
+  try { unopened.submit_transaction( {} ); }
+  catch( const LocalCapacityExceeded& ) { assert( false ); }
+  catch( const std::exception& ) { invalid = true; }
+  assert( invalid && early->transaction_work_snapshot().jobs == 0 );
+
+  chain::controller controller, legacy;
+  open_controller( controller ); open_controller( legacy );
+  rpc::chain::submit_transaction_request request;
+  *request.mutable_transaction() = make_signed_noop_transaction( controller );
+  request.set_broadcast( false );
+  const auto expected = legacy.submit_transaction( request );
+  const auto root = controller.get_head_info().head_state_merkle_root();
+  mempool::mempool pool( state_db::fork_resolution_algorithm::fifo, { 1, 0 } );
+  MempoolAdapter adapter( pool );
+  EventBus bus;
+  unsigned admission_calls = 0, notifications = 0;
+  bool refuse_admission = true;
+  std::shared_ptr< MonolithRpcClient > client;
+  client = std::make_shared< MonolithRpcClient >( nullptr, &adapter, &bus,
+    [&]( const broadcast::transaction_accepted& accepted ) {
+      const auto usage = client->transaction_work_snapshot();
+      assert( usage.jobs == 1 && usage.wire_bytes == request.transaction().ByteSizeLong() );
+      ++admission_calls;
+      if( refuse_admission ) throw std::runtime_error( "synthetic insertion refusal" );
+      adapter.add_transaction_accepted( accepted );
+    }, TransactionWorkLimits{ 1, request.transaction().ByteSizeLong() } );
+  bus.on_transaction_accepted.connect( [&]( const broadcast::transaction_accepted& ) {
+    assert( client->transaction_work_snapshot().jobs == 1 && pool.pending_transaction_count() == 1 );
+    ++notifications;
+    bool refused = false;
+    try { controller.submit_transaction( {} ); } catch( const LocalCapacityExceeded& ) { refused = true; }
+    assert( refused );
+    throw std::runtime_error( "synthetic post-insertion observer failure" );
+  } );
+  controller.set_client( client );
+  assert( controller.submit_transaction( request ).SerializeAsString() == expected.SerializeAsString() );
+  assert( !client->transaction_work_snapshot().jobs && !admission_calls );
+  assert( controller.get_head_info().head_state_merkle_root() == root );
+
+  request.set_broadcast( true );
+  bool failed = false;
+  try { controller.submit_transaction( request ); } catch( const std::exception& ) { failed = true; }
+  assert( failed && admission_calls == 1 && !notifications && !pool.pending_transaction_count() );
+  assert( !client->transaction_work_snapshot().jobs && !client->transaction_work_snapshot().wire_bytes );
+  refuse_admission = false;
+  const auto accepted = controller.submit_transaction( request );
+  assert( accepted.SerializeAsString() == expected.SerializeAsString() );
+  assert( admission_calls == 2 && notifications == 1 && pool.pending_transaction_count() == 1 );
+  assert( pool.get_pending_record_usage().owners == 1 );
+  assert( client->transaction_notification_failures() == 1 && !client->transaction_work_snapshot().jobs );
+  // Duplicate/nonce refusal releases credit without a second insertion/event.
+  failed = false;
+  try { controller.submit_transaction( request ); } catch( const std::exception& ) { failed = true; }
+  assert( failed && admission_calls == 2 && notifications == 1 && !client->transaction_work_snapshot().jobs );
+  assert( controller.get_head_info().head_state_merkle_root() == root );
+
+  // Notification-only (disabled-mempool wiring) still uses the work budget.
+  mempool::mempool unused_pool;
+  MempoolAdapter unused_adapter( unused_pool );
+  EventBus notifications_only;
+  unsigned only_events = 0;
+  notifications_only.on_transaction_accepted.connect( [&]( const auto& ) { ++only_events; } );
+  auto disabled_mempool = std::make_shared< MonolithRpcClient >( nullptr, &unused_adapter, &notifications_only,
+    MonolithRpcClient::TransactionAdmission{}, TransactionWorkLimits{ 1, 0 } );
+  legacy.set_client( disabled_mempool );
+  assert( legacy.submit_transaction( request ).SerializeAsString() == expected.SerializeAsString() );
+  assert( only_events == 1 && !unused_pool.pending_transaction_count() && !disabled_mempool->transaction_work_snapshot().jobs );
+
+  // The actual signed native path reports retained-record capacity before any
+  // accepted notification. Removing the last owner permits explicit retry.
+  auto next = request;
+  *next.mutable_transaction() = make_signed_noop_transaction( controller, 2 );
+  assert( next.transaction().ByteSizeLong() == request.transaction().ByteSizeLong() );
+  local = false;
+  try { controller.submit_transaction( next ); }
+  catch( const LocalCapacityExceeded& e ) {
+    local = true; assert( std::string( e.reason_code() ) == "pending_record_capacity" );
+  }
+  assert( local && admission_calls == 3 && notifications == 1 && pool.pending_transaction_count() == 1 );
+  assert( pool.get_pending_record_usage().owners == 1 && pool.get_pending_record_usage().refusals == 1 );
+  assert( !client->transaction_work_snapshot().jobs && !client->transaction_work_snapshot().wire_bytes );
+  assert( controller.get_head_info().head_state_merkle_root() == root );
+  pool.remove_pending_transactions( { request.transaction().id() } );
+  assert( !pool.get_pending_record_usage().owners );
+  controller.submit_transaction( request );
+  assert( admission_calls == 4 && notifications == 2 && pool.get_pending_record_usage().owners == 1 );
+
+  // Saturating transaction work must not gate canonical replay/full fallback.
+  auto hold = client->reserve_transaction_work( request.transaction() );
+  chain::controller reference; open_controller( reference );
+  const auto now = std::chrono::duration_cast< std::chrono::milliseconds >(
+    std::chrono::system_clock::now().time_since_epoch() ).count();
+  auto block = make_signed_block( 1, reference.get_head_info().head_topology().id(), root, now );
+  rpc::chain::submit_block_request block_request; *block_request.mutable_block() = block;
+  const auto correct = reference.submit_block( block_request, 2 ).receipt();
+  auto wrong = make_receipt( block, make_delta_entry() );
+  assert( controller.apply_block_delta_checked( block, wrong, correct.state_merkle_root(), 2 ) );
+  assert( controller.get_head_info().head_state_merkle_root() == correct.state_merkle_root() );
+  assert( controller.get_head_info().head_topology().height() == 1 && client->transaction_work_snapshot().jobs == 1 );
+  assert( pool.get_pending_record_usage().owners == 1 );
+  hold.reset(); assert( !client->transaction_work_snapshot().jobs );
+}
+
+// A controlled backend failure exercises transaction dispatch/classification,
+// not actual Fizzy allocation or whole-controller machine-wide OOM recovery.
+class AllocationFailureBackend : public vm_manager::vm_backend
+{
+public:
+  bool fail = true;
+  unsigned calls = 0;
+  std::string backend_name() override { return "allocation-test"; }
+  void initialize() override {}
+  void run( vm_manager::abstract_host_api&, const std::string&, const std::string& ) override
+  {
+    ++calls;
+    if( fail ) throw std::bad_alloc();
+  }
+};
+
+void test_vm_allocation_failure_is_not_a_transaction_reversion()
+{
+  chain::controller signing_context; open_controller( signing_context );
+  const auto original = make_genesis();
+  const auto chain_id = signing_context.get_chain_id().chain_id();
+  const auto account = block_signing_key().get_public_key().to_address_bytes();
+  for( bool authorization : { false, true } )
+  {
+    state_db::database db;
+    auto lock = db.get_unique_lock();
+    db.open( std::make_shared< state_db::backends::map::map_backend >(),
+      [&]( state_db::state_node_ptr root ) {
+        for( const auto& entry : original.entries() ) root->put_object( entry.space(), entry.key(), &entry.value() );
+        root->put_object( chain::state::space::metadata(), chain::state::key::chain_id, &chain_id );
+        const std::string code = "controlled backend fixture";
+        root->put_object( chain::state::space::contract_bytecode(), account, &code );
+        chain::contract_metadata_object meta;
+        meta.set_hash( "controlled-module-id" );
+        meta.set_authorizes_transaction_application( authorization );
+        const auto encoded = util::converter::as< std::string >( meta );
+        root->put_object( chain::state::space::contract_metadata(), account, &encoded );
+      }, state_db::pob_comparator, lock );
+    const auto root = db.get_root( lock );
+    const auto before = pending_root_string( root );
+    auto tx = make_signed_noop_transaction( signing_context );
+    tx.add_operations()->mutable_call_contract()->set_contract_id( account );
+    const std::vector< crypto::multihash > ops = { crypto::hash( crypto::multicodec::sha2_256, tx.operations( 0 ) ) };
+    tx.mutable_header()->set_operation_merkle_root( util::converter::as< std::string >(
+      crypto::merkle_tree( crypto::multicodec::sha2_256, ops ).root()->hash() ) );
+    tx.set_id( util::converter::as< std::string >( crypto::hash( crypto::multicodec::sha2_256, tx.header() ) ) );
+    tx.clear_signatures();
+    tx.add_signatures( util::converter::as< std::string >(
+      block_signing_key().sign_compact( util::converter::to< crypto::multihash >( tx.id() ) ) ) );
+    for( const auto intent : { chain::intent::transaction_application,
+                              chain::intent::block_application, chain::intent::block_proposal } )
+    {
+      auto backend = std::make_shared< AllocationFailureBackend >();
+      chain::execution_context ctx( backend, intent );
+      ctx.set_state_node( root->create_anonymous_node(), root );
+      ctx.push_frame( { .call_privilege = chain::privilege::kernel_mode } );
+      if( intent == chain::intent::transaction_application ) ctx.receipt() = protocol::transaction_receipt{};
+      else ctx.receipt() = protocol::block_receipt{};
+      ctx.resource_meter().set_resource_limit_data( chain::system_call::get_resource_limits( ctx ) );
+      bool local = false;
+      try { chain::system_call::apply_transaction( ctx, tx ); }
+      catch( const std::bad_alloc& ) { local = true; }
+      assert( local && backend->calls == 1 && pending_root_string( root ) == before );
+      if( intent == chain::intent::transaction_application )
+        assert( std::get< protocol::transaction_receipt >( ctx.receipt() ).id().empty() );
+      else assert( std::get< protocol::block_receipt >( ctx.receipt() ).transaction_receipts_size() == 0 );
+      ctx.clear_state_node(); // The failed attempt is discarded, never committed.
+    }
+  }
+}
+
 } // namespace
 
 int main()
@@ -655,5 +866,7 @@ int main()
   test_checked_replay_clean_fallback_and_halt();
   test_transient_contract_state_delta_requires_preserved_tombstone();
   test_kfs_project_order_delta_requires_preserved_tombstone();
+  test_transaction_work_lifetime_and_receipt_parity();
+  test_vm_allocation_failure_is_not_a_transaction_reversion();
   return 0;
 }

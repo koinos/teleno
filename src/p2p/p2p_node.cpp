@@ -1,11 +1,14 @@
 #include "p2p_node.hpp"
 
 #include "p2p/gorpc_codec.hpp"
+#include "core/transaction_work_budget.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <iterator>
+#include <new>
+#include <optional>
 #include <stdexcept>
 
 namespace koinos::node::p2p {
@@ -53,6 +56,13 @@ bool is_local_state_merkle_mismatch( const std::string& error )
          || contains_case_insensitive( error, "previous state merkle mismatch" );
 }
 
+const std::string& peer_score_address( const PeerID& peer ) noexcept
+{
+  // A transport may not yet have a remote address. Keep such identities
+  // separate rather than sharing an empty-address ban across unrelated peers.
+  return peer.address.empty() ? peer.id : peer.address;
+}
+
 bool has_dialable_address( const PeerID& peer )
 {
   return !peer.id.empty() && !peer.address.empty();
@@ -71,13 +81,17 @@ P2PNode::P2PNode( const P2POptions& opts,
                   IChain* chain,
                   IBlockStore* block_store,
                   EventBus* event_bus,
-                  std::unique_ptr< ITransport > transport )
+                  std::unique_ptr< ITransport > transport,
+                  PendingTransactionLookup pending_transaction )
     : _opts( opts ),
       _chain( chain ),
       _block_store( block_store ),
       _event_bus( event_bus ),
       _transport( std::move( transport ) ),
-      _error_handler( opts )
+      _error_handler( opts ),
+      _seen_blocks( opts.seen_block_entries, opts.seen_block_bytes, opts.seen_id_lifetime ),
+      _seen_transactions( opts.seen_transaction_entries, opts.seen_transaction_bytes, opts.seen_id_lifetime ),
+      _pending_transaction( std::move( pending_transaction ) )
 {
   _seed_peers = opts.seed_peers;
   for( const auto& peer: _seed_peers )
@@ -91,8 +105,24 @@ P2PNode::~P2PNode()
 
 void P2PNode::start()
 {
-  _running = true;
+  std::unique_lock lifecycle_lock( _lifecycle_mutex );
+  if( _running.exchange( true ) )
+    return;
 
+  try
+  {
+    start_runtime();
+  }
+  catch( ... )
+  {
+    lifecycle_lock.unlock();
+    stop();
+    throw;
+  }
+}
+
+void P2PNode::start_runtime()
+{
   // Get our chain ID
   if( _chain )
   {
@@ -124,8 +154,9 @@ void P2PNode::start()
   // Subscribe to EventBus
   if( _event_bus )
   {
-    _event_bus->on_block_accepted.connect( [this]( const broadcast::block_accepted& ba ) { on_block_accepted( ba ); } );
-    _event_bus->on_block_irreversible.connect(
+    _accepted_connection = _event_bus->on_block_accepted.connect(
+      [this]( const broadcast::block_accepted& ba ) { on_block_accepted( ba ); } );
+    _irreversible_connection = _event_bus->on_block_irreversible.connect(
       [this]( const broadcast::block_irreversible& bi ) { on_block_irreversible( bi ); } );
   }
 
@@ -143,51 +174,71 @@ void P2PNode::start()
 
     while( _running )
     {
-      refresh_known_peer_candidates();
-
-      const auto now = std::chrono::steady_clock::now();
-      if( now - last_seed_cycle >= _opts.seed_reconnect_interval )
+      try
       {
-        last_seed_cycle = now;
-        for( const auto& seed: _seed_peers )
+        refresh_known_peer_candidates();
+        _error_handler.collect_expired();
         {
-          if( !_running )
-            break;
-          if( !_error_handler.can_connect( seed.address ) )
-            continue;
+          std::lock_guard lock( _peers_mutex );
+          reap_finished_workers_locked();
+        }
 
-          // Check if already connected
-          bool found = false;
+        const auto now = std::chrono::steady_clock::now();
+        if( now - last_seed_cycle >= _opts.seed_reconnect_interval )
+        {
+          last_seed_cycle = now;
+          for( const auto& seed: _seed_peers )
           {
-            std::lock_guard lock( _peers_mutex );
-            found = _peers.count( seed.id ) > 0;
-          }
-          if( !found )
-          {
-            try
-            {
-              LOG( info ) << "[p2p] Attempting to connect to seed " << seed.id;
-              _transport->connect_peer( seed );
-            }
-            catch( const std::exception& e )
-            {
-              LOG( debug ) << "[p2p] Seed reconnect failed for " << seed.id << ": " << e.what();
-            }
+            if( !_running )
+              break;
+            if( !_error_handler.can_connect( peer_score_address( seed ) ) )
+              continue;
 
-            sleep_while_running( _running, seed_dial_spacing );
+            // Check if already connected
+            bool found = false;
+            {
+              std::lock_guard lock( _peers_mutex );
+              found = _peers.count( seed.id ) > 0;
+            }
+            if( !found )
+            {
+              try
+              {
+                LOG( info ) << "[p2p] Attempting to connect to seed " << seed.id;
+                _transport->connect_peer( seed );
+              }
+              catch( const std::exception& e )
+              {
+                LOG( debug ) << "[p2p] Seed reconnect failed for " << seed.id << ": " << e.what();
+              }
+
+              sleep_while_running( _running, seed_dial_spacing );
+            }
           }
         }
+
+        run_peer_acquisition_cycle();
+        if( _opts.peer_log_interval.count() > 0 )
+        {
+          const auto log_now = std::chrono::steady_clock::now();
+          if( log_now - last_peer_log >= _opts.peer_log_interval )
+          {
+            log_peer_snapshot();
+            last_peer_log = log_now;
+          }
+        }
+
       }
-
-      run_peer_acquisition_cycle();
-      if( _opts.peer_log_interval.count() > 0 )
+      catch( const LocalTransportUnavailable& )
       {
-        const auto log_now = std::chrono::steady_clock::now();
-        if( log_now - last_peer_log >= _opts.peer_log_interval )
-        {
-          log_peer_snapshot();
-          last_peer_log = log_now;
-        }
+        std::lock_guard lock(_peers_mutex);++_discovery_snapshot_refusals;
+      }
+      catch( const std::bad_alloc& )
+      {
+        // Keep the periodic worker alive without logging/allocating during
+        // local exhaustion. No peer score, block application or in-call retry.
+        std::lock_guard lock( _peers_mutex );
+        ++_discovery_allocation_refusals;
       }
 
       auto loop_interval = _opts.seed_reconnect_interval;
@@ -204,32 +255,44 @@ void P2PNode::start()
 
 void P2PNode::stop()
 {
+  std::lock_guard lifecycle_lock( _lifecycle_mutex );
   if( !_running.exchange( false ) )
     return;
+
+  _accepted_connection.disconnect();
+  _irreversible_connection.disconnect();
 
   if( _gossip_toggle )
     _gossip_toggle->stop();
 
-  // Cancel all peer sync threads.
-  std::vector< std::thread > sync_threads;
+  // Own and cancel all generations, including already disconnected peers.
+  // Keep the transport alive until their outstanding RPCs return; stopping it
+  // concurrently would race its borrowed host/runtime members.
+  std::list< std::shared_ptr< PeerState > > sync_workers;
   {
     std::lock_guard lock( _peers_mutex );
-    for( auto& [id, state]: _peers )
-    {
-      if( state->sync_thread.joinable() )
-        sync_threads.emplace_back( std::move( state->sync_thread ) );
-    }
+    for( const auto& state: _sync_workers )
+      state->cancelled = true;
+    sync_workers.splice( sync_workers.end(), _sync_workers );
+    _draining_workers = sync_workers.size();
     _peers.clear();
+    trim_peer_candidates_locked();
   }
 
-  for( auto& thread: sync_threads )
-    if( thread.joinable() )
-      thread.join();
+  for( const auto& state: sync_workers )
+    if( state->sync_thread.joinable() )
+      state->sync_thread.join();
+  {
+    std::lock_guard lock( _peers_mutex );
+    _draining_workers = 0;
+  }
 
   if( _reconnect_thread.joinable() )
     _reconnect_thread.join();
 
   _transport->stop();
+  _seen_blocks.clear();
+  _seen_transactions.clear();
 }
 
 uint32_t P2PNode::connected_peer_count() const
@@ -237,18 +300,69 @@ uint32_t P2PNode::connected_peer_count() const
   return _transport->connected_peer_count();
 }
 
-std::vector< PeerID > P2PNode::connected_peers() const
+PeerSnapshot P2PNode::connected_peers() const
 {
-  return _transport ? _transport->connected_peers() : std::vector< PeerID >{};
+  return _transport ? _transport->connected_peers() : PeerSnapshot{};
 }
 
-std::vector< PeerID > P2PNode::known_peers() const
+PeerSnapshot P2PNode::known_peers() const
 {
-  return _transport ? _transport->known_peers() : std::vector< PeerID >{};
+  return _transport ? _transport->known_peers() : PeerSnapshot{};
+}
+
+P2PNode::BookkeepingStats P2PNode::bookkeeping_stats()
+{
+  BookkeepingStats result{};
+  {
+    std::lock_guard lock( _peers_mutex );
+    result.candidates = _peer_candidates.size();
+    result.candidate_limit = _opts.max_peer_candidates;
+    result.configured_seeds = _seed_peers.size();
+    result.candidate_evictions = _candidate_evictions;
+    result.candidate_allocation_refusals = _candidate_allocation_refusals;
+    result.discovery_allocation_refusals = _discovery_allocation_refusals;
+    result.discovery_snapshot_refusals = _discovery_snapshot_refusals;
+    for( const auto& [id, candidate]: _peer_candidates )
+    {
+      result.candidate_string_capacity_bytes += id.capacity()
+        + candidate.peer.id.capacity() + candidate.peer.address.capacity();
+      if( candidate.seed || _peers.count( id ) ) ++result.protected_candidates;
+    }
+    result.candidate_effective_limit = result.candidate_limit
+      ? std::max( result.candidate_limit, result.protected_candidates ) : 0;
+  }
+  result.errors = _error_handler.stats();
+  return result;
 }
 
 void P2PNode::log_peer_snapshot()
 {
+  const auto workers = worker_stats();
+  LOG( info ) << "[p2p] Sync workers: connected=" << workers.connected
+              << " owned=" << workers.owned << " retired=" << workers.retired
+              << " limit=" << workers.limit << " capacity-refusals=" << workers.refused;
+  const auto seen = seen_stats();
+  LOG( info ) << "[p2p] Accepted-ID cache: blocks=" << seen.blocks.entries
+              << " id-capacity-bytes=" << seen.blocks.id_capacity_bytes
+              << " transactions=" << seen.transactions.entries
+              << " id-capacity-bytes=" << seen.transactions.id_capacity_bytes
+              << " capacity-evictions=" << seen.blocks.capacity_evictions + seen.transactions.capacity_evictions
+              << " expired=" << seen.blocks.expired + seen.transactions.expired;
+  const auto bookkeeping = bookkeeping_stats();
+  LOG( info ) << "[p2p] Peer bookkeeping: candidates=" << bookkeeping.candidates
+              << " candidate-string-capacity-bytes=" << bookkeeping.candidate_string_capacity_bytes
+              << " protected-candidates=" << bookkeeping.protected_candidates
+              << " candidate-effective-limit=" << bookkeeping.candidate_effective_limit
+              << " candidate-evictions=" << bookkeeping.candidate_evictions
+              << " candidate-allocation-refusals=" << bookkeeping.candidate_allocation_refusals
+              << " discovery-allocation-refusals=" << bookkeeping.discovery_allocation_refusals
+              << " discovery-snapshot-refusals=" << bookkeeping.discovery_snapshot_refusals
+              << " error-records=" << bookkeeping.errors.records
+              << " error-key-capacity-bytes=" << bookkeeping.errors.key_capacity_bytes
+              << " error-record-limit=" << bookkeeping.errors.max_records
+              << " error-key-capacity-limit=" << bookkeeping.errors.max_key_capacity_bytes
+              << " local-capacity-refusals=" << bookkeeping.errors.capacity_refusals
+              << " allocation-refusals=" << bookkeeping.errors.allocation_refusals;
   auto peers = _transport->connected_peers();
   LOG( info ) << "[p2p] Connected peers:";
   for( const auto& peer: peers )
@@ -260,30 +374,55 @@ void P2PNode::log_peer_snapshot()
 
 void P2PNode::add_peer_candidate( const PeerID& peer, bool seed )
 {
-  if( !has_dialable_address( peer ) )
-    return;
-
+  if( !has_dialable_address( peer ) ) return;
   std::lock_guard lock( _peers_mutex );
-  auto [it, inserted] = _peer_candidates.emplace( peer.id, PeerCandidate{} );
-  if( inserted || it->second.peer.address.empty() || seed )
-    it->second.peer = peer;
-  it->second.seed = it->second.seed || seed;
+  remember_peer_candidate_locked( peer, seed, false );
+}
 
-  if( _opts.max_peer_candidates > 0
-      && _peer_candidates.size() > _opts.max_peer_candidates )
+void P2PNode::remember_peer_candidate_locked( const PeerID& peer, bool seed, bool replace ) noexcept
+{
+  if( !has_dialable_address( peer ) ) return;
+  seed = seed || std::any_of( _seed_peers.begin(), _seed_peers.end(),
+    [&]( const auto& configured ) { return configured.id == peer.id; } );
+  try
   {
-    for( auto itr = _peer_candidates.begin(); itr != _peer_candidates.end(); )
+    auto it = _peer_candidates.find( peer.id );
+    if( it == _peer_candidates.end() )
     {
-      if( itr->second.seed || _peers.count( itr->first ) )
-      {
-        ++itr;
-        continue;
-      }
-
-      itr = _peer_candidates.erase( itr );
-      if( _peer_candidates.size() <= _opts.max_peer_candidates )
-        break;
+      PeerCandidate ready;
+      ready.peer = peer; // Prepare all strings before map publication.
+      ready.seed = seed;
+      _peer_candidates.emplace( peer.id, std::move( ready ) );
     }
+    else
+    {
+      if( replace || it->second.peer.address.empty() || seed )
+      {
+        PeerID ready = peer;
+        it->second.peer.id.swap( ready.id );
+        it->second.peer.address.swap( ready.address );
+      }
+      it->second.seed = it->second.seed || seed;
+    }
+  }
+  catch( const std::bad_alloc& )
+  {
+    // This is optional dial advice, not peer validity or accepted chain state.
+    // Configuration and active generations already retain their own identities.
+    ++_candidate_allocation_refusals;
+  }
+  trim_peer_candidates_locked();
+}
+
+void P2PNode::trim_peer_candidates_locked() noexcept
+{
+  if( !_opts.max_peer_candidates ) return; // Preserve the explicit unlimited option.
+  for( auto it = _peer_candidates.begin();
+       it != _peer_candidates.end() && _peer_candidates.size() > _opts.max_peer_candidates; )
+  {
+    if( it->second.seed || _peers.count( it->first ) ) { ++it; continue; }
+    it = _peer_candidates.erase( it );
+    ++_candidate_evictions;
   }
 }
 
@@ -324,7 +463,7 @@ void P2PNode::run_peer_acquisition_cycle()
         break;
       if( candidate.seed || is_peer_connected_locked( id ) )
         continue;
-      if( !_error_handler.can_connect( candidate.peer.address ) )
+      if( !_error_handler.can_connect( peer_score_address( candidate.peer ) ) )
         continue;
       if( candidate.attempts > 0
           && now - candidate.last_dial < _opts.candidate_redial_interval )
@@ -359,25 +498,67 @@ void P2PNode::run_peer_acquisition_cycle()
 
 void P2PNode::on_peer_connected( const PeerID& peer )
 {
-  std::lock_guard lock( _peers_mutex );
+  std::unique_lock lock( _peers_mutex );
+
+  if( !_running )
+    return;
+  reap_finished_workers_locked();
 
   if( _peers.count( peer.id ) )
     return; // Already connected
 
-  if( has_dialable_address( peer ) )
+  if( _sync_workers.size() >= _opts.max_peer_sync_workers || _peers.size() >= _opts.max_peer_sync_workers )
   {
-    auto [candidate_it, inserted] = _peer_candidates.emplace( peer.id, PeerCandidate{} );
-    candidate_it->second.peer = peer;
+    ++_worker_refusals;
+    lock.unlock();
+    LOG( debug ) << "[p2p] Local sync-worker capacity reached; closing connection without peer penalty";
+    _transport->disconnect_peer( peer );
+    return;
   }
 
-  auto state = std::make_unique< PeerState >();
+  const auto admission = _error_handler.admission( peer_score_address( peer ) );
+  if( admission != PeerErrorHandler::Admission::allowed )
+  {
+    lock.unlock();
+    LOG( debug ) << "[p2p] Closing inadmissible peer connection: "
+                << ( admission == PeerErrorHandler::Admission::local_capacity
+                     ? "local bookkeeping capacity" : "existing network-address score" );
+    _transport->disconnect_peer( peer );
+    return;
+  }
+
+  remember_peer_candidate_locked( peer, false, true );
+
+  auto state = std::make_shared< PeerState >();
   state->peer = peer;
 
-  // Start sync loop in dedicated thread
-  auto* raw_state = state.get();
-  state->sync_thread = std::thread( [this, p = peer]() { peer_sync_loop( p ); } );
-
-  _peers[ peer.id ] = std::move( state );
+  // Allocate registry ownership before launching a thread. A failed launch
+  // cannot leave a detached worker or a joinable thread in an erased owner.
+  _sync_workers.push_back( state );
+  try
+  {
+    _peers.emplace( peer.id, state );
+    state->sync_thread = std::thread( [this, state]() noexcept {
+      try { peer_sync_loop( state ); }
+      catch( const std::exception& e )
+      {
+        try { LOG( warning ) << "[p2p] Sync worker failed: " << e.what(); } catch( ... ) {}
+      }
+      catch( ... )
+      {
+        try { LOG( warning ) << "[p2p] Sync worker failed with an unknown exception"; } catch( ... ) {}
+      }
+      // Last access to node-owned data precedes this publication. Reaping a
+      // finished worker while holding _peers_mutex cannot wait on that mutex.
+      state->finished = true;
+    } );
+  }
+  catch( ... )
+  {
+    _peers.erase( peer.id );
+    _sync_workers.pop_back();
+    throw;
+  }
   LOG( info ) << "[p2p] Peer connected: " << peer.id;
 }
 
@@ -389,10 +570,9 @@ void P2PNode::on_peer_disconnected( const PeerID& peer )
   if( it == _peers.end() )
     return;
 
-  if( it->second->sync_thread.joinable() )
-    it->second->sync_thread.detach();
-
+  it->second->cancelled = true;
   _peers.erase( it );
+  trim_peer_candidates_locked();
   LOG( info ) << "[p2p] Peer disconnected: " << peer.id;
 }
 
@@ -478,59 +658,106 @@ std::string P2PNode::handle_peer_rpc_request( const std::string& service,
 // Sync protocol (per-peer thread)
 // ---------------------------------------------------------------------------
 
-void P2PNode::peer_sync_loop( PeerID peer )
+bool P2PNode::worker_active( const std::shared_ptr< PeerState >& state ) const
 {
+  return _running && !state->cancelled;
+}
+
+void P2PNode::reap_finished_workers_locked()
+{
+  for( auto it = _sync_workers.begin(); it != _sync_workers.end(); )
+  {
+    if( !( *it )->finished ) { ++it; continue; }
+    if( ( *it )->sync_thread.joinable() ) ( *it )->sync_thread.join();
+    it = _sync_workers.erase( it );
+  }
+}
+
+P2PNode::WorkerStats P2PNode::worker_stats()
+{
+  std::lock_guard lock( _peers_mutex );
+  reap_finished_workers_locked();
+  size_t retired = 0;
+  for( const auto& state: _sync_workers ) retired += state->cancelled ? 1 : 0;
+  return { _peers.size(), _sync_workers.size() + _draining_workers,
+           retired + _draining_workers, _opts.max_peer_sync_workers, _worker_refusals };
+}
+
+void P2PNode::peer_sync_loop( const std::shared_ptr< PeerState >& state )
+{
+  const auto& peer = state->peer;
   // Handshake with retries
-  while( _running )
+  while( worker_active( state ) )
   {
     try
     {
-      if( peer_handshake( peer ) )
+      if( peer_handshake( state ) )
         break;
-      if( _error_handler.get_score( peer.address ) >= _opts.error_score_disconnect_threshold )
+      if( _error_handler.get_score( peer_score_address( peer ) ) >= _opts.error_score_disconnect_threshold )
         return;
+    }
+    catch( const LocalTransportUnavailable& )
+    {
+      if( !worker_active( state ) ) return;
+    }
+    catch( const std::bad_alloc& )
+    {
+      // Local exhaustion is not remote misconduct; use the normal backoff.
+      if( !worker_active( state ) ) return;
     }
     catch( const std::exception& e )
     {
+      if( !worker_active( state ) ) return;
       if( report_peer_error( peer, e.what(), score_for_error( e.what() ) ) )
         return;
     }
 
     // Backoff
-    for( int i = 0; i < 60 && _running; ++i )
+    for( int i = 0; i < 60 && worker_active( state ); ++i )
       std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
   }
 
   // Sync loop
   bool is_synced = false;
-  while( _running )
+  while( worker_active( state ) )
   {
     try
     {
-      request_sync_blocks( peer, is_synced );
-      if( _error_handler.get_score( peer.address ) >= _opts.error_score_disconnect_threshold )
+      request_sync_blocks( state, is_synced );
+      if( _error_handler.get_score( peer_score_address( peer ) ) >= _opts.error_score_disconnect_threshold )
         return;
+    }
+    catch( const LocalTransportUnavailable& )
+    {
+      if( !worker_active( state ) ) return;
+    }
+    catch( const std::bad_alloc& )
+    {
+      if( !worker_active( state ) ) return;
     }
     catch( const std::exception& e )
     {
+      if( !worker_active( state ) ) return;
       if( report_peer_error( peer, e.what(), score_for_error( e.what() ) ) )
         return;
     }
 
     auto sleep_time = is_synced ? _opts.sync_check_interval : _opts.syncing_check_interval;
     auto sleep_ms = std::chrono::duration_cast< std::chrono::milliseconds >( sleep_time ).count();
-    for( int64_t i = 0; i < sleep_ms / 100 && _running; ++i )
+    for( int64_t i = 0; i < sleep_ms / 100 && worker_active( state ); ++i )
       std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
   }
 }
 
-bool P2PNode::peer_handshake( const PeerID& peer )
+bool P2PNode::peer_handshake( const std::shared_ptr< PeerState >& state )
 {
+  const auto& peer = state->peer;
   if( !_chain )
     return false;
 
   // Verify chain ID matches
   auto peer_chain_id = _transport->peer_get_chain_id( peer );
+  if( !worker_active( state ) ) return false;
   if( peer_chain_id != _chain_id )
   {
     report_peer_error( peer, "chain ID mismatch", _opts.score_chain_id_mismatch );
@@ -538,6 +765,7 @@ bool P2PNode::peer_handshake( const PeerID& peer )
   }
 
   auto peer_head = _transport->peer_get_head_block( peer );
+  if( !worker_active( state ) ) return false;
   if( peer_head.block_id.empty() )
   {
     report_peer_error( peer, "peer head is empty", _opts.score_chain_not_connected );
@@ -555,6 +783,7 @@ bool P2PNode::peer_handshake( const PeerID& peer )
 
     auto peer_checkpoint =
       _transport->peer_get_ancestor_block_id( peer, peer_head.block_id, checkpoint.block_height );
+    if( !worker_active( state ) ) return false;
     if( peer_checkpoint != checkpoint.block_id )
     {
       report_peer_error( peer, "checkpoint mismatch", _opts.score_checkpoint_mismatch );
@@ -566,12 +795,14 @@ bool P2PNode::peer_handshake( const PeerID& peer )
   return true;
 }
 
-bool P2PNode::request_sync_blocks( const PeerID& peer, bool& is_synced )
+bool P2PNode::request_sync_blocks( const std::shared_ptr< PeerState >& state, bool& is_synced )
 {
+  const auto& peer = state->peer;
   if( !_chain || !_block_store )
     return false;
 
   std::lock_guard sync_lock( _sync_mutex );
+  if( !worker_active( state ) ) return false;
 
   auto local_head_info = _chain->get_head_info();
   auto local_head = local_head_info.head_topology();
@@ -580,6 +811,7 @@ bool P2PNode::request_sync_blocks( const PeerID& peer, bool& is_synced )
 
   // Get peer's head
   auto peer_head = _transport->peer_get_head_block( peer );
+  if( !worker_active( state ) ) return false;
   if( peer_head.height <= local_lib_height )
   {
     is_synced = true;
@@ -606,6 +838,7 @@ bool P2PNode::request_sync_blocks( const PeerID& peer, bool& is_synced )
     // Match legacy p2p behavior: live forks above LIB are normal. Only a peer
     // that does not connect to our LIB is a chain-connectivity fault.
     auto ancestor_id = _transport->peer_get_ancestor_block_id( peer, peer_head.block_id, local_lib_height );
+    if( !worker_active( state ) ) return false;
     if( ancestor_id != sync_anchor_id )
     {
       report_peer_error( peer, "chain not connected at LIB", _opts.score_chain_not_connected );
@@ -615,10 +848,23 @@ bool P2PNode::request_sync_blocks( const PeerID& peer, bool& is_synced )
 
   // Calculate batch
   uint64_t blocks_needed = peer_head.height - local_lib_height;
-  uint32_t batch = std::min( static_cast< uint64_t >( _opts.block_request_batch_size ), blocks_needed );
+  const auto limit = state->response_batch_limit == 0 ? _opts.block_request_batch_size
+    : std::min( _opts.block_request_batch_size, state->response_batch_limit );
+  uint32_t batch = std::min( static_cast< uint64_t >( limit ), blocks_needed );
 
   // Fetch blocks
-  auto blocks = _transport->peer_get_blocks( peer, peer_head.block_id, local_lib_height + 1, batch );
+  std::vector< protocol::block > blocks;
+  try { blocks = _transport->peer_get_blocks( peer, peer_head.block_id, local_lib_height + 1, batch ); }
+  catch( const LocalTransportUnavailable& e )
+  {
+    // A complete response that cannot fit our local receive window is neither
+    // a peer fault nor block invalidity. No block has been applied. A later
+    // ordinary sync iteration may request a smaller batch from the same anchor.
+    if( e.reason == LocalTransportUnavailable::Reason::response_capacity && batch > 1 )
+      state->response_batch_limit = std::max< uint32_t >( 1, batch / 2 );
+    throw;
+  }
+  if( !worker_active( state ) ) return false;
 
   if( blocks.empty() )
     return true;
@@ -628,7 +874,7 @@ bool P2PNode::request_sync_blocks( const PeerID& peer, bool& is_synced )
   std::string expected_previous = sync_anchor_id;
   for( const auto& block: blocks )
   {
-    if( !_running )
+    if( !worker_active( state ) )
       return false;
 
     if( !block.has_header() || block.id().empty() || block.header().height() != expected_height )
@@ -656,13 +902,17 @@ bool P2PNode::request_sync_blocks( const PeerID& peer, bool& is_synced )
       rpc::chain::submit_block_request req;
       *req.mutable_block() = block;
       _chain->submit_block( req );
-      {
-        std::lock_guard lock( _seen_mutex );
-        _seen_blocks.insert( block.id() );
-      }
+      _seen_blocks.remember( block.id(), block.header().height() );
+    }
+    catch( const std::bad_alloc& )
+    {
+      // No peer penalty for local exhaustion. A failed chain attempt is not
+      // remembered; later normal polling is not an in-attempt replay retry.
+      return false;
     }
     catch( const std::exception& e )
     {
+      if( !worker_active( state ) ) return false;
       if( is_irreversibility_error( e.what() ) )
       {
         LOG( debug ) << "[p2p] Ignoring already irreversible sync block at height "
@@ -710,36 +960,52 @@ bool P2PNode::request_sync_blocks( const PeerID& peer, bool& is_synced )
 
 void P2PNode::on_gossip_block( const PeerID& from, const protocol::block& block )
 {
+  if( !_running )
+    return;
   if( block.id().empty() || !block.has_header() )
   {
     report_peer_error( from, "invalid gossiped block", _opts.score_deserialization );
     return;
   }
 
-  // Check fork bomb
+  // Old traffic must not repopulate the fork watchdog after LIB cleanup.
+  // Read current LIB as well as the event-derived value (restored/startup LIB).
+  uint64_t lib = _lib_height.load();
+  std::optional<rpc::chain::get_head_info_response> local_head;
+  if( _chain )
+  {
+    try
+    {
+      local_head = _chain->get_head_info();
+      lib = std::max( lib, local_head->last_irreversible_block() );
+    }
+    catch( const std::exception& e )
+    {
+      LOG( debug ) << "[p2p] Could not read LIB before gossip block apply: " << e.what();
+    }
+  }
+  _seen_blocks.purge_irreversible( lib );
+  if( block.header().height() <= lib )
+    return;
+
+  // Check fork bomb (including cached duplicates, as before).
   if( _fork_watchdog.check( block.id(), block.signature(), block.header().previous(), block.header().height() ) )
   {
     report_peer_error( from, "fork bomb via gossip", _opts.score_fork_bomb );
     return;
   }
 
-  // Check height >= LIB
-  if( block.header().height() <= _lib_height.load() )
+  if( _seen_blocks.contains( block.id() ) )
     return;
-
-  {
-    std::lock_guard lock( _seen_mutex );
-    if( _seen_blocks.count( block.id() ) )
-      return;
-  }
 
   // Apply
   if( _chain )
   {
     try
     {
-      const auto local_head = _chain->get_head_info();
-      const auto local_height = local_head.head_topology().height();
+      if( !local_head )
+        local_head = _chain->get_head_info();
+      const auto local_height = local_head->head_topology().height();
       if( block.header().height() > local_height && block.header().height() - local_height > 1 )
       {
         LOG( debug ) << "[p2p] Ignoring future gossiped block from " << from.id
@@ -758,10 +1024,11 @@ void P2PNode::on_gossip_block( const PeerID& from, const protocol::block& block 
       rpc::chain::submit_block_request req;
       *req.mutable_block() = block;
       _chain->submit_block( req );
-      {
-        std::lock_guard lock( _seen_mutex );
-        _seen_blocks.insert( block.id() );
-      }
+      _seen_blocks.remember( block.id(), block.header().height() );
+    }
+    catch( const std::bad_alloc& )
+    {
+      return;
     }
     catch( const std::exception& e )
     {
@@ -772,6 +1039,8 @@ void P2PNode::on_gossip_block( const PeerID& from, const protocol::block& block 
 
 void P2PNode::on_gossip_transaction( const PeerID& from, const protocol::transaction& tx )
 {
+  if( !_running )
+    return;
   if( tx.id().empty() )
   {
     report_peer_error( from, "invalid gossiped transaction", _opts.score_deserialization );
@@ -780,24 +1049,32 @@ void P2PNode::on_gossip_transaction( const PeerID& from, const protocol::transac
 
   if( _chain )
   {
-    {
-      std::lock_guard lock( _seen_mutex );
-      if( _seen_transactions.count( tx.id() ) )
-        return;
-    }
+    if( _seen_transactions.contains( tx.id() ) || is_pending_transaction( tx.id() ) )
+      return;
 
     try
     {
       rpc::chain::submit_transaction_request req;
       *req.mutable_transaction() = tx;
       _chain->submit_transaction( req );
-      {
-        std::lock_guard lock( _seen_mutex );
-        _seen_transactions.insert( tx.id() );
-      }
+      _seen_transactions.remember( tx.id() );
+    }
+    catch( const LocalCapacityExceeded& )
+    {
+      // Our local capacity is not peer misconduct. No accepted-ID insertion,
+      // notification, queue or retry; later delivery gets normal validation.
+      return;
+    }
+    catch( const std::bad_alloc& )
+    {
+      return; // Local allocation failure is not transaction invalidity.
     }
     catch( const std::exception& e )
     {
+      // Admission by another source can race the precheck. Only a positive,
+      // exact current mempool lookup suppresses a duplicate peer penalty.
+      if( _seen_transactions.contains( tx.id() ) || is_pending_transaction( tx.id() ) )
+        return;
       report_peer_error( from, std::string( "gossip tx: " ) + e.what(), _opts.score_transaction_application );
     }
   }
@@ -809,7 +1086,7 @@ void P2PNode::on_gossip_transaction( const PeerID& from, const protocol::transac
 
 void P2PNode::on_block_accepted( const broadcast::block_accepted& ba )
 {
-  if( !ba.has_block() )
+  if( !_running || !ba.has_block() )
     return;
 
   // Update gossip toggle head time
@@ -823,13 +1100,33 @@ void P2PNode::on_block_accepted( const broadcast::block_accepted& ba )
 
 void P2PNode::on_block_irreversible( const broadcast::block_irreversible& bi )
 {
+  if( !_running )
+    return;
   _lib_height.store( bi.topology().height() );
+  _seen_blocks.purge_irreversible( bi.topology().height() );
   _fork_watchdog.purge_below( bi.topology().height() );
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+P2PNode::SeenStats P2PNode::seen_stats()
+{
+  return { _seen_blocks.stats(), _seen_transactions.stats() };
+}
+
+bool P2PNode::is_pending_transaction( const std::string& id )
+{
+  if( !_pending_transaction )
+    return false;
+  try { return _pending_transaction( id ); }
+  catch( const std::exception& e )
+  {
+    LOG( debug ) << "[p2p] Pending-ID lookup unavailable: " << e.what();
+    return false; // Unknown is not known: preserve normal validation/scoring.
+  }
+}
 
 bool P2PNode::get_local_block_height( const std::string& block_id, uint64_t& height )
 {
@@ -872,10 +1169,16 @@ bool P2PNode::report_peer_error( const PeerID& peer, const std::string& error, u
 {
   LOG( debug ) << "[p2p] Peer error from " << peer.id << ": " << error << " (score: " << score << ")";
 
-  const bool threshold_exceeded = _error_handler.record_error( peer.address, score );
-  const auto current_score      = _error_handler.get_score( peer.address );
+  const auto result = _error_handler.record_error( peer_score_address( peer ), score );
+  if( result.local_capacity )
+  {
+    LOG( debug ) << "[p2p] Local peer-error bookkeeping capacity unavailable; closing connection without peer penalty";
+    _transport->disconnect_peer( peer );
+    return true;
+  }
+  const auto current_score = result.score;
 
-  if( threshold_exceeded )
+  if( result.disconnect )
   {
     LOG( warning ) << "[p2p] Disconnecting peer " << peer.id
                    << " (score threshold exceeded: " << current_score

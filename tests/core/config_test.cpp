@@ -28,6 +28,144 @@ std::filesystem::path write_config( const std::string& content )
 int main()
 {
   {
+    NodeConfig defaults;
+    assert( defaults.rocksdb_blocks_zstd_level == 0 );
+    assert( defaults.rocksdb_blocks_zstd_dictionary_bytes == 0 );
+    assert( defaults.rocksdb_max_total_wal_size == 0 );
+    for( bool strict: { false, true } )
+    {
+      for( const auto bytes: { uint64_t( 0 ), uint64_t( 67108864 ), uint64_t( UINT64_MAX ) } )
+      {
+        auto path = write_config( "rocksdb:\n  max-total-wal-size: " + std::to_string( bytes ) + "\n" );
+        assert( load_config( path, {}, {}, strict ).rocksdb_max_total_wal_size == bytes );
+        std::filesystem::remove( path );
+      }
+      for( const auto& codec: { "zstd", "kZSTD", "kZSTDCompression" } )
+      {
+        auto path = write_config( std::string( "rocksdb:\n  compression: none\n  blocks-compression: " )
+                                  + codec + "\n  blocks-zstd-level: 9\n  blocks-zstd-dictionary-bytes: 65536\n" );
+        const auto cfg = load_config( path, {}, {}, strict );
+        assert( cfg.rocksdb_blocks_zstd_level == 9 && cfg.rocksdb_blocks_zstd_dictionary_bytes == 65536 );
+        std::filesystem::remove( path );
+      }
+      for( const auto& valid: {
+             "rocksdb:\n  blocks-zstd-level: 19\n",
+             "rocksdb:\n  blocks-zstd-dictionary-bytes: 32768\n",
+             "rocksdb:\n  blocks-zstd-level: 15\n  blocks-zstd-dictionary-bytes: 131072\n",
+             "rocksdb:\n  compression: none\n  blocks-zstd-level: 0\n  blocks-zstd-dictionary-bytes: 0\n" } )
+      {
+        auto path = write_config( valid );
+        load_config( path, {}, {}, strict );
+        std::filesystem::remove( path );
+      }
+      for( const auto& invalid: {
+             "rocksdb:\n  blocks-zstd-level: 20\n",
+             "rocksdb:\n  blocks-zstd-dictionary-bytes: 1\n",
+             "rocksdb:\n  blocks-zstd-dictionary-bytes: 65537\n",
+             "rocksdb:\n  blocks-zstd-dictionary-bytes: 131073\n",
+             "rocksdb:\n  blocks-zstd-dictionary-bytes: 262144\n",
+             "rocksdb:\n  compression: none\n  blocks-zstd-level: 9\n",
+             "rocksdb:\n  blocks-compression: snappy\n  blocks-zstd-dictionary-bytes: 65536\n" } )
+      {
+        auto path = write_config( invalid );
+        bool threw = false;
+        try { load_config( path, {}, {}, strict ); } catch( const std::invalid_argument& ) { threw = true; }
+        assert( threw );
+        std::filesystem::remove( path );
+      }
+      for( const auto& key: { "blocks-zstd-level", "blocks-zstd-dictionary-bytes", "max-total-wal-size" } )
+        for( const auto& value: { "-1", "-0", "1.5", "true", "[]", "null", "18446744073709551616", "abc" } )
+        {
+          auto path = write_config( std::string( "rocksdb:\n  " ) + key + ": " + value + "\n" );
+          bool threw = false;
+          try { load_config( path, {}, {}, strict ); } catch( const std::invalid_argument& ) { threw = true; }
+          assert( threw );
+          std::filesystem::remove( path );
+        }
+    }
+  }
+  {
+    NodeConfig defaults;
+    assert( defaults.p2p_max_peer_error_records == 4096 );
+    assert( defaults.p2p_peer_error_key_capacity_bytes == 1048576 );
+    auto path = write_config( "p2p:\n  max-peer-error-records: 17\n  peer-error-key-capacity-bytes: 4096\n" );
+    const auto cfg = load_config( path );
+    assert( cfg.p2p_max_peer_error_records == 17 && cfg.p2p_peer_error_key_capacity_bytes == 4096 );
+    std::filesystem::remove( path );
+    for( const auto& key: { "max-peer-error-records", "peer-error-key-capacity-bytes" } )
+      for( const auto& value: { "0", "-1", "-0", "1.5", "true", "[]", "null", "18446744073709551616", "abc" } )
+      {
+        path = write_config( std::string( "p2p:\n  " ) + key + ": " + value + "\n" );
+        bool threw = false;
+        try { load_config( path ); } catch( const std::exception& ) { threw = true; }
+        assert( threw ); std::filesystem::remove( path );
+      }
+  }
+  {
+    NodeConfig defaults;
+    assert( defaults.vm_module_cache_max_capacity_bytes == 0 );
+    auto path = write_config( "chain:\n  vm-module-cache-max-capacity-bytes: 1048576\n" );
+    assert( load_config( path ).vm_module_cache_max_capacity_bytes == 1048576 );
+    std::filesystem::remove( path );
+    for( const auto& value: { "-1", "-0", "1.5", "true", "[]", "null", "18446744073709551616", "abc" } )
+    {
+      path = write_config( std::string( "chain:\n  vm-module-cache-max-capacity-bytes: " ) + value + "\n" );
+      bool threw = false;
+      try { load_config( path ); } catch( const std::invalid_argument& ) { threw = true; }
+      assert( threw ); std::filesystem::remove( path );
+    }
+    path = write_config( "chain:\n  vm-module-cache-max-capacity-bytes: 18446744073709551615\n" );
+    assert( load_config( path ).vm_module_cache_max_capacity_bytes == UINT64_MAX );
+    std::filesystem::remove( path );
+  }
+  {
+    NodeConfig defaults;
+    assert( !defaults.mempool_pending_record_max_owners && !defaults.mempool_pending_record_max_capacity_bytes );
+    auto path = write_config( "mempool:\n  pending-record-max-owners: 2\n  pending-record-max-capacity-bytes: 1048576\n" );
+    const auto cfg = load_config( path );
+    assert( cfg.mempool_pending_record_max_owners == 2 && cfg.mempool_pending_record_max_capacity_bytes == 1048576 );
+    std::filesystem::remove( path );
+    path = write_config( "mempool:\n  pending-record-max-owners: 0\n  pending-record-max-capacity-bytes: 1\n" );
+    const auto independent = load_config( path );
+    assert( !independent.mempool_pending_record_max_owners && independent.mempool_pending_record_max_capacity_bytes == 1 );
+    std::filesystem::remove( path );
+    for( const auto& key : { "pending-record-max-owners", "pending-record-max-capacity-bytes" } )
+      for( const auto& value : { "-1", "-0", "1.5", "true", "[]", "null", "18446744073709551616", "abc" } )
+      {
+        path = write_config( std::string( "mempool:\n  " ) + key + ": " + value + "\n" );
+        bool threw = false;
+        try { load_config( path ); } catch( const std::invalid_argument& ) { threw = true; }
+        assert( threw ); std::filesystem::remove( path );
+      }
+  }
+  {
+    NodeConfig defaults;
+    assert( !defaults.transaction_work_max_jobs && !defaults.transaction_work_max_wire_bytes );
+    auto path = write_config( "chain:\n  transaction-work-max-jobs: 2\n  transaction-work-max-wire-bytes: 1048576\n" );
+    const auto cfg = load_config( path );
+    assert( cfg.transaction_work_max_jobs == 2 && cfg.transaction_work_max_wire_bytes == 1048576 );
+    std::filesystem::remove( path );
+    for( const auto& key : { "transaction-work-max-jobs", "transaction-work-max-wire-bytes" } )
+      for( const auto& value : { "-1", "-0", "1.5", "true", "[]", "null", "18446744073709551616", "abc" } )
+      {
+        path = write_config( std::string( "chain:\n  " ) + key + ": " + value + "\n" );
+        bool threw = false;
+        try { load_config( path ); } catch( const std::invalid_argument& ) { threw = true; }
+        assert( threw ); std::filesystem::remove( path );
+      }
+  }
+  {
+    auto path = write_config("jsonrpc:\n  jobs: 2\n  io-timeout-seconds: 5\n");
+    auto cfg = load_config(path);
+    assert(cfg.jsonrpc_jobs == 2 && cfg.jsonrpc_io_timeout_seconds == 5);
+    std::filesystem::remove(path);
+    for(const auto& invalid: {"jsonrpc:\n  jobs: 65\n", "jsonrpc:\n  io-timeout-seconds: 0\n", "jsonrpc:\n  io-timeout-seconds: 301\n"}) {
+      path=write_config(invalid); bool threw=false;
+      try { load_config(path); } catch(const std::exception&) { threw=true; }
+      assert(threw); std::filesystem::remove(path);
+    }
+  }
+  {
     const auto dir = std::filesystem::temp_directory_path()
                      / ( "teleno-restore-startup-test-" + std::to_string( std::rand() ) );
     std::filesystem::create_directories( dir );

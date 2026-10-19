@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "backup/checkpoint_manager.hpp"
+#include "backup/restore_recovery_reserve.hpp"
 #include "core/config.hpp"
 
 namespace koinos::node::backup {
@@ -182,7 +183,8 @@ RestoreSpaceEstimate estimate_restore_space( uint64_t restored_database_bytes,
                                              uint64_t object_download_bytes,
                                              uint64_t archive_bytes = 0,
                                              bool streaming_archive = false,
-                                             uint64_t existing_target_bytes = 0 );
+                                             uint64_t existing_target_bytes = 0,
+                                             RestoreReserveProfile reserve_profile = RestoreReserveProfile::standard );
 
 RestoreSpaceCheck check_restore_space( const RestoreSpaceEstimate& estimate,
                                        uint64_t available_bytes,

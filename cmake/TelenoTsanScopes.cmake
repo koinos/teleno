@@ -1,0 +1,30 @@
+# A generated diagnostic overlay; existing pinned dependency inputs stay intact.
+# Only instrumented native Boost.DI template instantiations see this header.
+set(_teleno_tsan_recipe_dir "${CMAKE_CURRENT_LIST_DIR}")
+
+function(teleno_make_tsan_scope_overlay original_header output_variable)
+  if(NOT EXISTS "${original_header}")
+    message(FATAL_ERROR "TSan scope lifetime overlay needs the pinned Boost.DI shared-scope header")
+  endif()
+  file(SHA256 "${original_header}" _original_sha)
+  set(_expected_sha "06a42b443b39112094772ec4176a689ec11051e3beba0f5fbfc85daaa71c9a68")
+  if(NOT _original_sha STREQUAL _expected_sha)
+    message(FATAL_ERROR "Unexpected Boost.DI shared-scope source; review lifetime instrumentation for this dependency")
+  endif()
+  file(READ "${original_header}" _original)
+  string(REPLACE "#include <mutex>" "#include \"teleno_tsan_scope_mutex.hpp\"" _overlay "${_original}")
+  string(REPLACE "std::mutex mutex_;" "::teleno::diagnostics::ScopeMutex mutex_;" _overlay "${_overlay}")
+  if(_overlay STREQUAL _original)
+    message(FATAL_ERROR "Boost.DI scope lifetime overlay did not apply")
+  endif()
+  set(_root "${CMAKE_BINARY_DIR}/generated/teleno-tsan-scopes")
+  file(MAKE_DIRECTORY "${_root}/boost/di/extension/scopes")
+  file(WRITE "${_root}/boost/di/extension/scopes/shared.hpp" "${_overlay}")
+  configure_file("${_teleno_tsan_recipe_dir}/teleno_tsan_scope_mutex.hpp"
+    "${_root}/teleno_tsan_scope_mutex.hpp" COPYONLY)
+  file(SHA256 "${_root}/boost/di/extension/scopes/shared.hpp" _overlay_sha)
+  file(SHA256 "${_root}/teleno_tsan_scope_mutex.hpp" _helper_sha)
+  file(WRITE "${_root}/provenance.txt"
+    "original_sha256=${_original_sha}\noverlay_sha256=${_overlay_sha}\nhelper_sha256=${_helper_sha}\nordinary_mutex_locking_unchanged=true\nsuppressions_added=false\n")
+  set(${output_variable} "${_root}" PARENT_SCOPE)
+endfunction()

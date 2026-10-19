@@ -12,13 +12,14 @@ class map_iterator final: public abstract_iterator
 {
 public:
   using value_type    = abstract_iterator::value_type;
-  using map_impl      = std::map< detail::key_type, detail::value_type >;
+  using map_impl      = std::map< detail::key_type, detail::value_ptr >;
   using iterator_impl = map_impl::iterator;
 
   map_iterator( std::unique_ptr< iterator_impl > itr, const map_impl& map );
   ~map_iterator();
 
   virtual const value_type& operator*() const override;
+  virtual value_ptr share_value() const override;
 
   virtual const key_type& key() const override;
 

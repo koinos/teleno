@@ -8,6 +8,7 @@
 #include <koinos/crypto/multihash.hpp>
 #include <koinos/exception.hpp>
 #include <koinos/state_db/state_db.hpp>
+#include <koinos/mempool/pending_record_budget.hpp>
 
 #include <koinos/broadcast/broadcast.pb.h>
 #include <koinos/mempool/mempool.pb.h>
@@ -36,13 +37,20 @@ namespace detail {
 class mempool_impl;
 } // namespace detail
 
+struct retained_memory_usage
+{
+  state_db::retained_memory_usage indexed_state;
+  uint64_t node_mutexes = 0;
+};
+
 class mempool final
 {
 private:
   std::unique_ptr< detail::mempool_impl > _my;
 
 public:
-  mempool( state_db::fork_resolution_algorithm algo = state_db::fork_resolution_algorithm::fifo );
+  mempool( state_db::fork_resolution_algorithm algo = state_db::fork_resolution_algorithm::fifo,
+           pending_record_limits record_limits = {} );
   virtual ~mempool();
 
   bool check_pending_account_resources( const account_type& payer,
@@ -58,6 +66,17 @@ public:
 
   uint64_t get_pending_transaction_count( const std::string& account,
                                           std::optional< crypto::multihash > block_id = {} ) const;
+
+  // Visible head count for diagnostics, without copying transaction payloads.
+  // Not physical retained-fork memory accounting or an admission limit.
+  uint64_t pending_transaction_count() const;
+
+  // On-demand all-fork map/delta inventory. Excludes transient/caller memory,
+  // mutex/index allocator overhead and process RSS. Takes an exclusive DB lock
+  // for the scan; do not use as a per-request metric or an admission ceiling.
+  retained_memory_usage get_retained_memory_usage() const;
+  // O(1) live immutable record credits, not a retained-fork scan or heap/RSS.
+  pending_record_snapshot get_pending_record_usage() const;
 
   uint64_t add_pending_transaction( const pending_transaction& pending_trx,
                                     std::chrono::system_clock::time_point time,

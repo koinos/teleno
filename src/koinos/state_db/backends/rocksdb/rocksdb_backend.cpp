@@ -7,11 +7,11 @@
 
 #include <rocksdb/convenience.h>
 #include <rocksdb/filter_policy.h>
+#include <iostream>
 
 namespace koinos::state_db::backends::rocksdb {
 
 namespace constants {
-constexpr std::size_t cache_size     = 64 << 20; // 64 MB
 constexpr std::size_t max_open_files = 64;
 
 constexpr std::size_t default_column_index  = 0;
@@ -35,46 +35,15 @@ const protocol::block_header block_header_default     = protocol::block_header()
 
 bool write_default_metadata( ::rocksdb::DB& db, ::rocksdb::ColumnFamilyHandle& metadata_handle )
 {
-  ::rocksdb::WriteOptions wopts;
-
-  auto status = db.Put( wopts,
-                        &metadata_handle,
-                        ::rocksdb::Slice( constants::size_key ),
-                        ::rocksdb::Slice( util::converter::as< std::string >( constants::size_default ) ) );
-
-  if( !status.ok() )
-    return false;
-
-  status = db.Put( wopts,
-                   &metadata_handle,
-                   ::rocksdb::Slice( constants::revision_key ),
-                   ::rocksdb::Slice( util::converter::as< std::string >( constants::revision_default ) ) );
-
-  if( !status.ok() )
-    return false;
-
-  status = db.Put( wopts,
-                   &metadata_handle,
-                   ::rocksdb::Slice( constants::id_key ),
-                   ::rocksdb::Slice( util::converter::as< std::string >( constants::id_default ) ) );
-
-  if( !status.ok() )
-    return false;
-
-  status = db.Put( wopts,
-                   &metadata_handle,
-                   ::rocksdb::Slice( constants::merkle_root_key ),
-                   ::rocksdb::Slice( util::converter::as< std::string >( constants::merkle_root_default ) ) );
-
-  if( !status.ok() )
-    return false;
-
-  status = db.Put( wopts,
-                   &metadata_handle,
-                   ::rocksdb::Slice( constants::block_header_key ),
-                   ::rocksdb::Slice( util::converter::as< std::string >( constants::block_header_default ) ) );
-
-  return status.ok();
+  ::rocksdb::WriteBatch batch;
+  for(const auto& [key,value]: std::vector<std::pair<std::string,std::string>>{
+    {constants::size_key,util::converter::as<std::string>(constants::size_default)},
+    {constants::revision_key,util::converter::as<std::string>(constants::revision_default)},
+    {constants::id_key,util::converter::as<std::string>(constants::id_default)},
+    {constants::merkle_root_key,util::converter::as<std::string>(constants::merkle_root_default)},
+    {constants::block_header_key,util::converter::as<std::string>(constants::block_header_default)}})
+    if(!batch.Put(&metadata_handle,key,value).ok()) return false;
+  return db.Write(::rocksdb::WriteOptions{},&batch).ok();
 }
 
 bool setup_database( const std::filesystem::path& p )
@@ -128,21 +97,28 @@ bool setup_borrowed_database( ::rocksdb::DB& db, ::rocksdb::ColumnFamilyHandle& 
   if( !status.IsNotFound() )
     return false;
 
+  std::unique_ptr<::rocksdb::Iterator> it(db.NewIterator(::rocksdb::ReadOptions{},&metadata_handle));
+  it->SeekToFirst();
+  if(!it->status().ok() || it->Valid()) return false; // Never initialize over partial metadata.
+
   return write_default_metadata( db, metadata_handle );
 }
 
-rocksdb_backend::rocksdb_backend():
-    _cache( std::make_shared< object_cache >( constants::cache_size ) ),
+rocksdb_backend::rocksdb_backend(std::size_t object_cache_bytes):
+    _cache( std::make_shared< object_cache >( object_cache_bytes ) ),
     _ropts( std::make_shared< ::rocksdb::ReadOptions >() )
 {}
 
 rocksdb_backend::~rocksdb_backend()
 {
-  close();
+  try { close(); }
+  catch( ... ) { std::cerr << "[state_db] close failed; preserve database and validate recovery before restart\n"; }
 }
 
 void rocksdb_backend::open( const std::filesystem::path& p )
 {
+  KOINOS_ASSERT( !_db, rocksdb_open_exception, "database already open" );
+  _failed = false;
   KOINOS_ASSERT( p.is_absolute(), rocksdb_open_exception, "path must be absolute, ${p}", ( "p", p.string() ) );
   KOINOS_ASSERT( std::filesystem::exists( p ),
                  rocksdb_open_exception,
@@ -160,10 +136,13 @@ void rocksdb_backend::open( const std::filesystem::path& p )
   options.max_open_files = constants::max_open_files;
   ::rocksdb::DB* db;
 
+  const bool initially_empty = std::filesystem::is_empty(p);
   auto status = ::rocksdb::DB::Open( options, p.string(), defs, &handles, &db );
 
   if( !status.ok() )
   {
+    KOINOS_ASSERT( initially_empty,
+                   rocksdb_open_exception, "existing database failed to open; preserve it for diagnosis" );
     KOINOS_ASSERT( setup_database( p ), rocksdb_setup_exception, "unable to configure rocksdb database" );
 
     status = ::rocksdb::DB::Open( options, p.string(), defs, &handles, &db );
@@ -195,6 +174,8 @@ void rocksdb_backend::open( ::rocksdb::DB& db,
                             ::rocksdb::ColumnFamilyHandle& objects_handle,
                             ::rocksdb::ColumnFamilyHandle& metadata_handle )
 {
+  KOINOS_ASSERT( !_db, rocksdb_open_exception, "database already open" );
+  _failed = false;
   KOINOS_ASSERT( setup_borrowed_database( db, metadata_handle ),
                  rocksdb_setup_exception,
                  "unable to configure borrowed rocksdb database" );
@@ -222,27 +203,44 @@ void rocksdb_backend::close()
 {
   if( _db )
   {
-    store_metadata();
-    flush();
-
-    if( !_borrowed )
-      ::rocksdb::CancelAllBackgroundWork( &*_db, true );
-    _handles.clear();
-    _db.reset();
-    _borrowed = false;
-    std::lock_guard lock( _cache->get_mutex() );
-    _cache->clear();
+    try
+    {
+      check_usable();
+      KOINOS_ASSERT( !_write_batch, rocksdb_session_in_progress, "cannot close an unfinished write session" );
+      store_metadata(); flush();
+    }
+    catch( ... ) { release_database(); throw; }
+    release_database();
   }
 }
 
-void rocksdb_backend::flush()
+void rocksdb_backend::release_database() noexcept
+{
+  if( _db && !_borrowed ) ::rocksdb::CancelAllBackgroundWork( &*_db, true );
+  _write_batch.reset(); _handles.clear(); _db.reset(); _borrowed = false;
+  std::lock_guard lock( _cache->get_mutex() ); _cache->clear();
+}
+
+void rocksdb_backend::check_usable() const
 {
   KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
+  KOINOS_ASSERT( !_failed, rocksdb_write_exception, "failed state session; close and validate persisted data before reuse" );
+}
+
+void rocksdb_backend::abort_write_batch() noexcept
+{ _failed = true; _write_batch.reset(); }
+
+void rocksdb_backend::flush()
+{
+  check_usable();
 
   static const ::rocksdb::FlushOptions flush_options;
 
-  _db->Flush( flush_options, &*_handles[ constants::objects_column_index ] );
-  _db->Flush( flush_options, &*_handles[ constants::metadata_column_index ] );
+  for( auto column: {constants::objects_column_index,constants::metadata_column_index} )
+  {
+    const auto status = _db->Flush( flush_options, &*_handles[column] );
+    KOINOS_ASSERT( status.ok(), rocksdb_write_exception, "state flush failed: ${status}", ("status",status.ToString()) );
+  }
 }
 
 void rocksdb_backend::force_async_writes( bool force )
@@ -252,12 +250,14 @@ void rocksdb_backend::force_async_writes( bool force )
 
 void rocksdb_backend::start_write_batch()
 {
+  check_usable();
   KOINOS_ASSERT( !_write_batch, rocksdb_session_in_progress, "session already in progress" );
   _write_batch.emplace();
 }
 
 void rocksdb_backend::end_write_batch( write_durability durability )
 {
+  check_usable();
   if( _write_batch )
   {
     auto write_options = _wopts;
@@ -265,6 +265,7 @@ void rocksdb_backend::end_write_batch( write_durability durability )
       write_options.sync = true;
 
     auto status = _db->Write( write_options, &*_write_batch );
+    if( !status.ok() ) abort_write_batch();
     KOINOS_ASSERT( status.ok(),
                    rocksdb_write_exception,
                    "unable to write session to rocksdb database"
@@ -275,7 +276,7 @@ void rocksdb_backend::end_write_batch( write_durability durability )
 
 iterator rocksdb_backend::begin()
 {
-  KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
+  check_usable();
 
   auto itr   = std::make_unique< rocksdb_iterator >( _db, _handles[ constants::objects_column_index ], _ropts, _cache );
   itr->_iter = std::unique_ptr< ::rocksdb::Iterator >(
@@ -287,7 +288,7 @@ iterator rocksdb_backend::begin()
 
 iterator rocksdb_backend::end()
 {
-  KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
+  check_usable();
 
   auto itr   = std::make_unique< rocksdb_iterator >( _db, _handles[ constants::objects_column_index ], _ropts, _cache );
   itr->_iter = std::unique_ptr< ::rocksdb::Iterator >(
@@ -298,8 +299,8 @@ iterator rocksdb_backend::end()
 
 void rocksdb_backend::put( const key_type& k, const value_type& v )
 {
-  KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
-  bool exists = get( k );
+  check_usable();
+  bool exists = static_cast<bool>( get( k ) );
 
   ::rocksdb::Status status;
 
@@ -328,36 +329,35 @@ void rocksdb_backend::put( const key_type& k, const value_type& v )
   _cache->put( k, std::make_shared< const object_cache::value_type >( v ) );
 }
 
-const rocksdb_backend::value_type* rocksdb_backend::get( const key_type& k ) const
+rocksdb_backend::value_ptr rocksdb_backend::get( const key_type& k ) const
 {
-  KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
+  check_usable();
 
   std::lock_guard lock( _cache->get_mutex() );
   auto [ cache_hit, ptr ] = _cache->get( k );
   if( cache_hit )
   {
-    if( ptr )
-      return &*ptr;
-
-    return nullptr;
+    return ptr;
   }
 
   value_type value;
   auto status = _db->Get( *_ropts, &*_handles[ constants::objects_column_index ], ::rocksdb::Slice( k ), &value );
 
   if( status.ok() )
-    return &*_cache->put( k, std::make_shared< const object_cache::value_type >( value ) );
+    return _cache->put( k, std::make_shared< const object_cache::value_type >( std::move(value) ) );
   else if( status.IsNotFound() )
     _cache->put( k, std::shared_ptr< const object_cache::value_type >() );
+  else
+    KOINOS_THROW( rocksdb_read_exception, "state read failed: ${status}", ("status",status.ToString()) );
 
   return nullptr;
 }
 
 void rocksdb_backend::erase( const key_type& k )
 {
-  KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
+  check_usable();
 
-  bool exists = get( k );
+  bool exists = static_cast<bool>( get( k ) );
   ::rocksdb::Status status;
 
   if( _write_batch )
@@ -385,7 +385,7 @@ void rocksdb_backend::erase( const key_type& k )
 
 void rocksdb_backend::clear()
 {
-  KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
+  check_usable();
   KOINOS_ASSERT( !_borrowed,
                  rocksdb_internal_exception,
                  "cannot clear borrowed rocksdb column families through state_db backend" );
@@ -403,14 +403,14 @@ void rocksdb_backend::clear()
 
 rocksdb_backend::size_type rocksdb_backend::size() const
 {
-  KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
+  check_usable();
 
   return _size;
 }
 
 iterator rocksdb_backend::find( const key_type& k )
 {
-  KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
+  check_usable();
 
   auto itr = std::make_unique< rocksdb_iterator >( _db, _handles[ constants::objects_column_index ], _ropts, _cache );
   auto itr_ptr = std::unique_ptr< ::rocksdb::Iterator >(
@@ -433,7 +433,7 @@ iterator rocksdb_backend::find( const key_type& k )
 
 iterator rocksdb_backend::lower_bound( const key_type& k )
 {
-  KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
+  check_usable();
 
   auto itr   = std::make_unique< rocksdb_iterator >( _db, _handles[ constants::objects_column_index ], _ropts, _cache );
   itr->_iter = std::unique_ptr< ::rocksdb::Iterator >(
@@ -446,7 +446,7 @@ iterator rocksdb_backend::lower_bound( const key_type& k )
 
 void rocksdb_backend::load_metadata()
 {
-  KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
+  check_usable();
 
   std::string value;
   auto status = _db->Get( *_ropts,
@@ -510,7 +510,7 @@ void rocksdb_backend::load_metadata()
 
 void rocksdb_backend::put_metadata_value( const std::string& key, const std::string& value )
 {
-  KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
+  check_usable();
 
   ::rocksdb::Status status;
 
@@ -536,7 +536,7 @@ void rocksdb_backend::put_metadata_value( const std::string& key, const std::str
 
 void rocksdb_backend::store_metadata()
 {
-  KOINOS_ASSERT( _db, rocksdb_database_not_open_exception, "database not open" );
+  check_usable();
 
   put_metadata_value( constants::size_key, util::converter::as< std::string >( _size ) );
   put_metadata_value( constants::revision_key, util::converter::as< std::string >( revision() ) );

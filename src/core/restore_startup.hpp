@@ -15,6 +15,10 @@ struct RestoreStartupPolicyResult
   bool verify_blocks                       = false;
 };
 
+// For direct restores, reject foreign/malformed generation markers before the
+// DB is opened. Legacy plain-text restore markers retain their existing policy.
+void validate_direct_startup_markers(const std::filesystem::path& basedir);
+
 /**
  * Consume the restore marker and force observer-first startup without changing
  * the explicitly configured block-verification mode.

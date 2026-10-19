@@ -1,4 +1,6 @@
 #include "backup/snapshot_repository.hpp"
+#include "backup/durable_publication.hpp"
+#include "backup/checkpoint_identity.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -6,6 +8,7 @@
 #include <iomanip>
 #include <map>
 #include <memory>
+#include <random>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -26,7 +29,6 @@ namespace koinos::node::backup {
 namespace {
 
 constexpr uint64_t metadata_overhead_bytes = 128ULL * 1024ULL * 1024ULL;
-constexpr uint64_t recommended_min_margin_bytes = 10ULL * 1024ULL * 1024ULL * 1024ULL;
 
 std::string utc_timestamp()
 {
@@ -457,25 +459,20 @@ void validate_restore_relative_path( const std::string& relative_path )
 
 void copy_or_link_object( const std::filesystem::path& source, const std::filesystem::path& destination )
 {
-  std::filesystem::create_directories( destination.parent_path() );
+  create_publication_directories( destination.parent_path() );
   if( std::filesystem::exists( destination ) )
   {
     const auto existing_hash = sha256_file( destination );
     if( existing_hash == destination.filename().string() )
       return;
 
-    std::error_code remove_ec;
-    std::filesystem::remove( destination, remove_ec );
-    if( remove_ec )
-      throw std::runtime_error( "failed to replace corrupt backup object " + destination.string()
-                                + ": " + remove_ec.message() );
+    throw std::runtime_error("existing backup object is corrupt; preserve repository and investigate");
   }
 
-  const auto tmp = destination.parent_path() / ( destination.filename().string() + ".tmp" );
+  const auto tmp = destination.parent_path() / ( destination.filename().string() + ".tmp."
+    + std::to_string(std::random_device{}()) + "." + std::to_string(std::random_device{}()) );
   std::error_code ec;
-  std::filesystem::remove( tmp, ec );
-  ec.clear();
-  std::filesystem::copy_file( source, tmp, std::filesystem::copy_options::overwrite_existing, ec );
+  std::filesystem::copy_file( source, tmp, std::filesystem::copy_options::none, ec );
   if( ec )
     throw std::runtime_error( "failed to copy backup object " + source.string()
                               + " to " + tmp.string() + ": " + ec.message() );
@@ -487,7 +484,9 @@ void copy_or_link_object( const std::filesystem::path& source, const std::filesy
     throw std::runtime_error( "backup object checksum changed while copying " + source.string() );
   }
 
+  sync_publication_file(tmp);
   std::filesystem::rename( tmp, destination );
+  sync_publication_directory(destination.parent_path());
 }
 
 std::string inventory_json( const std::string& backup_id,
@@ -522,7 +521,8 @@ std::string manifest_json( const std::string& backup_id,
                            const RestoreSpaceEstimate& restore_space,
                            uint64_t file_count,
                            uint64_t object_count,
-                           uint64_t total_bytes )
+                           uint64_t total_bytes,
+                           const nlohmann::json& identity )
 {
   std::ostringstream out;
   out << "{\n";
@@ -562,7 +562,9 @@ std::string manifest_json( const std::string& backup_id,
   out << "    \"force_block_producer_disabled_on_first_start\": true\n";
   out << "  }\n";
   out << "}\n";
-  return out.str();
+  auto manifest = nlohmann::json::parse(out.str());
+  for(const auto& [key,value]: identity.items()) manifest["source"][key]=value;
+  return manifest.dump(2) + "\n";
 }
 
 std::string latest_json( const LocalSnapshotResult& result )
@@ -672,15 +674,7 @@ BackupSnapshotSummary read_snapshot_summary( const std::filesystem::path& reposi
 
 void write_file_atomic( const std::filesystem::path& path, const std::string& content )
 {
-  std::filesystem::create_directories( path.parent_path() );
-  const auto tmp = path.parent_path() / ( path.filename().string() + ".tmp" );
-  {
-    std::ofstream out( tmp, std::ios::binary | std::ios::trunc );
-    if( !out )
-      throw std::runtime_error( "failed to write temporary file: " + tmp.string() );
-    out << content;
-  }
-  std::filesystem::rename( tmp, path );
+  durable_atomic_write(path,content);
 }
 
 void write_complete_marker( const std::filesystem::path& snapshot_dir )
@@ -816,7 +810,8 @@ RestoreSpaceEstimate estimate_restore_space( uint64_t restored_database_bytes,
                                              uint64_t object_download_bytes,
                                              uint64_t archive_bytes,
                                              bool streaming_archive,
-                                             uint64_t existing_target_bytes )
+                                             uint64_t existing_target_bytes,
+                                             RestoreReserveProfile reserve_profile )
 {
   RestoreSpaceEstimate estimate;
   estimate.restored_database_bytes = restored_database_bytes;
@@ -833,7 +828,7 @@ RestoreSpaceEstimate estimate_restore_space( uint64_t restored_database_bytes,
                                      + existing_target_bytes
                                      + metadata_overhead_bytes;
 
-  const auto recommended_margin = std::max( recommended_min_margin_bytes, restored_database_bytes / 5 );
+  const auto recommended_margin = restore_recovery_reserve_bytes( restored_database_bytes, reserve_profile );
   estimate.recommended_target_free_bytes = estimate.minimum_target_free_bytes + recommended_margin;
   return estimate;
 }
@@ -1261,6 +1256,10 @@ RestoreActivationResult activate_staged_restore_snapshot( const std::filesystem:
   result.restore_manifest_path = target_basedir / ".teleno-restore-manifest.json";
   result.start_as_observer_first = stage_metadata.value( "start_as_observer_first", true );
 
+  // A later legacy restore must not leave an old direct-generation receipt
+  // attached to its new DB/plain-text marker. Preserve it with the old DB;
+  // the existing observer hold remains in force throughout this transition.
+  preserve_existing_path( target_basedir, pre_restore_dir, ".teleno-direct-restore.json", result.preserved_paths );
   preserve_existing_path( target_basedir, pre_restore_dir, "db", result.preserved_paths );
   preserve_existing_path( target_basedir, pre_restore_dir, "chain/blockchain", result.preserved_paths );
   preserve_existing_path( target_basedir, pre_restore_dir, "chain/genesis_data.json", result.preserved_paths );
@@ -1335,10 +1334,16 @@ LocalSnapshotResult LocalSnapshotRepository::store_checkpoint_snapshot( const Ch
   if( std::filesystem::exists( snapshot_tmp ) || std::filesystem::exists( snapshot_dir ) )
     throw std::runtime_error( "snapshot already exists: " + backup_id );
 
-  std::filesystem::create_directories( snapshot_tmp );
+  create_publication_directories( snapshots_dir );
+  if(!std::filesystem::create_directory(snapshot_tmp))
+    throw std::runtime_error("snapshot generation is already owned by another operation");
+  sync_publication_directory(snapshots_dir);
 
   try
   {
+    const auto genesis = std::filesystem::exists(basedir / "chain/genesis_data.json")
+      ? basedir / "chain/genesis_data.json" : basedir / "genesis_data.json";
+    const auto identity = read_checkpoint_identity(checkpoint.db_dir,genesis);
     auto entries = build_file_inventory( checkpoint, basedir, config_path );
     if( entries.empty() )
       throw std::runtime_error( "backup snapshot inventory is empty" );
@@ -1367,6 +1372,10 @@ LocalSnapshotResult LocalSnapshotRepository::store_checkpoint_snapshot( const Ch
       const auto destination = object_path( _repository_dir, entry.sha256 );
       if( std::filesystem::exists( destination ) )
       {
+        if(std::filesystem::file_size(destination)!=entry.size_bytes || sha256_file(destination)!=entry.sha256)
+          throw std::runtime_error("reused backup object is corrupt; preserve repository and investigate");
+        sync_publication_file(destination);
+        sync_publication_directory(destination.parent_path());
         ++reused_objects;
         continue;
       }
@@ -1413,9 +1422,11 @@ LocalSnapshotResult LocalSnapshotRepository::store_checkpoint_snapshot( const Ch
                                       result.restore_space,
                                       result.file_count,
                                       result.object_count,
-                                      result.total_bytes ) );
+                                      result.total_bytes,
+                                      identity ) );
     write_complete_marker( snapshot_tmp );
     std::filesystem::rename( snapshot_tmp, snapshot_dir );
+    sync_publication_directory(snapshots_dir);
     write_file_atomic( result.latest_path, latest_json( result ) );
     prune_local_snapshot_repository( _repository_dir, cfg.backup.local.retention_count );
 

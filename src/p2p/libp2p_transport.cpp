@@ -14,6 +14,10 @@
 #ifdef KOINOS_HAS_LIBP2P
 
 #include "p2p/gorpc_codec.hpp"
+#include "p2p/peer_rpc_read.hpp"
+#include "p2p/peer_rpc_write.hpp"
+#include "p2p/peer_rpc_client.hpp"
+#include "p2p/sdk_metadata_maintenance.hpp"
 #include "libp2p_transport.hpp"
 
 #include <algorithm>
@@ -211,50 +215,6 @@ void log_libp2p_async_unknown_error( const std::string& operation )
   log_libp2p_async_error( operation, "unknown exception" );
 }
 
-template< typename T, typename Value >
-void safe_set_promise_value( const std::shared_ptr< std::promise< T > >& promise,
-                             Value&& value,
-                             const std::string& operation )
-{
-  if( !promise )
-    return;
-
-  try
-  {
-    promise->set_value( std::forward< Value >( value ) );
-  }
-  catch( const std::exception& e )
-  {
-    log_libp2p_async_error( operation + " promise completion", e );
-  }
-  catch( ... )
-  {
-    log_libp2p_async_unknown_error( operation + " promise completion" );
-  }
-}
-
-template< typename T >
-void safe_set_promise_exception( const std::shared_ptr< std::promise< T > >& promise,
-                                 const std::string& message,
-                                 const std::string& operation )
-{
-  if( !promise )
-    return;
-
-  try
-  {
-    promise->set_exception( std::make_exception_ptr( std::runtime_error( message ) ) );
-  }
-  catch( const std::exception& e )
-  {
-    log_libp2p_async_error( operation + " promise exception", e );
-  }
-  catch( ... )
-  {
-    log_libp2p_async_unknown_error( operation + " promise exception" );
-  }
-}
-
 void safe_stream_close( const std::shared_ptr< libp2p::connection::Stream >& stream,
                         const std::string& operation )
 {
@@ -275,65 +235,8 @@ void safe_stream_close( const std::shared_ptr< libp2p::connection::Stream >& str
   }
 }
 
-void safe_stream_write_some( const std::shared_ptr< libp2p::connection::Stream >& stream,
-                             const std::shared_ptr< libp2p::Bytes >& bytes,
-                             const std::shared_ptr< std::promise< outcome::result< size_t > > >& promise,
-                             const std::string& operation )
-{
-  if( !stream || !bytes )
-  {
-    safe_set_promise_exception( promise, operation + ": stream or buffer unavailable", operation );
-    return;
-  }
-
-  try
-  {
-    stream->writeSome( *bytes, bytes->size(),
-      [bytes, promise, operation]( outcome::result< size_t > result ) mutable {
-        safe_set_promise_value( promise, std::move( result ), operation );
-      }
-    );
-  }
-  catch( const std::exception& e )
-  {
-    safe_set_promise_exception( promise, operation + ": " + e.what(), operation );
-  }
-  catch( ... )
-  {
-    safe_set_promise_exception( promise, operation + ": unknown exception", operation );
-  }
-}
-
-void safe_stream_read_some( const std::shared_ptr< libp2p::connection::Stream >& stream,
-                            const std::shared_ptr< libp2p::Bytes >& buffer,
-                            const std::shared_ptr< std::promise< outcome::result< size_t > > >& promise,
-                            const std::string& operation )
-{
-  if( !stream || !buffer )
-  {
-    safe_set_promise_exception( promise, operation + ": stream or buffer unavailable", operation );
-    return;
-  }
-
-  try
-  {
-    stream->readSome( *buffer, buffer->size(),
-      [buffer, promise, operation]( outcome::result< size_t > result ) mutable {
-        safe_set_promise_value( promise, std::move( result ), operation );
-      }
-    );
-  }
-  catch( const std::exception& e )
-  {
-    safe_set_promise_exception( promise, operation + ": " + e.what(), operation );
-  }
-  catch( ... )
-  {
-    safe_set_promise_exception( promise, operation + ": unknown exception", operation );
-  }
-}
-
-void safe_stream_write_and_close( const std::shared_ptr< libp2p::connection::Stream >& stream,
+void safe_stream_write_and_close( boost::asio::io_context& io,
+                                  const std::shared_ptr< libp2p::connection::Stream >& stream,
                                   const std::shared_ptr< libp2p::Bytes >& bytes,
                                   const std::string& operation )
 {
@@ -348,7 +251,7 @@ void safe_stream_write_and_close( const std::shared_ptr< libp2p::connection::Str
 
   try
   {
-    stream->writeSome( *bytes, bytes->size(),
+    koinos::node::p2p::detail::write_rpc_frame( io, stream, bytes,
       [stream, bytes, operation]( outcome::result< size_t > result ) mutable {
         try
         {
@@ -403,12 +306,15 @@ void prepare_libp2p_logging()
 }
 
 auto make_libp2p_injector( const std::shared_ptr< boost::asio::io_context >& io,
-                           const std::string& protocol_version )
+                           const std::string& protocol_version,
+                           const std::shared_ptr<koinos::node::p2p::detail::SdkAddressBudget>& address_budget )
 {
   // The injector owns shared-scoped cpp-libp2p dependencies, including TLS and
   // scheduler state used by async callbacks after the host has started.
   return libp2p::injector::makeHostInjector< boost::di::extension::shared_config >(
     boost::di::bind< boost::asio::io_context >.to( io )[ boost::di::override ],
+    boost::di::bind< koinos::node::p2p::detail::SdkAddressBudget >.to( address_budget )[ boost::di::override ],
+    boost::di::bind< libp2p::peer::AddressRepository >.to< koinos::node::p2p::detail::SdkAddressRepository >()[ boost::di::override ],
     libp2p::injector::useLibp2pClientVersion( libp2p::Libp2pClientVersion{ protocol_version } ),
     libp2p::injector::useLayerAdaptors<>(),
     libp2p::injector::useMuxerAdaptors< libp2p::muxer::Yamux >(),
@@ -421,25 +327,44 @@ namespace koinos::node::p2p {
 
 using Libp2pInjector = decltype( make_libp2p_injector(
   std::declval< const std::shared_ptr< boost::asio::io_context >& >(),
-  std::declval< const std::string& >() ) );
+  std::declval< const std::string& >(),
+  std::declval< const std::shared_ptr<detail::SdkAddressBudget>& >() ) );
 
 struct Libp2pTransport::Libp2pRuntime
 {
   Libp2pInjector injector;
   libp2p::protocol::kademlia::Config kademlia_config;
+  boost::signals2::scoped_connection address_advice;
+  std::shared_ptr<boost::asio::steady_timer> metadata_timer;
 
   Libp2pRuntime( const std::shared_ptr< boost::asio::io_context >& io,
-                 const std::string& protocol_version )
-    : injector( make_libp2p_injector( io, protocol_version ) )
+                 const std::string& protocol_version,
+                 const std::shared_ptr<detail::SdkAddressBudget>& address_budget )
+    : injector( make_libp2p_injector( io, protocol_version, address_budget ) )
   {}
+};
+
+struct Libp2pTransport::RpcClientContext
+{
+  std::shared_ptr< boost::asio::io_context > io;
+  std::shared_ptr< libp2p::Host > host;
+  std::shared_ptr< detail::RpcClientRegistry > calls;
+  std::shared_ptr< detail::DialRegistry > dials;
+  std::shared_ptr< std::atomic< bool > > active;
 };
 
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
 
-Libp2pTransport::Libp2pTransport( const Config& config ) : _config( config )
+Libp2pTransport::Libp2pTransport( const Config& config ) : _config( config ),
+  _dial_budget(std::make_shared<detail::DialBudget>(config.max_pending_dials, config.pending_dial_peer_capacity_bytes)),
+  _peer_snapshot_budget(std::make_shared<detail::PeerSnapshotBudget>(config.max_peer_snapshots, config.peer_snapshot_entries, config.peer_snapshot_capacity_bytes)),
+  _sdk_address_budget(std::make_shared<detail::SdkAddressBudget>(config.sdk_address_limits)),
+  _known_peers(config.max_known_peer_advice, config.known_peer_advice_capacity_bytes)
 {
+  if(!config.sdk_metadata_collection_interval_ms)
+    throw std::invalid_argument("SDK metadata collection interval must be positive");
   _io = std::make_shared< boost::asio::io_context >();
 }
 
@@ -454,17 +379,62 @@ Libp2pTransport::~Libp2pTransport()
 
 void Libp2pTransport::start()
 {
+  if( _running ) return;
+  std::shared_ptr<std::promise<void>> runner_ready;
+  try
+  {
+  auto active = std::make_shared< std::atomic< bool > >( true );
+  _rpc_read_active = std::move( active );
   _running = true;
+  _rpc_reads.clear();
   _io->restart();
   _work_guard.emplace( _io->get_executor() );
   prepare_libp2p_logging();
 
   // Create libp2p host via a runtime-owned injector. QUIC is disabled in the
   // Koinos-compatible cpp-libp2p build, so bind the transport stack to TCP only.
-  _runtime = std::make_unique< Libp2pRuntime >( _io, _config.protocol_version );
+  _runtime = std::make_unique< Libp2pRuntime >( _io, _config.protocol_version, _sdk_address_budget );
   auto& injector = _runtime->injector;
 
   _host = injector.create< std::shared_ptr< libp2p::Host > >();
+
+  auto& addresses=dynamic_cast<detail::SdkAddressRepository&>(_host->getPeerRepository().getAddressRepository());
+  std::vector<libp2p::peer::PeerId> roots;
+  for(const auto* configured:{&_config.seed_peers,&_config.discovery_peers})
+    for(const auto& address:*configured)
+      if(auto peer=peer_info_from_multiaddress(address))roots.push_back(peer->id);
+  addresses.protect([roots=std::move(roots),self=_host->getId(),weak=std::weak_ptr(_host)](const auto& id){
+    if(id==self||std::find(roots.begin(),roots.end(),id)!=roots.end())return true;
+    if(auto host=weak.lock())return host->getNetwork().getConnectionManager().getBestConnectionForPeer(id)!=nullptr;
+    return false;
+  });
+  _runtime->metadata_timer=std::make_shared<boost::asio::steady_timer>(*_io);
+  detail::arm_sdk_metadata_maintenance(_runtime->metadata_timer,std::weak_ptr(_host),_rpc_read_active,
+    _sdk_address_budget,std::chrono::milliseconds(_config.sdk_metadata_collection_interval_ms));
+
+  // Observe SDK advice on its serialized mutation path. Projection readers never
+  // inspect the SDK's unsynchronized repositories or mutable host pointer.
+  _runtime->address_advice = _host->getPeerRepository().getAddressRepository().onAddressAdded(
+    [this, active = _rpc_read_active, self = _host->getId()](const auto& id, const auto& address) noexcept {
+      if(!active->load(std::memory_order_acquire)||id==self)return;
+      try
+      {
+        const auto& raw=address.getStringAddress();const auto limit=_config.known_peer_advice_capacity_bytes;
+        // Conservative base58/conversion workspace check before making strings.
+        if(limit<10||raw.size()>limit-10||id.toVector().size()>(limit-10-raw.size())/4)
+        {std::lock_guard lock(_peers_mutex);_known_peers.note_capacity_refusal();return;}
+        auto peer_id=id.toBase58();auto dial_address=with_peer_id_component(std::string(raw),peer_id);
+        PeerID peer{std::move(peer_id),std::move(dial_address)};std::lock_guard lock(_peers_mutex);
+        if(!active->load(std::memory_order_acquire))return;
+        _known_peers.note_sdk_observation();
+        auto current=_connected.find(peer.id);
+        if(current!=_connected.end()&&current->second.address.empty())
+        {std::string ready(peer.address);current->second.address.swap(ready);}
+        remember_known_peer_locked(peer);
+      }
+      catch(const std::bad_alloc&){std::lock_guard lock(_peers_mutex);_known_peers.note_allocation_refusal();}
+      catch(...){/* Optional observation must never unwind an SDK mutation. */}
+    });
 
   LOG( info ) << "[p2p/transport] Host peer ID: " << _host->getId().toBase58();
   LOG( info ) << "[p2p/transport] Advertised protocol version: " << _config.protocol_version;
@@ -499,7 +469,8 @@ void Libp2pTransport::start()
   // Register peer RPC protocol handler (server side)
   _host->setProtocolHandler(
     { PEER_RPC_PROTOCOL },
-    [this]( libp2p::StreamAndProtocol stream_and_proto ) {
+    [this, active = _rpc_read_active]( libp2p::StreamAndProtocol stream_and_proto ) {
+      if( !active->load( std::memory_order_acquire ) ) return;
       try
       {
         handle_incoming_rpc( std::move( stream_and_proto.stream ) );
@@ -518,7 +489,8 @@ void Libp2pTransport::start()
   // Set up connection handlers via Host. The returned event handles must stay
   // alive for the subscriptions to remain active.
   _new_connection_subscription = _host->setOnNewConnectionHandler(
-    [this]( libp2p::peer::PeerInfo&& peer_info ) {
+    [this, active = _rpc_read_active]( libp2p::peer::PeerInfo&& peer_info ) {
+      if( !active->load(std::memory_order_acquire) ) return;
       try
       {
         auto id_str = peer_info.id.toBase58();
@@ -529,12 +501,7 @@ void Libp2pTransport::start()
         bool inserted = false;
         {
           std::lock_guard lock( _peers_mutex );
-          auto it = _connected.find( id_str );
-          inserted = it == _connected.end();
-          if( inserted || it->second.address.empty() )
-            _connected[ id_str ] = peer;
-          if( !address.empty() )
-            _known_peers[ id_str ] = peer;
+          inserted = publish_connected_peer_locked(peer);
         }
         if( inserted && _on_connected )
           _on_connected( peer );
@@ -552,7 +519,8 @@ void Libp2pTransport::start()
 
   _peer_disconnected_subscription = _host->getBus()
     .getChannel< libp2p::event::network::OnPeerDisconnectedChannel >()
-    .subscribe( [this]( const libp2p::peer::PeerId& peer_id ) {
+    .subscribe( [this, active = _rpc_read_active]( const libp2p::peer::PeerId& peer_id ) {
+      if( !active->load(std::memory_order_acquire) ) return;
       try
       {
         auto id_str = peer_id.toBase58();
@@ -565,11 +533,13 @@ void Libp2pTransport::start()
           {
             peer = it->second;
             _connected.erase( it );
+            _known_peers.disconnected(id_str);
             erased = true;
           }
-          _connecting.erase( id_str );
+
         }
 
+        if( auto client = std::atomic_load(&_rpc_client_context) ) client->dials->cancel_peer(id_str);
         if( erased && _on_disconnected )
           _on_disconnected( peer );
       }
@@ -712,7 +682,7 @@ void Libp2pTransport::start()
 	        _kademlia->addPeer( peer_info.value(), true, false );
 	        auto id = peer_info->id.toBase58();
 	        std::lock_guard lock( _peers_mutex );
-	        _known_peers[ id ] = PeerID{ id, peer_address };
+	        remember_known_peer_locked(PeerID{ id, peer_address },true);
 	      }
 
 	      auto bootstrap_result = _kademlia->bootstrap();
@@ -734,78 +704,6 @@ void Libp2pTransport::start()
 	    }
 	  }
 
-	  // Connect to seed peers
-	  for( const auto& seed: _config.seed_peers )
-  {
-    DialMultiaddresses dial_addresses;
-    try
-    {
-      dial_addresses = dial_multiaddresses_from( seed );
-    }
-    catch( const std::exception& e )
-    {
-      LOG( warning ) << "[p2p/transport] Failed to prepare seed address: " << seed
-                     << " error=" << e.what();
-      continue;
-    }
-
-    auto peer_id_str = dial_addresses.addresses.front().getPeerId();
-    if( !peer_id_str.has_value() )
-      continue;
-
-    auto peer_id = libp2p::peer::PeerId::fromBase58( peer_id_str.value() );
-    if( !peer_id.has_value() )
-      continue;
-
-    if( dial_addresses.resolved_dns )
-      LOG( info ) << "[p2p/transport] Resolved seed " << seed << " to "
-                  << dial_addresses.address_strings.front();
-
-    libp2p::peer::PeerInfo peer_info{ peer_id.value(), dial_addresses.addresses };
-
-    try
-    {
-      _host->connect( peer_info, [this, seed, id = peer_id_str.value()]( auto&& result ) {
-        try
-        {
-          if( result.has_value() )
-          {
-            PeerID peer{ id, seed };
-            {
-              std::lock_guard lock( _peers_mutex );
-              _connected[ id ] = peer;
-              _known_peers[ id ] = peer;
-            }
-            if( _on_connected )
-              _on_connected( peer );
-            LOG( info ) << "[p2p/transport] Connected to seed: " << seed;
-          }
-          else
-            LOG( warning ) << "[p2p/transport] Failed to connect to seed: " << seed
-                           << " error=" << result.error().message();
-        }
-        catch( const std::exception& e )
-        {
-          LOG( warning ) << "[p2p/transport] Seed connect callback failed: " << e.what();
-        }
-        catch( ... )
-        {
-          LOG( warning ) << "[p2p/transport] Seed connect callback failed: unknown exception";
-        }
-      } );
-    }
-    catch( const std::exception& e )
-    {
-      LOG( warning ) << "[p2p/transport] Failed to start seed connection: "
-                     << seed << " error=" << e.what();
-    }
-    catch( ... )
-    {
-      LOG( warning ) << "[p2p/transport] Failed to start seed connection: "
-                     << seed << " error=unknown exception";
-    }
-  }
-
   // cpp-libp2p connection and muxer state is not safe to drive from multiple
   // io_context runners; keep all libp2p callbacks serialized on one thread.
   unsigned int thread_count = 1;
@@ -815,43 +713,143 @@ void Libp2pTransport::start()
                 << " IO threads; using serialized cpp-libp2p runner count "
                 << thread_count;
   }
+  runner_ready = std::make_shared<std::promise<void>>();
+  auto readiness = runner_ready->get_future().share();
   for( unsigned int i = 0; i < thread_count; ++i )
-    _io_threads.emplace_back( [this]() { _io->run(); } );
+    _io_threads.emplace_back( [this, readiness]() { readiness.wait();_io->run(); } );
 
+  auto client = std::make_shared< RpcClientContext >();
+  client->io = _io;client->host = _host;client->active = _rpc_read_active;
+  client->calls = std::make_shared< detail::RpcClientRegistry >( *_io, _rpc_read_active );
+  client->dials = std::make_shared< detail::DialRegistry >(_dial_budget, _rpc_read_active);
+  std::atomic_store( &_rpc_client_context, std::move( client ) );
+  // Seed and later reconnect work share the same native admission/ownership.
+  for( const auto& seed: _config.seed_peers )
+  {
+    try
+    {
+      // Use the pinned SDK's syntax/identity rules, including legacy /ipfs/.
+      // This trusted-config identity prepass is outside the dial lease ledger;
+      // native admission still precedes DNS and explicit dial preparation.
+      auto address = libp2p::multi::Multiaddress::create(seed);
+      if( !address.has_value() ) throw std::runtime_error("Invalid seed multiaddress: " + seed);
+      auto id = address.value().getPeerId();
+      if( id )
+      {
+        PeerID target{*id,seed};
+        {std::lock_guard lock(_peers_mutex);remember_known_peer_locked(target,true);}
+        connect_peer(target);
+      }
+    }
+    catch( const std::bad_alloc& ) {} // Optional startup advice; ordinary reconnect can try later.
+    catch( const LocalTransportUnavailable& ) {}
+    catch( const std::exception& e )
+    { LOG(warning) << "[p2p/transport] Failed to prepare seed connection: " << e.what(); }
+  }
+  // Seed publication/context initialization precedes SDK callbacks, matching
+  // the historical startup order; implicit GossipSub bootstrap has a separate budget gap.
+  runner_ready->set_value();
   LOG( info ) << "[p2p/transport] Started with " << thread_count << " IO threads";
+  }
+  catch( ... )
+  {
+    auto failure = std::current_exception();
+    // A partially initialized runner must wake before stop posts its drain barrier.
+    try { if(runner_ready)runner_ready->set_value(); } catch( ... ) {}
+    try { stop(); } catch( ... ) {}
+    std::rethrow_exception(failure);
+  }
 }
 
 void Libp2pTransport::stop()
 {
-  if( !_running.exchange( false ) )
-    return;
+  if( _io->get_executor().running_in_this_thread() )
+    throw std::logic_error( "Libp2pTransport::stop requires the external lifecycle owner" );
+  if( !_running.exchange( false ) ) return;
+  auto client = std::atomic_exchange( &_rpc_client_context, std::shared_ptr< RpcClientContext >() );
+  if( client ) { client->dials->stop_accepting();client->calls->stop_accepting(); }
+  _rpc_read_active->store( false, std::memory_order_release );
 
-  _block_sub.reset();
-  _tx_sub.reset();
+  auto cleanup = [this, client]() noexcept {
+    auto attempt = []( const char* label, auto&& action ) noexcept {
+      try { action(); }
+      catch( ... )
+      {
+        try { LOG( warning ) << "[p2p/transport] Shutdown cleanup failed: " << label; }
+        catch( ... ) {}
+      }
+    };
+    if(_runtime&&_runtime->metadata_timer)
+      attempt("metadata timer",[this]{boost::system::error_code error;_runtime->metadata_timer->cancel(error);});
+    if(_host)
+      attempt("address retirement",[this]{dynamic_cast<detail::SdkAddressRepository&>(_host->getPeerRepository().getAddressRepository()).retire();});
+    if( client ) client->calls->cancel_all();
+    for( const auto& weak: _rpc_reads )
+      if( auto read = weak.lock() )
+        read->cancel( detail::RpcRequestReadError::Reason::cancelled, true );
+    std::vector< std::weak_ptr< detail::RpcRequestRead > >().swap( _rpc_reads );
+    _block_sub.reset();
+    _tx_sub.reset();
+    if( _gossip )
+    {
+      attempt( "gossip", [this] { _gossip->stop(); } );
+      _gossip.reset();
+    }
+    _kademlia.reset();
+    attempt( "connection subscription", [this] { _new_connection_subscription.unsubscribe(); } );
+    attempt( "disconnection subscription", [this] { _peer_disconnected_subscription.unsubscribe(); } );
+    if( _runtime ) _runtime->address_advice.disconnect();
+    if( _host )
+    {
+      attempt( "host", [this] { _host->stop(); } );
+      // The pinned SDK's Host::stop stops listeners only. Established Yamux
+      // connections otherwise retain pending reads, their scheduler and I/O
+      // context across stop/restart. Close them on their serialized runner.
+      attempt( "connection inventory", [this, &attempt] {
+        auto& manager = _host->getNetwork().getConnectionManager();
+        for( const auto& connection: manager.getConnections() )
+          if( connection && !connection->isClosed() )
+            attempt( "connection", [&] {
+              auto peer = connection->remotePeer();
+              if( peer.has_value() ) manager.closeConnectionsToPeer( peer.value() );
+              else (void)connection->close();
+            } );
+      } );
+      _host.reset();
+    }
+  };
 
-	  if( _gossip )
-	  {
-	    _gossip->stop();
-	    _gossip.reset();
-	  }
-
-	  _kademlia.reset();
-
-  _new_connection_subscription.unsubscribe();
-  _peer_disconnected_subscription.unsubscribe();
-
-	  if( _host )
+  bool cleaned = false;
+  // Cancel RPC reads and stop SDK services on their serialized runner. The
+  // acknowledgement follows immediately queued cancellation completions.
+  if( !_io_threads.empty() && !_io->stopped() )
   {
-    _host->stop();
-    _host.reset();
+    try
+    {
+      auto done = std::make_shared< std::promise< void > >();
+      auto drained = done->get_future();
+      boost::asio::post( *_io, [this, cleanup, done] {
+        cleanup();
+        try { boost::asio::post( *_io, [done] { done->set_value(); } ); }
+        catch( ... ) { done->set_value(); }
+      } );
+      drained.get();
+      cleaned = true;
+    }
+    catch( ... ) {} // Join the runner before allocation-free fallback cleanup.
   }
 
   _work_guard.reset();
   _io->stop();
-  for( auto& t: _io_threads )
-    if( t.joinable() )
-      t.join();
+  for( auto& thread: _io_threads )
+    if( thread.joinable() ) thread.join();
   _io_threads.clear();
+  if( !cleaned ) cleanup();
+  {
+    std::lock_guard lock( _peers_mutex );
+    _connected.clear();
+    _known_peers.disconnected_all();
+  }
   _runtime.reset();
 }
 
@@ -859,113 +857,115 @@ void Libp2pTransport::stop()
 // Peer management
 // ---------------------------------------------------------------------------
 
+void Libp2pTransport::remember_known_peer_locked( const PeerID& peer, bool seed ) noexcept
+{
+  if(peer.address.empty())return;
+  _known_peers.protect(peer.id,seed,_connected.count(peer.id)!=0);
+  if(!_known_peers.remember(peer,seed,_connected.count(peer.id)!=0))
+    _dial_budget->note(detail::DialBudget::Event::retention_bypass);
+}
+
+bool Libp2pTransport::publish_connected_peer_locked( const PeerID& peer )
+{
+  auto it = _connected.find(peer.id);
+  const bool inserted = it == _connected.end();
+  if( inserted ) _connected.emplace(peer.id, peer);
+  else if( it->second.address.empty() && !peer.address.empty() )
+  {
+    PeerID ready(peer);it->second.id.swap(ready.id);it->second.address.swap(ready.address);
+  }
+  remember_known_peer_locked(peer);
+  return inserted;
+}
+
 void Libp2pTransport::connect_peer( const PeerID& peer )
 {
+  auto client = std::atomic_load(&_rpc_client_context);
+  if( !client || !client->active->load(std::memory_order_acquire) ) throw LocalTransportUnavailable();
+  std::shared_ptr<detail::DialBudget::Lease> lease;
   {
-    std::lock_guard lock( _peers_mutex );
-    if( _connected.count( peer.id ) || _connecting.count( peer.id ) )
-      return;
-    _connecting.insert( peer.id );
-    if( !peer.address.empty() )
-      _known_peers[ peer.id ] = peer;
+    std::lock_guard lock(_peers_mutex);
+    if( _connected.count(peer.id) ) return;
+    lease = client->dials->admit(peer);
   }
-
-  DialMultiaddresses dial_addresses;
+  if( !lease ) return; // This generation already owns this peer's pending attempt.
   try
   {
-    dial_addresses = dial_multiaddresses_from( peer.address );
-  }
-  catch( const std::exception& e )
-  {
-    std::lock_guard lock( _peers_mutex );
-    _connecting.erase( peer.id );
-    throw std::runtime_error( e.what() );
-  }
-
-  auto peer_id_str = dial_addresses.addresses.front().getPeerId();
-  if( !peer_id_str.has_value() )
-  {
-    std::lock_guard lock( _peers_mutex );
-    _connecting.erase( peer.id );
-    throw std::runtime_error( "Multiaddr has no peer ID: " + peer.address );
-  }
-
-  auto peer_id = libp2p::peer::PeerId::fromBase58( peer_id_str.value() );
-  if( !peer_id.has_value() )
-  {
-    std::lock_guard lock( _peers_mutex );
-    _connecting.erase( peer.id );
-    throw std::runtime_error( "Invalid peer ID in multiaddr: " + peer.address );
-  }
-
-  if( dial_addresses.resolved_dns )
-    LOG( info ) << "[p2p/transport] Resolved peer " << peer.address << " to "
-                << dial_addresses.address_strings.front();
-
-  libp2p::peer::PeerInfo peer_info{ peer_id.value(), dial_addresses.addresses };
-  boost::asio::post( *_io, [this, host = _host, peer, peer_info = std::move( peer_info )]() mutable {
-    try
-    {
-      host->connect( peer_info, [this, peer]( auto&& result ) {
-        try
-        {
+    // Admission precedes owned copies, DNS and queue publication. DNS and SDK
+    // representations remain separate unbounded byte axes, not this ledger.
+    auto addresses = dial_multiaddresses_from(lease->peer.address);
+    if( addresses.addresses.empty() ) throw std::runtime_error("Dial multiaddress has no addresses");
+    auto id = addresses.addresses.front().getPeerId();
+    if( !id ) throw std::runtime_error("Multiaddr has no peer ID: " + lease->peer.address);
+    auto parsed = libp2p::peer::PeerId::fromBase58(*id);
+    if( !parsed.has_value() ) throw std::runtime_error("Invalid peer ID in multiaddr: " + lease->peer.address);
+    if( *id != lease->peer.id ) throw std::invalid_argument("Peer identity does not match dial multiaddress");
+    libp2p::peer::PeerInfo info{parsed.value(), std::move(addresses.addresses)};
+    auto work = [this, client, lease, info = std::move(info)]() mutable {
+      if( !client->dials->eligible(lease) ) { client->dials->retire(lease);return; }
+      try
+      {
+        { std::lock_guard lock(_peers_mutex);remember_known_peer_locked(lease->peer); }
+        // The SDK stores this callback. A weak context avoids a host -> callback
+        // -> context -> host cycle; the lease alone retains its budget credits.
+        client->host->connect(info, [this, weak = std::weak_ptr<RpcClientContext>(client), lease](auto&& result) {
+          auto current = weak.lock();
+          if( !current || !current->active->load(std::memory_order_acquire) )
           {
-            std::lock_guard lock( _peers_mutex );
-            _connecting.erase( peer.id );
+            if( result.has_value() && result.value() )
+              try { (void)result.value()->close(); } catch( ... ) {}
+            return; // No access to the transport owner after generation retirement.
           }
-
-          if( result.has_value() )
+          if( !current->dials->eligible(lease) ) return;
+          struct Retire
           {
+            std::shared_ptr<detail::DialRegistry> registry;
+            std::shared_ptr<detail::DialBudget::Lease> lease;
+            ~Retire() { registry->retire(lease); }
+          } done{current->dials, lease};
+          try
+          {
+            if( result.has_value() && result.value() && !result.value()->isClosed() )
             {
-              std::lock_guard lock( _peers_mutex );
-              _connected[ peer.id ] = peer;
-              if( !peer.address.empty() )
-                _known_peers[ peer.id ] = peer;
+              bool inserted;
+              { std::lock_guard lock(_peers_mutex);inserted = publish_connected_peer_locked(lease->peer); }
+              if( inserted && _on_connected ) _on_connected(lease->peer);
             }
-            if( _on_connected )
-              _on_connected( peer );
-          }
-          else
-            LOG( warning ) << "[p2p/transport] Failed to connect to peer: " << peer.address
+            else if( !result.has_value() )
+              LOG(warning) << "[p2p/transport] Failed to connect to peer: " << lease->peer.address
                            << " error=" << result.error().message();
-        }
-        catch( const std::exception& e )
-        {
-          LOG( warning ) << "[p2p/transport] Peer connect callback failed: " << e.what();
-          std::lock_guard lock( _peers_mutex );
-          _connecting.erase( peer.id );
-        }
-        catch( ... )
-        {
-          LOG( warning ) << "[p2p/transport] Peer connect callback failed: unknown exception";
-          std::lock_guard lock( _peers_mutex );
-          _connecting.erase( peer.id );
-        }
-      } );
-    }
-    catch( const std::exception& e )
-    {
-      LOG( warning ) << "[p2p/transport] Failed to start peer connection: "
-                     << peer.address << " error=" << e.what();
-      std::lock_guard lock( _peers_mutex );
-      _connecting.erase( peer.id );
-    }
-    catch( ... )
-    {
-      LOG( warning ) << "[p2p/transport] Failed to start peer connection: "
-                     << peer.address << " error=unknown exception";
-      std::lock_guard lock( _peers_mutex );
-      _connecting.erase( peer.id );
-    }
-  } );
+          }
+          catch( const std::bad_alloc& )
+          { _dial_budget->note(detail::DialBudget::Event::completion_exception); }
+          catch( ... )
+          { _dial_budget->note(detail::DialBudget::Event::completion_exception); }
+          // An external notification may already have effects; never invoke it twice.
+        });
+      }
+      catch( ... )
+      { _dial_budget->note(detail::DialBudget::Event::setup_exception);client->dials->retire(lease); }
+    };
+    // Stop closes admission under this same mutex before posting its drain barrier.
+    client->dials->publish(lease, [&] { boost::asio::post(*client->io, std::move(work)); });
+  }
+  catch( ... )
+  { _dial_budget->note(detail::DialBudget::Event::setup_exception);client->dials->retire(lease);throw; }
 }
 
 void Libp2pTransport::disconnect_peer( const PeerID& peer )
 {
+  auto client = std::atomic_load(&_rpc_client_context);
+  if( !client ) return;
+  client->dials->cancel_peer(peer.id);
   auto pid = libp2p::peer::PeerId::fromBase58( peer.id );
-  if( pid.has_value() && _host && _io )
+  if( pid.has_value() && client && client->active->load(std::memory_order_acquire) )
   {
-    boost::asio::post( *_io, [host = _host, peer, pid = pid.value()] {
+    try
+    {
+    client->dials->publish_control([&] {
+    boost::asio::post( *client->io, [client, peer, pid = pid.value()] {
+      if( !client->active->load(std::memory_order_acquire) ) return;
+      auto& host = client->host;
       try
       {
         host->disconnect( pid );
@@ -981,18 +981,23 @@ void Libp2pTransport::disconnect_peer( const PeerID& peer )
                      << peer.id << ": unknown exception";
       }
     } );
+    });
+    }
+    catch( const LocalTransportUnavailable& ) { return; }
   }
 
-  PeerID disconnected_peer = peer;
+  PeerID disconnected_peer;
   bool was_connected       = false;
   {
     std::lock_guard lock( _peers_mutex );
-    _connecting.erase( peer.id );
+    if( !client->active->load(std::memory_order_acquire)
+        || std::atomic_load(&_rpc_client_context).get() != client.get() ) return;
     auto it = _connected.find( peer.id );
     if( it != _connected.end() )
     {
-      disconnected_peer = it->second;
+      disconnected_peer = std::move(it->second);
       _connected.erase( it );
+      _known_peers.disconnected(peer.id);
       was_connected = true;
     }
   }
@@ -1016,108 +1021,36 @@ void Libp2pTransport::disconnect_peer( const PeerID& peer )
 
 uint32_t Libp2pTransport::connected_peer_count() const
 {
-  return static_cast< uint32_t >( connected_peers().size() );
+  std::lock_guard lock(_peers_mutex);
+  return static_cast<uint32_t>(std::min<size_t>(_connected.size(),std::numeric_limits<uint32_t>::max()));
 }
 
-std::vector< PeerID > Libp2pTransport::connected_peers() const
+PeerSnapshot Libp2pTransport::connected_peers() const
 {
-  std::map< std::string, PeerID > peers;
-  {
-    std::lock_guard lock( _peers_mutex );
-    peers = _connected;
-  }
-
-  if( _host )
-  {
-    try
-    {
-      for( const auto& connection: _host->getNetwork().getConnectionManager().getConnections() )
-      {
-        if( !connection || connection->isClosed() )
-          continue;
-
-        auto remote_peer = connection->remotePeer();
-        if( !remote_peer.has_value() )
-          continue;
-
-        auto id = remote_peer.value().toBase58();
-        std::string address;
-        auto remote_address = connection->remoteMultiaddr();
-        if( remote_address.has_value() )
-          address = with_peer_id_component( std::string( remote_address.value().getStringAddress() ), id );
-
-        auto it = peers.find( id );
-        if( it == peers.end() || ( it->second.address.empty() && !address.empty() ) )
-          peers[ id ] = PeerID{ id, address };
-      }
-    }
-    catch( const std::exception& e )
-    {
-      LOG( debug ) << "[p2p/transport] Failed to inspect active connections: " << e.what();
-    }
-    catch( ... )
-    {
-      LOG( debug ) << "[p2p/transport] Failed to inspect active connections: unknown exception";
-    }
-  }
-
-  std::vector< PeerID > result;
-  result.reserve( peers.size() );
-  for( const auto& [id, peer]: peers )
-    result.push_back( peer );
-  return result;
+  std::lock_guard lock(_peers_mutex);size_t bytes=0;
+  for(const auto& [id,peer]:_connected)bytes=detail::PeerSnapshotBudget::add(bytes,detail::PeerSnapshotBudget::strings(peer));
+  return _peer_snapshot_budget->make(_connected.size(),bytes,[&](auto& result){
+    for(const auto& [id,peer]:_connected)result.push_back(peer);
+  });
 }
 
-std::vector< PeerID > Libp2pTransport::known_peers() const
+PeerSnapshot Libp2pTransport::known_peers() const
 {
-  std::map< std::string, PeerID > known;
-  {
-    std::lock_guard lock( _peers_mutex );
-    known = _known_peers;
-  }
-
-  if( _host )
-  {
-    try
-    {
-      const auto self_id = _host->getId();
-      auto& repo = _host->getPeerRepository();
-      for( const auto& peer_id: repo.getPeers() )
-      {
-        if( peer_id == self_id )
-          continue;
-
-        auto addresses = repo.getAddressRepository().getAddresses( peer_id );
-        if( !addresses.has_value() )
-          continue;
-
-        auto id = peer_id.toBase58();
-        for( const auto& address: addresses.value() )
-        {
-          auto address_string = with_peer_id_component( std::string( address.getStringAddress() ), id );
-          if( address_string.empty() )
-            continue;
-
-          known[ id ] = PeerID{ id, address_string };
-          break;
-        }
-      }
-    }
-    catch( const std::exception& e )
-    {
-      LOG( debug ) << "[p2p/transport] Failed to inspect known peers: " << e.what();
-    }
-    catch( ... )
-    {
-      LOG( debug ) << "[p2p/transport] Failed to inspect known peers: unknown exception";
-    }
-  }
-
-  std::vector< PeerID > result;
-  result.reserve( known.size() );
-  for( const auto& [id, peer]: known )
-    result.push_back( peer );
-  return result;
+  std::lock_guard lock(_peers_mutex);
+  // Merge two already-owned sorted sources directly into the result. No
+  // intermediate map, SDK peer/address vectors or external host access.
+  auto project=[&](auto&& emit){
+    auto connected=_connected.begin();
+    _known_peers.visit([&](const PeerID& advice){
+      while(connected!=_connected.end()&&connected->first<advice.id){emit(connected->second);++connected;}
+      if(connected!=_connected.end()&&connected->first==advice.id)
+      {emit(connected->second.address.empty()?advice:connected->second);++connected;}
+      else emit(advice);
+    });
+    while(connected!=_connected.end()){emit(connected->second);++connected;}
+  };
+  size_t entries=0,bytes=0;project([&](const PeerID& peer){entries=detail::PeerSnapshotBudget::add(entries,1);bytes=detail::PeerSnapshotBudget::add(bytes,detail::PeerSnapshotBudget::strings(peer));});
+  return _peer_snapshot_budget->make(entries,bytes,[&](auto& result){project([&](const PeerID& peer){result.push_back(peer);});});
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,166 +1141,101 @@ std::string Libp2pTransport::send_peer_rpc( const PeerID& peer,
                                               const std::string& method,
                                               const std::string& msgpack_args )
 {
+  auto client = std::atomic_load( &_rpc_client_context );
+  if( !client || !client->active->load( std::memory_order_acquire )
+    || client->io->get_executor().running_in_this_thread() )
+    throw LocalTransportUnavailable();
   auto pid = libp2p::peer::PeerId::fromBase58( peer.id );
-  if( !pid.has_value() )
-    throw std::runtime_error( "Invalid peer ID: " + peer.id );
-
-  auto dial_addresses = dial_multiaddresses_from( peer.address );
-
-  if( dial_addresses.resolved_dns )
-    LOG( info ) << "[p2p/transport] Resolved Peer RPC target " << peer.address
-                << " to " << dial_addresses.address_strings.front();
-
-  libp2p::peer::PeerInfo peer_info{ pid.value(), dial_addresses.addresses };
-
-  const auto timeout = std::chrono::seconds( 6 );
-  const auto open_operation = "open Peer RPC stream to peer " + peer.id;
-
-  // Open stream (async — block via promise)
-  auto stream_promise = std::make_shared< std::promise< libp2p::StreamAndProtocolOrError > >();
-  auto stream_future = stream_promise->get_future();
-
-  boost::asio::post( *_io, [host = _host, peer_info, stream_promise, open_operation]() {
-    try
-    {
-      host->newStream(
-        peer_info,
-        { PEER_RPC_PROTOCOL },
-        [stream_promise, open_operation]( libp2p::StreamAndProtocolOrError result ) mutable {
-          safe_set_promise_value( stream_promise, std::move( result ), open_operation );
-        }
-      );
-    }
-    catch( const std::exception& e )
-    {
-      safe_set_promise_exception( stream_promise, open_operation + ": " + e.what(), open_operation );
-    }
-    catch( ... )
-    {
-      safe_set_promise_exception( stream_promise, open_operation + ": unknown exception", open_operation );
-    }
-  } );
-
-  if( stream_future.wait_for( timeout ) != std::future_status::ready )
-    throw std::runtime_error( "Timed out opening Peer RPC stream to peer: " + peer.id );
-
-  auto stream_result = stream_future.get();
-  if( !stream_result.has_value() )
-    throw std::runtime_error( "Failed to open stream to peer " + peer.id + ": "
-                              + stream_result.error().message() );
-
-  auto stream = std::move( stream_result.value().stream );
-
-  // Write request
+  if( !pid.has_value() ) throw std::runtime_error( "Invalid peer ID: " + peer.id );
+  auto addresses = dial_multiaddresses_from( peer.address );
+  libp2p::peer::PeerInfo target{ pid.value(), std::move( addresses.addresses ) };
   auto request = gorpc::encode_request( service, method, msgpack_args );
-  auto req_bytes = std::make_shared< libp2p::Bytes >( request.begin(), request.end() );
-
-  auto write_promise = std::make_shared< std::promise< outcome::result< size_t > > >();
-  auto write_future = write_promise->get_future();
-  const auto write_operation = "write Peer RPC request to peer " + peer.id;
-
-  boost::asio::post( *_io, [stream, req_bytes, write_promise, write_operation]() {
-    safe_stream_write_some( stream, req_bytes, write_promise, write_operation );
-  } );
-
-  if( write_future.wait_for( timeout ) != std::future_status::ready )
-    throw std::runtime_error( "Timed out writing Peer RPC request" );
-
-  auto write_result = write_future.get();
-  if( !write_result.has_value() )
-    throw std::runtime_error( "Failed to write RPC request: " + write_result.error().message() );
-  if( write_result.value() == 0 )
-    throw std::runtime_error( "Failed to write RPC request: zero bytes written" );
-
-  // Read response
-  std::string response_raw;
-  constexpr size_t read_chunk_size = 64 * 1024;
-  constexpr size_t max_response_size = 64 * 1024 * 1024;
-  gorpc::Response decoded_response;
-
-  while( true )
+  auto bytes = std::make_shared< libp2p::Bytes >( request.begin(), request.end() );
+  auto promise = std::make_shared< std::promise< gorpc::Response > >();
+  auto future = promise->get_future();
+  detail::RpcClientOpener opener = [host = client->host, target = std::move( target )]
+    ( detail::RpcClientOpenResult done ) {
+      host->newStream( target, { PEER_RPC_PROTOCOL },
+        [done = std::move( done )]( libp2p::StreamAndProtocolOrError result ) {
+          std::shared_ptr< libp2p::connection::Stream > stream;
+          try
+          {
+            if( !result.has_value() )
+            {
+              if( result.error() == std::errc::not_enough_memory ) throw std::bad_alloc();
+              throw std::runtime_error( "Failed to open stream: " + result.error().message() );
+            }
+            stream = std::move( result.value().stream );
+            detail::RpcClientChannel channel{ stream, stream,
+              [stream] { safe_stream_close( stream, "complete outgoing Peer RPC" ); },
+              [stream] { stream->reset(); } };
+            done( {}, std::move( channel ) );
+          }
+          catch( ... )
+          {
+            if( stream ) try { stream->reset(); } catch( ... ) {}
+            done( std::current_exception(), {} );
+          }
+        } );
+    };
+  auto call = std::make_shared< detail::RpcClientCall >( *client->io, std::move( opener ), bytes,
+    [promise]( std::exception_ptr error, gorpc::Response response ) {
+      if( error ) promise->set_exception( error );
+      else promise->set_value( std::move( response ) );
+    }, client->active );
+  client->calls->submit( call );
+  // Timers cannot run while an unrelated synchronous SDK handler monopolizes
+  // the I/O runner. Bound the external wait too, without touching I/O-owned
+  // fields or blaming a peer for local scheduling failure. Never replay work.
+  if( future.wait_for( std::chrono::seconds( 19 ) ) != std::future_status::ready )
   {
-    auto response_buf = std::make_shared< libp2p::Bytes >( read_chunk_size );
-    auto read_promise = std::make_shared< std::promise< outcome::result< size_t > > >();
-    auto read_future = read_promise->get_future();
-    const auto read_operation = "read Peer RPC response from peer " + peer.id;
-
-    boost::asio::post( *_io, [stream, response_buf, read_promise, read_operation]() {
-      safe_stream_read_some( stream, response_buf, read_promise, read_operation );
-    } );
-
-    if( read_future.wait_for( timeout ) != std::future_status::ready )
-      throw std::runtime_error( "Timed out reading Peer RPC response" );
-
-    auto read_result = read_future.get();
-    if( !read_result.has_value() )
-      throw std::runtime_error( "Failed to read RPC response: " + read_result.error().message() );
-
-    auto bytes_read = read_result.value();
-    if( bytes_read == 0 )
-      throw std::runtime_error( "Peer RPC stream closed before complete response" );
-
-    response_raw.append( response_buf->begin(), response_buf->begin() + bytes_read );
-
-    try
-    {
-      decoded_response = gorpc::decode_response( response_raw );
-      break;
-    }
-    catch( const gorpc::DecodeError& e )
-    {
-      if( !e.truncated() )
-        throw;
-      if( response_raw.size() >= max_response_size )
-        throw std::runtime_error( "Peer RPC response exceeds maximum size" );
-    }
+    client->calls->request_cancel( call );
+    throw LocalTransportUnavailable();
   }
-
-  boost::asio::post( *_io, [stream, peer_id = peer.id]() {
-    safe_stream_close( stream, "close Peer RPC stream to peer " + peer_id );
-  } );
-
-  if( !decoded_response.header.error.empty() )
-    throw std::runtime_error( "Peer RPC error: " + decoded_response.header.error );
-
-  return decoded_response.payload;
+  auto response = future.get();
+  if( !response.header.error.empty() ) throw std::runtime_error( "Peer RPC error: " + response.header.error );
+  return std::move( response.payload );
 }
 
 void Libp2pTransport::handle_incoming_rpc(
   std::shared_ptr< libp2p::connection::Stream > stream )
 {
-  auto buf = std::make_shared< libp2p::Bytes >( 64 * 1024 );
   try
   {
-    stream->readSome( *buf, buf->size(),
-      [this, stream, buf]( outcome::result< size_t > read_result ) {
+    auto active = _rpc_read_active;
+    auto read = std::make_shared< detail::RpcRequestRead >( *_io, stream,
+      [weak_io = std::weak_ptr( _io ), stream, active, handler = _on_peer_rpc_request]
+      ( std::exception_ptr read_error, gorpc::DecodedRequest request ) {
+        if( !active->load( std::memory_order_acquire ) ) return;
+        auto io = weak_io.lock();
+        if( !io ) return;
         try
         {
-          if( !read_result.has_value() )
-          {
-            log_libp2p_async_error( "read incoming Peer RPC request", read_result.error().message() );
-            safe_stream_close( stream, "read incoming Peer RPC request" );
-            return;
-          }
-          if( read_result.value() == 0 )
-          {
-            log_libp2p_async_error( "read incoming Peer RPC request", "stream closed before request" );
-            safe_stream_close( stream, "read incoming Peer RPC request" );
-            return;
-          }
-
-          std::string raw( buf->begin(), buf->begin() + read_result.value() );
-          gorpc::DecodedRequest request;
           try
           {
-            request = gorpc::decode_request( raw );
+            if( read_error )
+              std::rethrow_exception( read_error );
           }
-          catch( const std::exception& e )
+          catch( const detail::RpcRequestReadError& e )
+          {
+            if( e.reason != detail::RpcRequestReadError::Reason::capacity )
+            {
+              log_libp2p_async_error( "read incoming Peer RPC request", e );
+              safe_stream_close( stream, "read incoming Peer RPC request" );
+              return;
+            }
+            gorpc::ServiceID unknown{ "unknown", "unknown" };
+            auto error = gorpc::encode_error_response( unknown, e.what(), gorpc::ErrorType::server );
+            auto bytes = std::make_shared< libp2p::Bytes >( error.begin(), error.end() );
+            safe_stream_write_and_close( *io, stream, bytes, "write Peer RPC capacity error response" );
+            return;
+          }
+          catch( const gorpc::DecodeError& e )
           {
             gorpc::ServiceID unknown{ "unknown", "unknown" };
             auto error = gorpc::encode_error_response( unknown, e.what(), gorpc::ErrorType::server );
             auto error_bytes = std::make_shared< libp2p::Bytes >( error.begin(), error.end() );
-            safe_stream_write_and_close( stream, error_bytes, "write Peer RPC decode error response" );
+            safe_stream_write_and_close( *io, stream, error_bytes, "write Peer RPC decode error response" );
             return;
           }
 
@@ -1377,10 +1245,10 @@ void Libp2pTransport::handle_incoming_rpc(
           std::string response;
           try
           {
-            if( !_on_peer_rpc_request )
+            if( !handler )
               throw std::runtime_error( "peer RPC handler is not configured" );
 
-            auto payload = _on_peer_rpc_request( request.service.name, request.service.method, request.args );
+            auto payload = handler( request.service.name, request.service.method, request.args );
             response = gorpc::encode_success_response( request.service, payload );
           }
           catch( const std::exception& e )
@@ -1395,7 +1263,7 @@ void Libp2pTransport::handle_incoming_rpc(
 
           auto resp_bytes = std::make_shared< libp2p::Bytes >( response.begin(), response.end() );
 
-          safe_stream_write_and_close( stream, resp_bytes, "write Peer RPC response" );
+          safe_stream_write_and_close( *io, stream, resp_bytes, "write Peer RPC response" );
         }
         catch( const std::exception& e )
         {
@@ -1407,8 +1275,13 @@ void Libp2pTransport::handle_incoming_rpc(
           LOG( warning ) << "[p2p/transport] Incoming Peer RPC callback failed: unknown exception";
           safe_stream_close( stream, "incoming Peer RPC callback failure" );
         }
-      }
+      },
+      [stream] { stream->reset(); }, std::chrono::seconds( 6 ), active
     );
+    _rpc_reads.erase( std::remove_if( _rpc_reads.begin(), _rpc_reads.end(),
+      []( const auto& weak ) { return weak.expired(); } ), _rpc_reads.end() );
+    _rpc_reads.emplace_back( read ); // Admit tracking before I/O/handler work.
+    read->begin();
   }
   catch( const std::exception& e )
   {

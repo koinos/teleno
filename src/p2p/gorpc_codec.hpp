@@ -19,6 +19,29 @@ private:
   bool _truncated;
 };
 
+// Incrementally locate a sequence of supported MessagePack objects without
+// allocating, recursing, or revisiting previously supplied bytes. Trailing
+// bytes after the selected object count are not consumed. Typed validation
+// remains in the existing decoders. Do not reuse after a decoding error.
+class ObjectSequenceScanner
+{
+public:
+  explicit ObjectSequenceScanner( uint64_t objects = 1 ) noexcept : _pending( objects ) {}
+  void consume( std::string_view bytes );
+  bool complete() const noexcept { return _pending == 0 && _payload == 0 && _length_left == 0; }
+  size_t consumed() const noexcept { return _consumed; }
+
+private:
+  enum class LengthKind { raw, array, map };
+  void add_children( uint64_t count );
+  uint64_t _pending;
+  uint64_t _payload = 0;
+  size_t _consumed = 0;
+  uint32_t _length = 0;
+  uint8_t _length_left = 0;
+  LengthKind _length_kind = LengthKind::raw;
+};
+
 struct ServiceID
 {
   std::string name;
@@ -91,6 +114,10 @@ std::string encode_error_response( const ServiceID& service,
 
 DecodedRequest decode_request( std::string_view raw );
 Response decode_response( std::string_view raw );
+// Same decoder/validation and trailing-byte behavior, reusing the owned frame's
+// allocation for a payload-dominated frame. Small payloads shed large ignored
+// headers/suffixes instead of retaining their capacity.
+Response decode_response_owned( std::string raw );
 
 AncestorBlockIDRequest decode_get_ancestor_block_id_request( std::string_view payload );
 BlocksRequest decode_get_blocks_request( std::string_view payload );

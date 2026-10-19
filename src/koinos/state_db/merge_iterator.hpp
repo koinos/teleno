@@ -112,6 +112,7 @@ public:
   merge_iterator& operator--();
 
   const value_type& operator*() const;
+  state_delta::value_ptr share_value() const;
 
   const key_type& key() const;
 
@@ -144,7 +145,7 @@ public:
   merge_iterator begin() const;
   merge_iterator end() const;
 
-  const value_type* find( const key_type& key ) const;
+  state_delta::value_ptr find( const key_type& key ) const;
   merge_iterator lower_bound( const key_type& key ) const;
 
 private:

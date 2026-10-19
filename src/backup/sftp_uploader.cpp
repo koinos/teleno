@@ -1,4 +1,5 @@
 #include "backup/sftp_uploader.hpp"
+#include "backup/checkpoint_identity.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1544,6 +1545,9 @@ PublicBootstrapPublishPlan build_public_bootstrap_publish_plan(
   if( !source_files.contains( "files" ) || !source_files.at( "files" ).is_array() )
     throw std::runtime_error( "snapshot files.json has unexpected format" );
 
+  const auto identity = source_manifest.value("source",nlohmann::json::object());
+  validate_public_checkpoint_identity(identity,public_publish.network);
+
   const auto observer_config = read_file( public_publish.observer_config_file );
   validate_public_observer_config( observer_config );
   const auto config_sha = sha256_bytes( observer_config );
@@ -1633,6 +1637,9 @@ PublicBootstrapPublishPlan build_public_bootstrap_publish_plan(
     public_source[ "head_height" ] = optional_json_uint64( source_snapshot, source_chain, { "head_height" } );
   if( public_source.at( "lib_height" ).get< uint64_t >() == 0 )
     public_source[ "lib_height" ] = optional_json_uint64( source_snapshot, source_chain, { "lib_height" } );
+  for(const auto* field:{"identity_version","identity_status","state_revision","state_id","state_merkle_root",
+    "highest_stored_height","highest_stored_id","head_height_kind","lib_height_known","historical_replay_validated"})
+    if(identity.contains(field)) public_source[field]=identity.at(field);
 
   auto public_base_url = public_publish.base_url;
   while( !public_base_url.empty() && public_base_url.back() == '/' )
@@ -1646,6 +1653,9 @@ PublicBootstrapPublishPlan build_public_bootstrap_publish_plan(
     { "network", public_publish.network },
     { "chain_id", public_source.value( "chain_id", std::string{} ) },
   };
+  for(const auto* field:{"identity_version","identity_status","state_revision","state_id","state_merkle_root",
+    "highest_stored_height","highest_stored_id","head_height_kind","head_height","lib_height_known","historical_replay_validated"})
+    if(identity.contains(field)) public_manifest["source"][field]=identity.at(field);
   public_manifest[ "repository" ] = {
     { "type", "public-bootstrap-object-store" },
     { "base_url", public_base_url },

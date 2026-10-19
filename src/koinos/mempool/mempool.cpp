@@ -4,10 +4,12 @@
 #include <algorithm>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <shared_mutex>
 #include <tuple>
 
 #include <boost/multiprecision/cpp_int.hpp>
+#include <google/protobuf/arena.h>
 
 #include <koinos/chain/value.pb.h>
 #include <koinos/mempool/mempool.pb.h>
@@ -24,10 +26,27 @@ namespace detail {
 
 using int128_t = boost::multiprecision::int128_t;
 
+template< typename Record >
+Record& parse_cleanup_record( const std::string& bytes, google::protobuf::Arena& storage )
+{
+  // Own partially decoded repeated fields if the pinned protobuf parser throws.
+  // Return an arena-backed reference without another heap-message copy.
+  auto& record = *google::protobuf::Arena::CreateMessage< Record >( &storage );
+  // Stream conversion can absorb an allocation exception into stream state;
+  // it also ignores ParseFromIstream's result. Never clean up from a partial
+  // or default record after such a failure. Direct parsing propagates allocation
+  // failure, and an ordinary decoding failure explicitly rejects preparation.
+  KOINOS_ASSERT( bytes.size() <= static_cast< size_t >( std::numeric_limits< int >::max() ) &&
+                 record.ParseFromArray( bytes.data(), static_cast< int >( bytes.size() ) ),
+                 state_db::internal_error, "mempool cleanup record cannot be decoded" );
+  return record;
+}
+
 class mempool_impl final
 {
 private:
   state_db::database _db;
+  pending_record_budget _record_budget;
   std::map< crypto::multihash, std::shared_ptr< std::shared_mutex > > _relevant_node_mutexes;
 
   crypto::multihash tmp_id( crypto::multihash id ) const;
@@ -36,9 +55,9 @@ private:
   std::pair< state_db::state_node_ptr, std::shared_ptr< std::shared_mutex > >
   relevant_node( std::optional< crypto::multihash > id, state_db::unique_lock_ptr lock ) const;
 
-  void cleanup_account_resources_on_node( state_db::state_node_ptr node, const pending_transaction_record& record );
+  void cleanup_account_resources_on_node( state_db::abstract_state_node_ptr node, const pending_transaction_record& record );
 
-  uint64_t remove_pending_transactions_on_node( state_db::state_node_ptr node,
+  uint64_t remove_pending_transactions_on_node( state_db::abstract_state_node_ptr node,
                                                 const std::vector< transaction_id_type >& ids );
 
   bool check_pending_account_resources_on_node( state_db::abstract_state_node_ptr node,
@@ -56,13 +75,14 @@ private:
 
   uint64_t add_pending_transaction_to_node( state_db::anonymous_state_node_ptr node,
                                             const pending_transaction_record& record,
+                                            state_db::object_value_ptr encoded_record,
                                             uint64_t max_payer_rc );
 
   uint64_t get_reserved_account_rc_from_node( std::shared_ptr< koinos::state_db::state_node > node,
                                               const account_type& account ) const;
 
 public:
-  mempool_impl( state_db::fork_resolution_algorithm algo );
+  mempool_impl( state_db::fork_resolution_algorithm algo, pending_record_limits record_limits );
   virtual ~mempool_impl();
 
   bool has_pending_transaction( const transaction_id_type& id, std::optional< crypto::multihash > block_id ) const;
@@ -88,6 +108,10 @@ public:
 
   uint64_t get_pending_transaction_count( const std::string& account,
                                           std::optional< crypto::multihash > block_id ) const;
+
+  uint64_t pending_transaction_count() const;
+  retained_memory_usage get_retained_memory_usage() const;
+  pending_record_snapshot get_pending_record_usage() const { return _record_budget.snapshot(); }
 
   uint64_t add_pending_transaction( const pending_transaction& pending_trx,
                                     std::chrono::system_clock::time_point time,
@@ -126,7 +150,8 @@ std::string create_account_nonce_key( const protocol::transaction& transaction )
   return std::string( account_nonce_bytes.begin(), account_nonce_bytes.end() );
 }
 
-mempool_impl::mempool_impl( state_db::fork_resolution_algorithm algo )
+mempool_impl::mempool_impl( state_db::fork_resolution_algorithm algo, pending_record_limits record_limits )
+  : _record_budget( record_limits )
 {
   auto lock = _db.get_unique_lock();
   _db.open( {}, []( state_db::state_node_ptr ) {}, algo, lock );
@@ -563,6 +588,32 @@ uint64_t mempool_impl::get_pending_transaction_count( const std::string& account
   return get_pending_transaction_count_on_node( node, account );
 }
 
+uint64_t mempool_impl::pending_transaction_count() const
+{
+  auto lock = _db.get_shared_lock();
+  auto [ node, mutex ] = relevant_node( _db.get_head( lock )->id(), lock );
+  KOINOS_ASSERT( node, pending_transaction_unknown_block, "cannot count pending transactions from an unknown head" );
+  std::shared_lock node_lock( *mutex );
+  uint64_t count = 0;
+  state_db::object_key key;
+  for( ;; )
+  {
+    auto [ value, next ] = node->get_next_object( space::pending_transaction(), key );
+    if( !value ) break;
+    ++count;
+    key = std::move( next );
+  }
+  return count;
+}
+
+retained_memory_usage mempool_impl::get_retained_memory_usage() const
+{
+  // Every private mempool writer already holds this exclusive database lock.
+  // Holding it also prevents relevant-mutex/index changes during the scan.
+  auto lock = _db.get_unique_lock();
+  return { _db.get_retained_memory_usage( lock ), _relevant_node_mutexes.size() };
+}
+
 uint64_t mempool_impl::get_pending_transaction_count_on_node( state_db::abstract_state_node_ptr node,
                                                               const std::string& account ) const
 {
@@ -604,6 +655,7 @@ uint64_t mempool_impl::get_pending_transaction_count_on_node( state_db::abstract
 
 uint64_t mempool_impl::add_pending_transaction_to_node( state_db::anonymous_state_node_ptr node,
                                                         const pending_transaction_record& record,
+                                                        state_db::object_value_ptr encoded_record,
                                                         uint64_t max_payer_rc )
 {
   uint64_t rc_used        = 0;
@@ -647,9 +699,7 @@ uint64_t mempool_impl::add_pending_transaction_to_node( state_db::anonymous_stat
   node->put_object( space::mempool_metadata(), std::string{}, &obj );
 
   std::string transaction_index_bytes = util::converter::as< std::string >( tx_id );
-  auto pending_transaction_bytes      = util::converter::as< std::string >( record );
-
-  node->put_object( space::pending_transaction(), transaction_index_bytes, &pending_transaction_bytes );
+  node->put_object_owned( space::pending_transaction(), transaction_index_bytes, std::move( encoded_record ) );
   node->put_object( space::transaction_index(), transaction.id(), &transaction_index_bytes );
 
   address_resource_record arr;
@@ -699,10 +749,20 @@ uint64_t mempool_impl::add_pending_transaction( const pending_transaction& pendi
     {
       std::shared_lock< std::shared_mutex > head_lock( *head_mutex );
 
-      pending_transaction_record record;
+      // The pinned protobuf copy path can throw before recording ownership of
+      // newly allocated repeated elements. The arena owns those elements even
+      // when copying the incoming transaction fails partway through.
+      google::protobuf::Arena record_storage;
+      auto& record = *google::protobuf::Arena::CreateMessage< pending_transaction_record >( &record_storage );
       *record.mutable_pending_transaction() = pending_trx;
       record.set_timestamp(
         std::chrono::duration_cast< std::chrono::milliseconds >( time.time_since_epoch() ).count() );
+      const auto encoded_record = _record_budget.encode( record.ByteSizeLong(), [&record] {
+        std::string bytes;
+        KOINOS_ASSERT( record.SerializeToString( &bytes ), state_db::internal_error,
+                       "pending record cannot be encoded" );
+        return bytes;
+      } );
 
       bool trx_added = false;
 
@@ -716,7 +776,7 @@ uint64_t mempool_impl::add_pending_transaction( const pending_transaction& pendi
 
         try
         {
-          auto rc = add_pending_transaction_to_node( node, record, max_payer_rc );
+          auto rc = add_pending_transaction_to_node( node, record, encoded_record, max_payer_rc );
 
           // We're only returning the RC used as it pertains to head
           if( state_node->id() == tmp_head->id() )
@@ -733,11 +793,15 @@ uint64_t mempool_impl::add_pending_transaction( const pending_transaction& pendi
       KOINOS_ASSERT( trx_added, pending_transaction_nonce_conflict, "transaction nonce conflict" );
     }
 
-    for( auto anonymous_state_node: anonymous_state_nodes )
+    std::vector< std::unique_lock< std::shared_mutex > > node_locks;
+    node_locks.reserve( anonymous_state_nodes.size() );
+    for( const auto& anonymous_state_node: anonymous_state_nodes )
     {
-      std::unique_lock< std::shared_mutex > node_lock( *_relevant_node_mutexes.at( anonymous_state_node->id() ) );
-      anonymous_state_node->commit();
+      node_locks.emplace_back( *_relevant_node_mutexes.at( anonymous_state_node->id() ) );
     }
+    // The DB unique lock and all node locks exclude readers across publication.
+    // Prepare every allocation/reset before transferring any fork's writes.
+    state_db::anonymous_state_node::commit_all_writes( anonymous_state_nodes );
   }
   catch( const std::exception& e )
   {
@@ -751,7 +815,10 @@ uint64_t mempool_impl::add_pending_transaction( const pending_transaction& pendi
     throw;
   }
 
-  LOG( debug ) << "Transaction added to mempool: " << util::to_hex( pending_trx.transaction().id() );
+  // Logging is an observer, not a second admission result. An allocation failure
+  // here must not report rejection for already-published work on every fork.
+  try { LOG( debug ) << "Transaction added to mempool: " << util::to_hex( pending_trx.transaction().id() ); }
+  catch( ... ) {}
 
   return rc_used;
 }
@@ -764,22 +831,31 @@ uint64_t mempool_impl::remove_pending_transactions( const std::vector< transacti
   auto nodes = _db.get_fork_heads( lock );
   auto head  = _db.get_head( lock );
 
+  std::vector< std::unique_lock< std::shared_mutex > > node_locks;
+  std::vector< state_db::anonymous_state_node_ptr > overlays;
+  node_locks.reserve( nodes.size() );
+  overlays.reserve( nodes.size() );
+
   for( auto block_node: nodes )
   {
     auto [ node, mutex ] = relevant_node( block_node->id(), lock );
-    std::unique_lock< std::shared_mutex > node_lock( *mutex );
-
-    auto num_removed = remove_pending_transactions_on_node( node, ids );
+    node_locks.emplace_back( *mutex );
+    auto overlay = node->create_anonymous_node();
+    auto num_removed = remove_pending_transactions_on_node( overlay, ids );
+    if( num_removed )
+      overlays.push_back( std::move( overlay ) );
 
     // We're only returning the number of transactions removed as it pertains to head
     if( block_node->id() == head->id() )
       count = num_removed;
   }
 
+  state_db::anonymous_state_node::commit_all_changes( overlays );
+
   return count;
 }
 
-uint64_t mempool_impl::remove_pending_transactions_on_node( state_db::state_node_ptr node,
+uint64_t mempool_impl::remove_pending_transactions_on_node( state_db::abstract_state_node_ptr node,
                                                             const std::vector< transaction_id_type >& ids )
 {
   uint64_t count = 0;
@@ -791,9 +867,10 @@ uint64_t mempool_impl::remove_pending_transactions_on_node( state_db::state_node
       continue;
 
     auto ptx_obj = node->get_object( space::pending_transaction(), *seq_obj );
-    assert( ptx_obj );
+    KOINOS_ASSERT( ptx_obj, state_db::internal_error, "pending transaction record is missing during cleanup" );
 
-    auto record = util::converter::to< pending_transaction_record >( *ptx_obj );
+    google::protobuf::Arena record_storage;
+    const auto& record = parse_cleanup_record< pending_transaction_record >( *ptx_obj, record_storage );
 
     cleanup_account_resources_on_node( node, record );
     node->remove_object( space::pending_transaction(), *seq_obj );
@@ -815,46 +892,60 @@ uint64_t mempool_impl::prune( std::chrono::seconds expiration, std::chrono::syst
   auto nodes = _db.get_fork_heads( lock );
   auto head  = _db.get_head( lock );
 
+  std::vector< std::unique_lock< std::shared_mutex > > node_locks;
+  std::vector< state_db::anonymous_state_node_ptr > overlays;
+  node_locks.reserve( nodes.size() );
+  overlays.reserve( nodes.size() );
+
   for( auto block_node: nodes )
   {
     auto [ node, mutex ] = relevant_node( block_node->id(), lock );
-    std::unique_lock< std::shared_mutex > node_lock( *mutex );
+    node_locks.emplace_back( *mutex );
+    auto overlay = node->create_anonymous_node();
+    bool changed = false;
 
     for( ;; )
     {
-      auto [ ptx_obj, key ] = node->get_next_object( space::pending_transaction(), std::string{} );
+      auto [ ptx_obj, key ] = overlay->get_next_object( space::pending_transaction(), std::string{} );
       if( !ptx_obj )
         break;
 
-      auto record = util::converter::to< pending_transaction_record >( *ptx_obj );
+      google::protobuf::Arena record_storage;
+      const auto& record = parse_cleanup_record< pending_transaction_record >( *ptx_obj, record_storage );
 
       std::chrono::system_clock::time_point time{ std::chrono::milliseconds{ record.timestamp() } };
       if( time + expiration > now )
         break;
 
-      cleanup_account_resources_on_node( node, record );
-      node->remove_object( space::pending_transaction(), key );
-      node->remove_object( space::transaction_index(), record.pending_transaction().transaction().id() );
-      node->remove_object( space::account_nonce(),
+      cleanup_account_resources_on_node( overlay, record );
+      overlay->remove_object( space::pending_transaction(), key );
+      overlay->remove_object( space::transaction_index(), record.pending_transaction().transaction().id() );
+      overlay->remove_object( space::account_nonce(),
                            create_account_nonce_key( record.pending_transaction().transaction() ) );
+      changed = true;
 
       // Only consider pruned transactions on the fork considered head
       if( block_node->id() == head->id() )
         count++;
     }
+    if( changed )
+      overlays.push_back( std::move( overlay ) );
   }
+
+  state_db::anonymous_state_node::commit_all_changes( overlays );
 
   return count;
 }
 
-void mempool_impl::cleanup_account_resources_on_node( state_db::state_node_ptr node,
+void mempool_impl::cleanup_account_resources_on_node( state_db::abstract_state_node_ptr node,
                                                       const pending_transaction_record& record )
 {
   const auto& transaction = record.pending_transaction().transaction();
   auto obj                = node->get_object( space::address_resources(), transaction.header().payer() );
-  assert( obj );
+  KOINOS_ASSERT( obj, state_db::internal_error, "pending account resource record is missing during cleanup" );
 
-  auto arr = util::converter::to< address_resource_record >( *obj );
+  google::protobuf::Arena resource_storage;
+  auto& arr = parse_cleanup_record< address_resource_record >( *obj, resource_storage );
   if( arr.current_rc() + transaction.header().rc_limit() >= arr.max_rc() )
   {
     node->remove_object( space::address_resources(), transaction.header().payer() );
@@ -869,11 +960,26 @@ void mempool_impl::cleanup_account_resources_on_node( state_db::state_node_ptr n
 
 } // namespace detail
 
-mempool::mempool( state_db::fork_resolution_algorithm algo ):
-    _my( std::make_unique< detail::mempool_impl >( algo ) )
+mempool::mempool( state_db::fork_resolution_algorithm algo, pending_record_limits record_limits ):
+    _my( std::make_unique< detail::mempool_impl >( algo, record_limits ) )
 {}
 
 mempool::~mempool() = default;
+
+uint64_t mempool::pending_transaction_count() const
+{
+  return _my->pending_transaction_count();
+}
+
+retained_memory_usage mempool::get_retained_memory_usage() const
+{
+  return _my->get_retained_memory_usage();
+}
+
+pending_record_snapshot mempool::get_pending_record_usage() const
+{
+  return _my->get_pending_record_usage();
+}
 
 bool mempool::has_pending_transaction( const transaction_id_type& id,
                                        std::optional< crypto::multihash > block_id ) const

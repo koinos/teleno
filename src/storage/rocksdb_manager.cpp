@@ -4,11 +4,13 @@
 #include <chrono>
 #include <cctype>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 
 #include <rocksdb/cache.h>
+#include <rocksdb/advanced_cache.h>
 #include <rocksdb/convenience.h>
 #include <rocksdb/filter_policy.h>
 #include <rocksdb/options.h>
@@ -235,6 +237,12 @@ RocksDBManager::~RocksDBManager()
 void RocksDBManager::open( const std::filesystem::path& basedir, const NodeConfig& cfg )
 {
   close();
+  validate_rocksdb_blocks_zstd_options( cfg );
+
+  if( cfg.rocksdb_block_cache_mb > std::numeric_limits< size_t >::max() / (1024 * 1024) ||
+      cfg.rocksdb_max_background_jobs > static_cast< uint64_t >( std::numeric_limits< int >::max() ) ||
+      cfg.rocksdb_max_write_buffer_number > static_cast< uint64_t >( std::numeric_limits< int >::max() ) )
+    throw std::invalid_argument( "RocksDB memory/job configuration exceeds native range" );
 
   rocksdb::Options db_options;
   db_options.create_if_missing              = true;
@@ -243,10 +251,10 @@ void RocksDBManager::open( const std::filesystem::path& basedir, const NodeConfi
   db_options.max_subcompactions             = static_cast< uint32_t >( std::max< uint64_t >( 1, cfg.rocksdb_max_background_jobs / 2 ) );
   db_options.bytes_per_sync                 = cfg.rocksdb_bytes_per_sync;
   db_options.db_write_buffer_size           = static_cast< size_t >( cfg.rocksdb_db_write_buffer_size );
+  db_options.max_total_wal_size             = cfg.rocksdb_max_total_wal_size;
   db_options.enable_pipelined_write         = true;
-
-  _path = basedir / "db";
-  std::filesystem::create_directories( _path );
+  // Checkpoints are portable; new tables need no operating-host identifier.
+  db_options.db_host_id.clear();
 
   auto shared_block_cache = rocksdb::NewLRUCache(
     static_cast< size_t >( cfg.rocksdb_block_cache_mb * 1024 * 1024 ),
@@ -254,6 +262,8 @@ void RocksDBManager::open( const std::filesystem::path& basedir, const NodeConfi
     false,
     0.35
   );
+  _block_cache = shared_block_cache;
+  _memtable_threshold = cfg.rocksdb_db_write_buffer_size;
 
   std::string compression_fallback_note;
   const auto default_requested = cfg.rocksdb_compression.empty() ? std::string( "zstd" ) : cfg.rocksdb_compression;
@@ -268,6 +278,13 @@ void RocksDBManager::open( const std::filesystem::path& basedir, const NodeConfi
                                                           "blocks",
                                                           cfg.rocksdb_require_compression,
                                                           compression_fallback_note );
+  const bool custom_blocks_zstd = cfg.rocksdb_blocks_zstd_level != 0
+                                  || cfg.rocksdb_blocks_zstd_dictionary_bytes != 0;
+  if( custom_blocks_zstd && blocks_compression != rocksdb::kZSTD )
+    throw std::runtime_error( "Blocks Zstd options require linked Zstd support; codec fallback is not permitted" );
+
+  _path = basedir / "db";
+  std::filesystem::create_directories( _path );
   _compression_status.requested_default = default_requested;
   _compression_status.selected_default = compression_name( default_compression );
   _compression_status.requested_blocks = blocks_requested;
@@ -294,6 +311,21 @@ void RocksDBManager::open( const std::filesystem::path& basedir, const NodeConfi
                                 cfg.rocksdb_target_file_size_base,
                                 cfg.rocksdb_max_bytes_for_level_base,
                                 blocks_compression );
+  if( custom_blocks_zstd )
+  {
+    auto& options = cf_blocks.compression_opts;
+    if( cfg.rocksdb_blocks_zstd_level != 0 )
+      options.level = static_cast< int >( cfg.rocksdb_blocks_zstd_level );
+    if( cfg.rocksdb_blocks_zstd_dictionary_bytes != 0 )
+    {
+      options.max_dict_bytes = static_cast< uint32_t >( cfg.rocksdb_blocks_zstd_dictionary_bytes );
+      options.zstd_max_train_bytes = 1024 * 1024;
+      options.max_dict_buffer_bytes = 8 * 1024 * 1024;
+    }
+    options.enabled = true;
+    cf_blocks.bottommost_compression_opts = options;
+    cf_blocks.bottommost_compression_opts.enabled = true;
+  }
   auto blocks_table_opts = make_table_options( cfg.rocksdb_blocks_block_size,
                                                shared_block_cache,
                                                true );
@@ -404,6 +436,12 @@ void RocksDBManager::open( const std::filesystem::path& basedir, const NodeConfi
                  }();
   if( !compression_fallback_note.empty() )
     LOG( info ) << "[db] RocksDB compression fallback: " << compression_fallback_note;
+  if( custom_blocks_zstd )
+    LOG( info ) << "[db] Blocks Zstd tuning: level=" << cf_blocks.compression_opts.level
+                << " dictionary_bytes=" << cf_blocks.compression_opts.max_dict_bytes
+                << " train_bytes=" << cf_blocks.compression_opts.zstd_max_train_bytes
+                << " dictionary_buffer_bytes=" << cf_blocks.compression_opts.max_dict_buffer_bytes
+                << " (per active table builder)";
 
   std::vector< rocksdb::ColumnFamilyDescriptor > cf_descriptors = {
     { column_family_name( ColumnFamily::default_state ),     cf_default },
@@ -428,6 +466,10 @@ void RocksDBManager::open( const std::filesystem::path& basedir, const NodeConfi
   _db.reset( raw_db );
   initialize_storage_metadata( basedir );
 
+  if( cfg.rocksdb_max_total_wal_size )
+    LOG( info ) << "[db] WAL flush trigger: " << cfg.rocksdb_max_total_wal_size
+                << " bytes (soft threshold, not a disk ceiling)";
+
   LOG( info ) << "[db] RocksDB opened at " << _path.string()
               << " with " << _handles.size() << " column families";
 }
@@ -438,6 +480,7 @@ void RocksDBManager::close()
     delete handle;
   _handles.clear();
   _db.reset();
+  _block_cache.reset();
   _path.clear();
 }
 
@@ -489,6 +532,25 @@ const CompressionStatus& RocksDBManager::compression_status() const
   return _compression_status;
 }
 
+MemoryStats RocksDBManager::memory_stats() const
+{
+  if( !_db || !_block_cache )
+    throw std::runtime_error( "RocksDB is not open" );
+  MemoryStats result;
+  // This cache is shared across CFs; summing each CF's cache-usage property
+  // would count the same cache nine times. Pinned usage is a subset of usage.
+  result.block_cache_capacity = _block_cache->GetCapacity();
+  result.block_cache_usage = _block_cache->GetUsage();
+  result.block_cache_pinned_usage = _block_cache->GetPinnedUsage();
+  result.aggregate_memtable_flush_threshold = _memtable_threshold;
+  uint64_t value = 0;
+  if( _db->GetAggregatedIntProperty( "rocksdb.size-all-mem-tables", &value ) )
+    result.all_memtables = value;
+  if( _db->GetAggregatedIntProperty( "rocksdb.estimate-table-readers-mem", &value ) )
+    result.table_readers = value;
+  return result;
+}
+
 std::string RocksDBManager::read_metadata( const std::string& key ) const
 {
   if( !_db )
@@ -513,7 +575,7 @@ void RocksDBManager::write_metadata( const std::string& key, const std::string& 
     throw std::runtime_error( "failed to write storage metadata " + key + ": " + status.ToString() );
 }
 
-void RocksDBManager::compact_column_family( ColumnFamily cf )
+void RocksDBManager::compact_column_family( ColumnFamily cf, bool rewrite_existing )
 {
   if( !_db )
     throw std::runtime_error( "RocksDB is not open" );
@@ -527,16 +589,21 @@ void RocksDBManager::compact_column_family( ColumnFamily cf )
 
   rocksdb::CompactRangeOptions compact_options;
   compact_options.change_level = false;
+  if( rewrite_existing )
+  {
+    // Tables produced during this pass already use the selected policy.
+    compact_options.bottommost_level_compaction = rocksdb::BottommostLevelCompaction::kForceOptimized;
+  }
   status = _db->CompactRange( compact_options, cf_handle, nullptr, nullptr );
   if( !status.ok() )
     throw std::runtime_error( "failed to compact column family " + std::string( column_family_name( cf ) )
                               + ": " + status.ToString() );
 }
 
-void RocksDBManager::compact_all_column_families()
+void RocksDBManager::compact_all_column_families( bool rewrite_existing )
 {
   for( std::size_t i = 0; i < _handles.size(); ++i )
-    compact_column_family( static_cast< ColumnFamily >( i ) );
+    compact_column_family( static_cast< ColumnFamily >( i ), rewrite_existing );
 }
 
 void RocksDBManager::initialize_storage_metadata( const std::filesystem::path& basedir )

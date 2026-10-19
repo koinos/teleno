@@ -1,6 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <map>
+#include <mutex>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -48,19 +51,35 @@ public:
                  const std::string& listen_address = "0.0.0.0",
                  uint16_t port                     = 8080,
                  unsigned int threads               = 4,
-                 koinos::node::RpcAccessPolicy access_policy = {} );
+                 koinos::node::RpcAccessPolicy access_policy = {},
+                 std::chrono::milliseconds io_timeout = std::chrono::seconds( 30 ) );
 
   ~JSONRPCServer();
 
   void start();
   void stop();
+  uint16_t port() const { return _endpoint.port(); }
+  std::size_t active_sessions() const;
+
+  struct HTTPBodyMemory
+  {
+    std::size_t completed_request_capacity = 0;
+    std::size_t materialized_response_capacity = 0;
+    std::size_t peak_combined_capacity = 0;
+  };
+  // Attributed std::string capacities after read/response materialization,
+  // including pending handlers after registry removal. Not a heap/RSS limit:
+  // partial ingress, headers, transport buffers and service/JSON work are extra.
+  HTTPBodyMemory http_body_memory() const;
 
 private:
   /** Accept incoming TCP connections. */
   void do_accept();
 
-  /** Handle a single HTTP request on a connection. */
-  void handle_session( tcp::socket socket );
+  struct Session;
+  void release_session( Session* session );
+  void replace_body_capacities( std::size_t old_request, std::size_t old_response,
+                               std::size_t new_request, std::size_t new_response );
 
   /** Process an HTTP request body and return the JSON-RPC response. */
   std::string process_body( const std::string& body );
@@ -102,7 +121,7 @@ private:
   static nlohmann::json make_error( int code, const std::string& message, const nlohmann::json& id = nullptr );
 
   /** Build a JSON-RPC success response. */
-  static nlohmann::json make_result( const nlohmann::json& result, const nlohmann::json& id );
+  static nlohmann::json make_result( const nlohmann::json& id );
 
   /** Convert a protobuf message to JSON (proto3 JSON mapping). */
   static std::string proto_to_json( const google::protobuf::Message& msg );
@@ -127,11 +146,18 @@ private:
 
   net::io_context _ioc;
   tcp::acceptor _acceptor;
+  tcp::endpoint _endpoint;
+  net::strand< net::io_context::executor_type > _accept_strand;
   std::vector< std::thread > _threads;
   std::atomic< bool > _running{ false };
-  std::atomic< unsigned int > _active_sessions{ 0 };
+  mutable std::mutex _sessions_mutex;
+  std::map< Session*, std::shared_ptr< Session > > _sessions;
+  mutable std::mutex _http_body_mutex;
+  HTTPBodyMemory _http_body_memory;
+  std::mutex _lifecycle_mutex;
   unsigned int _thread_count;
   koinos::node::RpcAccessPolicy _access_policy;
+  std::chrono::milliseconds _io_timeout;
 };
 
 } // namespace koinos::node::jsonrpc

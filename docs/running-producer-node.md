@@ -138,6 +138,23 @@ If the public address or producer address is unexpected, stop immediately and
 return to observer mode. Do not attempt chain-mutating repair actions from the
 same session without a fresh reviewed plan.
 
+## Candidate Handoffs In Native Development Builds
+
+The unreleased native correction described in the
+[handoff validation](validation/native-producer-handoff.md) handles a chain head
+that is not yet available in the mempool as a bounded candidate deferral. It
+retries after 10 ms, preserves the actual pending-transaction query and discards
+an observed stale candidate. It never fills a failed query with an empty result.
+After 100 consecutive deferrals the failure returns to the normal error path.
+Other storage, allocation and contract exceptions remain errors.
+
+Periodic logs expose `producer_candidates_prepared`, `producer_pob_evaluations`,
+`producer_head_retries`, `producer_mempool_retries` and `producer_errors`.
+Prepared candidates and evaluations are activity evidence, not proof that a block
+was accepted. Verify canonical inclusion/irreversibility separately. Persistent
+deferrals or errors require investigation, even while the node stays synchronized.
+This development change is not a Koinos One packaged-binary update.
+
 ## After Restore
 
 Native restore writes markers that force observer-first recovery on next start

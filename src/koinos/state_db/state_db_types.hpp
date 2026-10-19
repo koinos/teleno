@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <string>
 
 #include <koinos/chain/chain.pb.h>
@@ -13,6 +15,32 @@ using state_node_id = crypto::multihash;
 using object_space  = chain::object_space;
 using object_key    = std::string;
 using object_value  = std::string;
+using object_value_ptr = std::shared_ptr<const object_value>;
+
+// On-demand inventory of indexed state deltas, not process/allocator memory.
+// String capacities include inline storage and exclude terminators; do not add
+// them to object sizes or present their sum as heap bytes. Metadata, allocator
+// overhead, non-map backends, anonymous overlays and caller-only owners are not
+// measured. Immutable values shared by map clones are counted only once.
+struct retained_memory_usage
+{
+  uint64_t state_nodes = 0;
+  uint64_t finalized_state_nodes = 0;
+  uint64_t writable_state_nodes = 0;
+  uint64_t map_backends = 0;
+  uint64_t unmeasured_backends = 0;
+  uint64_t map_entries = 0;
+  uint64_t map_key_size_bytes = 0;
+  uint64_t map_key_capacity_bytes = 0;
+  uint64_t value_references = 0;
+  uint64_t unique_values = 0;
+  uint64_t unique_value_size_bytes = 0;
+  uint64_t unique_value_capacity_bytes = 0;
+  uint64_t tombstone_entries = 0;
+  uint64_t tombstone_key_size_bytes = 0;
+  uint64_t tombstone_key_capacity_bytes = 0;
+  uint64_t tombstone_bucket_count = 0;
+};
 
 KOINOS_DECLARE_DERIVED_EXCEPTION( state_db_exception, chain::reversion_exception );
 

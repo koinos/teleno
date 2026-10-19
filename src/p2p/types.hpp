@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -41,6 +42,9 @@ struct P2POptions
 
   // Sync
   uint32_t block_request_batch_size = 500;
+  // Includes retired/disconnected generations until they finish and are joined.
+  // Local connection backpressure, never transaction/block validity or peer scoring.
+  size_t max_peer_sync_workers = 64;
   uint32_t synced_block_delta       = 5;
   std::chrono::seconds sync_check_interval{ 10 };
   std::chrono::seconds syncing_check_interval{ 1 };
@@ -61,13 +65,23 @@ struct P2POptions
   bool always_enable_gossip  = false;
   bool always_disable_gossip = false;
 
+  // Accepted-ID deduplication only; never limits chain or mempool retention.
+  size_t seen_block_entries = 4096;
+  size_t seen_block_bytes = 2 * 1024 * 1024;
+  size_t seen_transaction_entries = 65536;
+  size_t seen_transaction_bytes = 8 * 1024 * 1024;
+  std::chrono::seconds seen_id_lifetime{ 600 };
+
   // Applicator
   uint32_t max_pending_blocks       = 2500;
   uint32_t max_pending_transactions = 100000;
   std::chrono::seconds block_future_threshold{ 4 };
   std::chrono::seconds block_apply_timeout{ 60 };
 
-  // Error scoring
+  // Error scoring: retain all meaningful scores. Unknown-address admission is
+  // refused locally when count or attributed retained key capacity is full.
+  size_t max_peer_error_records = 4096;
+  size_t peer_error_key_capacity_bytes = 1024 * 1024;
   std::chrono::minutes error_score_halflife{ 30 };
   uint64_t error_score_disconnect_threshold = 100000;
   uint64_t error_score_reconnect_threshold  = 50000;

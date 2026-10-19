@@ -146,7 +146,8 @@ class controller_impl final
 public:
   controller_impl( uint64_t read_compute_bandwith_limit,
                    uint32_t syscall_bufsize,
-                   std::optional< uint64_t > pending_transaction_limit );
+                   std::optional< uint64_t > pending_transaction_limit,
+                   uint64_t vm_module_cache_max_capacity_bytes );
   ~controller_impl();
 
   void open( const std::filesystem::path& p, const genesis_data& data, fork_resolution_algorithm algo, bool reset );
@@ -156,6 +157,7 @@ public:
              bool reset );
   void close();
   void set_client( std::shared_ptr< node::IRpcClient > c );
+  vm_manager::module_cache_memory vm_cache_memory() const { return _vm_backend->cache_memory(); }
 
   apply_block_result apply_block( const protocol::block& block, const apply_block_options& opts );
   bool apply_block_delta( const protocol::block&,
@@ -191,12 +193,14 @@ private:
 
 controller_impl::controller_impl( uint64_t read_compute_bandwidth_limit,
                                   uint32_t syscall_bufsize,
-                                  std::optional< uint64_t > pending_transaction_limit ):
+                                  std::optional< uint64_t > pending_transaction_limit,
+                                  uint64_t vm_module_cache_max_capacity_bytes ):
     _read_compute_bandwidth_limit( read_compute_bandwidth_limit ),
     _syscall_bufsize( syscall_bufsize ),
     _pending_transaction_limit( pending_transaction_limit )
 {
-  _vm_backend = vm_manager::get_vm_backend(); // Default is fizzy
+  _vm_backend = vm_manager::get_vm_backend( vm_manager::get_default_vm_backend_name(),
+                                          vm_module_cache_max_capacity_bytes );
   KOINOS_ASSERT( _vm_backend, unknown_backend_exception, "could not get vm backend" );
 
   _cached_head_block = std::make_shared< const protocol::block >( protocol::block() );
@@ -881,6 +885,9 @@ bool controller_impl::apply_block_delta( const protocol::block& block,
 rpc::chain::submit_transaction_response
 controller_impl::submit_transaction( const rpc::chain::submit_transaction_request& request )
 {
+  // Declare first: release after execution state, receipt and notifications on
+  // every success/failure path. Applies to dry runs too, never canonical blocks.
+  auto work = _client ? _client->reserve_transaction_work( request.transaction() ) : nullptr;
   validate_transaction( request.transaction() );
 
   rpc::chain::submit_transaction_response resp;
@@ -1359,11 +1366,18 @@ controller_impl::invoke_system_call( const rpc::chain::invoke_system_call_reques
 
 controller::controller( uint64_t read_compute_bandwith_limit,
                         uint32_t syscall_bufsize,
-                        std::optional< uint64_t > pending_transaction_limit ):
+                        std::optional< uint64_t > pending_transaction_limit,
+                        uint64_t vm_module_cache_max_capacity_bytes ):
     _my( std::make_unique< detail::controller_impl >( read_compute_bandwith_limit,
                                                       syscall_bufsize,
-                                                      pending_transaction_limit ) )
+                                                      pending_transaction_limit,
+                                                      vm_module_cache_max_capacity_bytes ) )
 {}
+
+vm_manager::module_cache_memory controller::vm_cache_memory() const
+{
+  return _my->vm_cache_memory();
+}
 
 controller::~controller() = default;
 

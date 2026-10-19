@@ -1,5 +1,6 @@
 #include "p2p/gorpc_codec.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <utility>
 
@@ -317,80 +318,11 @@ public:
 
   void skip()
   {
-    uint8_t b = read_byte();
-
-    if( b <= 0x7f || b >= 0xe0 || b == mp_nil || b == mp_false || b == mp_true )
-      return;
-
-    if( ( b & 0xe0 ) == 0xa0 || b == mp_str8 || b == mp_str16 || b == mp_str32
-        || b == mp_bin8 || b == mp_bin16 || b == mp_bin32 )
-    {
-      size_t size = read_raw_size( b );
-      ensure( size );
-      _pos += size;
-      return;
-    }
-
-    if( ( b & 0xf0 ) == 0x90 || b == mp_array16 || b == mp_array32 )
-    {
-      size_t size;
-      if( ( b & 0xf0 ) == 0x90 )
-        size = b & 0x0f;
-      else if( b == mp_array16 )
-        size = read_u16();
-      else
-        size = read_u32();
-
-      for( size_t i = 0; i < size; ++i )
-        skip();
-      return;
-    }
-
-    if( ( b & 0xf0 ) == 0x80 || b == mp_map16 || b == mp_map32 )
-    {
-      size_t size;
-      if( ( b & 0xf0 ) == 0x80 )
-        size = b & 0x0f;
-      else if( b == mp_map16 )
-        size = read_u16();
-      else
-        size = read_u32();
-
-      for( size_t i = 0; i < size; ++i )
-      {
-        skip();
-        skip();
-      }
-      return;
-    }
-
-    switch( b )
-    {
-      case mp_uint8:
-      case mp_int8:
-        ensure( 1 );
-        _pos += 1;
-        return;
-      case mp_uint16:
-      case mp_int16:
-        ensure( 2 );
-        _pos += 2;
-        return;
-      case mp_uint32:
-      case mp_int32:
-      case mp_float32:
-        ensure( 4 );
-        _pos += 4;
-        return;
-      case mp_uint64:
-      case mp_int64:
-      case mp_float64:
-        ensure( 8 );
-        _pos += 8;
-        return;
-      default:
-        throw DecodeError( "unsupported msgpack descriptor", false );
-    }
+    ObjectSequenceScanner scanner;
+    scanner.consume( _raw.substr( _pos ) );
+    if( !scanner.complete() )
+      throw DecodeError( "truncated msgpack object", true );
+    _pos += scanner.consumed();
   }
 
 private:
@@ -583,6 +515,66 @@ std::string encode_error_response( const ServiceID& service,
   return out;
 }
 
+void ObjectSequenceScanner::add_children( uint64_t count )
+{
+  if( count > std::numeric_limits< uint64_t >::max() - _pending )
+    throw DecodeError( "msgpack container count overflow", false );
+  _pending += count;
+}
+
+void ObjectSequenceScanner::consume( std::string_view bytes )
+{
+  size_t position = 0;
+  while( position < bytes.size() && !complete() )
+  {
+    if( _payload )
+    {
+      const auto count = static_cast< size_t >( std::min< uint64_t >( _payload, bytes.size() - position ) );
+      _payload -= count;
+      position += count;
+      _consumed += count;
+      continue;
+    }
+    const auto value = static_cast< uint8_t >( bytes[ position++ ] );
+    ++_consumed;
+    if( _length_left )
+    {
+      _length = ( _length << 8 ) | value;
+      if( --_length_left == 0 )
+      {
+        if( _length_kind == LengthKind::raw ) _payload = _length;
+        else add_children( uint64_t( _length ) * ( _length_kind == LengthKind::map ? 2 : 1 ) );
+        _length = 0;
+      }
+      continue;
+    }
+    --_pending;
+    if( value <= 0x7f || value >= 0xe0 || value == mp_nil || value == mp_false || value == mp_true )
+      continue;
+    if( ( value & 0xe0 ) == 0xa0 ) { _payload = value & 0x1f;continue; }
+    if( ( value & 0xf0 ) == 0x90 ) { add_children( value & 0x0f );continue; }
+    if( ( value & 0xf0 ) == 0x80 ) { add_children( 2 * ( value & 0x0f ) );continue; }
+    switch( value )
+    {
+      case mp_uint8: case mp_int8: _payload = 1;break;
+      case mp_uint16: case mp_int16: _payload = 2;break;
+      case mp_uint32: case mp_int32: case mp_float32: _payload = 4;break;
+      case mp_uint64: case mp_int64: case mp_float64: _payload = 8;break;
+      case mp_str8: case mp_bin8:
+        _length_kind = LengthKind::raw;_length_left = 1;break;
+      case mp_str16: case mp_bin16:
+        _length_kind = LengthKind::raw;_length_left = 2;break;
+      case mp_str32: case mp_bin32:
+        _length_kind = LengthKind::raw;_length_left = 4;break;
+      case mp_array16: _length_kind = LengthKind::array;_length_left = 2;break;
+      case mp_array32: _length_kind = LengthKind::array;_length_left = 4;break;
+      case mp_map16: _length_kind = LengthKind::map;_length_left = 2;break;
+      case mp_map32: _length_kind = LengthKind::map;_length_left = 4;break;
+      default: throw DecodeError( "unsupported msgpack descriptor", false );
+    }
+  }
+}
+
 DecodedRequest decode_request( std::string_view raw )
 {
   Reader reader( raw );
@@ -606,6 +598,28 @@ Response decode_response( std::string_view raw )
   reader.skip();
   response.payload = std::string( reader.slice( payload_begin, reader.position() ) );
 
+  return response;
+}
+
+Response decode_response_owned( std::string raw )
+{
+  Reader reader( raw );
+  Response response;
+  response.header = read_response_header( reader );
+  const auto begin = reader.position();
+  reader.skip();
+  const auto size = reader.position() - begin;
+  // A large ignored header/suffix must not pin its allocation in a tiny
+  // returned payload. Keep reuse for payload-dominated frames; otherwise
+  // preserve only the actual payload, as the original decoder did.
+  if( size < raw.capacity() - size )
+  {
+    response.payload.assign( raw.data() + begin, size );
+    return response;
+  }
+  raw.erase( 0, begin );
+  raw.resize( size );
+  response.payload = std::move( raw );
   return response;
 }
 

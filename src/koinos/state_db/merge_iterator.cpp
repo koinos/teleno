@@ -229,6 +229,11 @@ const merge_iterator::value_type& merge_iterator::operator*() const
   return _itr_revision_index.begin()->itr.operator*();
 }
 
+state_delta::value_ptr merge_iterator::share_value() const
+{
+  return _itr_revision_index.begin()->itr.share_value();
+}
+
 const merge_iterator::key_type& merge_iterator::key() const
 {
   auto first_itr = _itr_revision_index.begin();
@@ -291,7 +296,7 @@ merge_iterator merge_state::end() const
                          } );
 }
 
-const merge_state::value_type* merge_state::find( const key_type& key ) const
+state_delta::value_ptr merge_state::find( const key_type& key ) const
 {
   return _head->find( key );
 }

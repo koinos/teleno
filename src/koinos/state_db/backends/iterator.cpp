@@ -20,6 +20,11 @@ const iterator::value_type& iterator::operator*() const
   return **_itr;
 }
 
+iterator::value_ptr iterator::share_value() const
+{
+  return _itr->share_value();
+}
+
 const iterator::key_type& iterator::key() const
 {
   return _itr->key();

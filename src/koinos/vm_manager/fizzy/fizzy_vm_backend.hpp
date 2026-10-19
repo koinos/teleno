@@ -15,13 +15,14 @@ namespace koinos::vm_manager::fizzy {
 class fizzy_vm_backend: public vm_backend
 {
 public:
-  fizzy_vm_backend();
+  explicit fizzy_vm_backend( uint64_t module_cache_max_capacity_bytes = 0 );
   virtual ~fizzy_vm_backend();
 
-  virtual std::string backend_name();
-  virtual void initialize();
+  std::string backend_name() override;
+  void initialize() override;
 
-  virtual void run( abstract_host_api& hapi, const std::string& bytecode, const std::string& id = std::string() );
+  void run( abstract_host_api& hapi, const std::string& bytecode, const std::string& id = std::string() ) override;
+  module_cache_memory cache_memory() const override { return _cache.memory(); }
 
 private:
   module_cache _cache;

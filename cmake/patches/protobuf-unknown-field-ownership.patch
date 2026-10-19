@@ -1,0 +1,94 @@
+--- a/src/google/protobuf/unknown_field_set.cc
++++ b/src/google/protobuf/unknown_field_set.cc
+@@ -33,6 +33,7 @@
+ //  Sanjay Ghemawat, Jeff Dean, and others.
+ 
+ #include <google/protobuf/unknown_field_set.h>
++#include <memory>
+ 
+ #include <google/protobuf/stubs/logging.h>
+ #include <google/protobuf/stubs/common.h>
+@@ -160,9 +161,10 @@
+   UnknownField field;
+   field.number_ = number;
+   field.SetType(UnknownField::TYPE_LENGTH_DELIMITED);
+-  field.data_.length_delimited_.string_value = new std::string;
+-  fields_.push_back(field);
+-  return field.data_.length_delimited_.string_value;
++  std::unique_ptr<std::string> value(new std::string);
++  field.data_.length_delimited_.string_value = value.get();
++  fields_.push_back(field);
++  return value.release();
+ }
+ 
+ 
+@@ -170,9 +172,10 @@
+   UnknownField field;
+   field.number_ = number;
+   field.SetType(UnknownField::TYPE_GROUP);
+-  field.data_.group_ = new UnknownFieldSet;
+-  fields_.push_back(field);
+-  return field.data_.group_;
++  std::unique_ptr<UnknownFieldSet> value(new UnknownFieldSet);
++  field.data_.group_ = value.get();
++  fields_.push_back(field);
++  return value.release();
+ }
+ 
+ void UnknownFieldSet::AddField(const UnknownField& field) {
+--- a/src/google/protobuf/arenastring.cc
++++ b/src/google/protobuf/arenastring.cc
+@@ -47,6 +47,26 @@
+ namespace protobuf {
+ namespace internal {
+ 
++namespace {
++std::string* CreateStringForArena(Arena* arena) {
++  static_assert(noexcept(std::string()),
++                "Arena string default construction must not throw");
++  return Arena::Create<std::string>(arena);
++}
++
++std::string* CreateStringForArena(Arena* arena, const std::string& value) {
++  if (arena == nullptr) return new std::string(value);
++  // Arena::Create registers cleanup before its constructor. Construct a
++  // nonthrowing empty object first, then copy through a temporary whose
++  // failed constructor cannot leave an arena cleanup for an invalid string.
++  // Moving preserves the successful copy constructor's exact buffer capacity.
++  std::string* result = CreateStringForArena(arena);
++  *result = std::string(value);
++  return result;
++}
++}  // namespace
++
++
+ const std::string& LazyString::Init() const {
+   static WrappedMutex mu{GOOGLE_PROTOBUF_LINKER_INITIALIZED};
+   mu.Lock();
+@@ -73,7 +93,7 @@
+ void ArenaStringPtr::Set(const std::string* default_value,
+                          ConstStringParam value, ::google::protobuf::Arena* arena) {
+   if (IsDefault(default_value)) {
+-    tagged_ptr_.Set(Arena::Create<std::string>(arena, value));
++    tagged_ptr_.Set(CreateStringForArena(arena, value));
+   } else {
+     UnsafeMutablePointer()->assign(value.data(), value.length());
+   }
+@@ -154,7 +174,7 @@
+       sizeof...(Lazy) == 0 ? &GetEmptyStringAlreadyInited() : nullptr;
+   GOOGLE_DCHECK(IsDefault(default_value));
+   std::string* new_string =
+-      Arena::Create<std::string>(arena, lazy_default.get()...);
++      CreateStringForArena(arena, lazy_default.get()...);
+   tagged_ptr_.Set(new_string);
+   return new_string;
+ }
+@@ -208,7 +228,7 @@
+     // On debug builds, copy the string so the address differs.  delete will
+     // fail if value was a stack-allocated temporary/etc., which would have
+     // failed when arena ran its cleanup list.
+-    std::string* new_value = Arena::Create<std::string>(arena, *value);
++    std::string* new_value = CreateStringForArena(arena, *value);
+     delete value;
+     tagged_ptr_.Set(new_value);
+ #endif

@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cassert>
+#include <new>
 #include <stdexcept>
 #include <string>
 
@@ -500,6 +501,12 @@ THUNK_DEFINE( void, apply_transaction, ( (const protocol::transaction&)trx ) )
     {
       throw;
     }
+    catch( const std::bad_alloc& )
+    {
+      // Local resource exhaustion must abort the attempt, not assert or become
+      // a consensus reversion. The controller owns the unfinalized state.
+      throw;
+    }
     catch( const std::exception& e )
     {
       LOG( error ) << e.what();
@@ -553,6 +560,10 @@ THUNK_DEFINE( void, apply_transaction, ( (const protocol::transaction&)trx ) )
       receipt.set_reverted( true );
       thunk::_log( context, "transaction reverted: " + e.get_message() );
       reverted_exception_ptr = std::current_exception();
+    }
+    catch( const std::bad_alloc& )
+    {
+      throw;
     }
     catch( const std::exception& e )
     {

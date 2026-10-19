@@ -1,0 +1,2 @@
+# Unified-diff context lines contain a required leading space on empty lines.
+cmake/patches/*.patch whitespace=-blank-at-eol

@@ -643,3 +643,16 @@ completed from the clean, freshly reproduced commit and artifact identity
 recorded above. Consumer handoff and producer rollout remain separate actions
 and have not been executed. The canary image's synthetic revision remains
 validation evidence only and was not published as the release artifact.
+
+
+## Local evidence storage update (2026-10-12)
+
+The complete audit journal now resides at
+`/Volumes/My Passport/teleno-data-migration-20261012-gv2jtizt/state-delta-audit-journal/`. Its earlier
+`build-chain-v152/validation/audit-scratch.delta-journal` path is a continuation
+symlink. Every file SHA-256 and required metadata matches; selected boundary/tip
+reads match the original. Historical commands above remain records of past runs.
+Use the guarded external scratch paths in the
+[relocation record](low-resource-lr2-completion-matrix.md#development-data-relocation-2026-10-12)
+for new diagnostics. This preserves earlier evidence and does not qualify current
+LR2 code or authorize operational cleanup/source-trust changes.

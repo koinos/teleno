@@ -1,4 +1,5 @@
 #include "backup/sftp_uploader.hpp"
+#include "../artifact_root.hpp"
 
 #include <cassert>
 #include <cstdlib>
@@ -6,6 +7,8 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <random>
+#include <nlohmann/json.hpp>
 
 using namespace koinos::node::backup;
 using koinos::node::BackupRemoteConfig;
@@ -53,6 +56,30 @@ bool has_command_containing( const SftpRestoreObjectFetchPlan& plan, const std::
 
 int main()
 {
+  {
+    const auto root=test_artifact_root(std::filesystem::path(__FILE__).parent_path().parent_path().parent_path())/
+      ("lr1-public-rejection-"+std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(root.parent_path());
+    if(!std::filesystem::create_directory(root)) throw std::runtime_error("fresh fixture required");
+    const auto repo=root/"repo", snapshot=repo/"snapshots/fixture";
+    write_file(repo/"latest.json","{\"backup_id\":\"fixture\"}");
+    write_file(snapshot/"files.json","{\"backup_id\":\"fixture\",\"files\":[]}");
+    write_file(snapshot/"COMPLETE","complete\n");
+    koinos::node::BackupPublicPublishConfig cfg;
+    cfg.enabled=true;
+    cfg.directory="/synthetic-not-used"; cfg.base_url="https://example.invalid";
+    cfg.network="mainnet"; cfg.observer_config_file=(root/"unused-config").string();
+    for(const auto& source:std::vector<nlohmann::json>{nlohmann::json::object(),
+      {{"chain_id",""}},{{"chain_id","test-chain"},{"identity_status","checkpoint_verified"},{"identity_version",1}},
+      {{"chain_id","0x1220"+std::string(64,'a')},{"identity_status","checkpoint_verified"},{"identity_version",1},{"network","testnet"}}}) {
+      write_file(snapshot/"manifest.json",nlohmann::json{{"backup_id","fixture"},{"source",source}}.dump());
+      bool refused=false;
+      try { publish_latest_public_bootstrap_with_managed_sftp(repo,BackupSshConfig{},cfg); }
+      catch(const std::runtime_error& e) { const std::string message=e.what();
+        refused=message.find("checkpoint-verified")!=std::string::npos || message.find("contradicts")!=std::string::npos; }
+      if(!refused) throw std::runtime_error("invalid public identity was not refused before transport");
+    }
+  }
   {
     auto root = unique_temp_dir( "teleno-backup-sftp-plan" );
     auto repo = root / "repo";

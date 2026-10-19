@@ -52,10 +52,22 @@ jobs:
           grep -q -- "--backup-public-list" /tmp/teleno-node-help.txt
 
       - name: Test transaction TPS benchmark
-        run: python3 -m unittest -v tests/scripts/benchmark_transaction_tps_test.py
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          TMPDIR: ${{ runner.temp }}/teleno-tests/tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          python3 -B -m unittest -v tests/scripts/benchmark_transaction_tps_test.py
 
       - name: Build tests
         run: cmake --build build --parallel 4
 
       - name: Run tests
-        run: ctest --test-dir build --output-on-failure
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          TMPDIR: ${{ runner.temp }}/teleno-tests/tmp
+          TELENO_TEST_ARTIFACT_ROOT: ${{ runner.temp }}/teleno-tests/artifacts
+          TELENO_TEST_BUILD_ROOT: ${{ github.workspace }}/build
+        run: |
+          mkdir -p "$TMPDIR" "$TELENO_TEST_ARTIFACT_ROOT"
+          ctest --test-dir "$TELENO_TEST_BUILD_ROOT" --output-on-failure

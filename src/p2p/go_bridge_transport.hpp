@@ -56,8 +56,8 @@ public:
   void connect_peer( const PeerID& peer ) override;
   void disconnect_peer( const PeerID& peer ) override;
   uint32_t connected_peer_count() const override;
-  std::vector< PeerID > connected_peers() const override;
-  std::vector< PeerID > known_peers() const override;
+  PeerSnapshot connected_peers() const override;
+  PeerSnapshot known_peers() const override;
 
   std::string peer_get_chain_id( const PeerID& peer ) override;
   PeerHeadInfo peer_get_head_block( const PeerID& peer ) override;

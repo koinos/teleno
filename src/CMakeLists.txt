@@ -3,14 +3,24 @@ if(TARGET yaml-cpp AND NOT TARGET yaml-cpp::yaml-cpp)
   add_library(yaml-cpp::yaml-cpp ALIAS yaml-cpp)
 endif()
 
+# The pinned SDK exports only the C gRPC runtime, but its generated service
+# stubs also reference the C++ runtime. Propagate it after Koinos::proto so
+# static ELF links resolve those symbols without depending on another consumer.
+set_property(TARGET Koinos::proto APPEND PROPERTY INTERFACE_LINK_LIBRARIES gRPC::grpc++)
+
 # ── Core library (config, event_bus, service_registry) ──
 add_library(koinos_node_core
   core/config.cpp
   core/config.hpp
+  core/preflight.cpp
+  core/preflight.hpp
   core/event_bus.hpp
+  core/transaction_work_budget.hpp
   core/node_version.hpp
   core/restore_startup.cpp
   core/restore_startup.hpp
+  core/storage_lease.cpp
+  core/storage_lease.hpp
   core/rpc_access_policy.hpp
   core/service_registry.hpp)
 
@@ -26,6 +36,7 @@ target_link_libraries(
       Koinos::log
       Koinos::proto
       yaml-cpp::yaml-cpp
+      nlohmann_json::nlohmann_json
       Boost::system
       Boost::log)
 
@@ -133,6 +144,10 @@ target_link_libraries(
 
 # ── Backup snapshot repository (local object store + restore preflight data) ──
 add_library(koinos_backup_snapshot_lib
+  backup/checkpoint_identity.cpp
+  backup/checkpoint_identity.hpp
+  backup/durable_publication.cpp
+  backup/durable_publication.hpp
   backup/restore_activation_supervisor.cpp
   backup/restore_activation_supervisor.hpp
   backup/snapshot_repository.cpp
@@ -149,6 +164,7 @@ target_link_libraries(
       koinos_backup_checkpoint_lib
       koinos_node_core
       OpenSSL::Crypto
+      Koinos::crypto
     PRIVATE
       nlohmann_json::nlohmann_json)
 
@@ -176,7 +192,15 @@ target_link_libraries(
 # ── Public read-only bootstrap restore backend ──
 add_library(koinos_backup_public_restore_lib
   backup/public_restore.cpp
-  backup/public_restore.hpp)
+  backup/public_restore.hpp
+  backup/restore_plan.cpp
+  backup/restore_plan.hpp
+  backup/direct_restore.cpp
+  backup/direct_restore.hpp
+  backup/direct_restore_cli.cpp
+  backup/direct_restore_cli.hpp
+  backup/offline_restore_validation.cpp
+  backup/offline_restore_validation.hpp)
 
 target_include_directories(
   koinos_backup_public_restore_lib
@@ -189,6 +213,7 @@ target_link_libraries(
       koinos_node_core
       koinos_backup_snapshot_lib
       Boost::system
+      Koinos::crypto
       OpenSSL::SSL
       OpenSSL::Crypto
     PRIVATE
@@ -259,6 +284,7 @@ add_library(vm_manager
   koinos/vm_manager/vm_backend.cpp
   koinos/vm_manager/fizzy/fizzy_vm_backend.cpp
   koinos/vm_manager/fizzy/module_cache.cpp
+  koinos/vm_manager/fizzy/module_memory.cpp
   koinos/vm_manager/host_api.hpp
   koinos/vm_manager/vm_backend.hpp
   koinos/vm_manager/fizzy/exceptions.hpp
@@ -267,6 +293,7 @@ add_library(vm_manager
 
 target_include_directories(vm_manager PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+target_include_directories(vm_manager PRIVATE "${TELENO_FIZZY_SOURCE_DIR}/lib")
 
 target_link_libraries(vm_manager PUBLIC
   Koinos::exception Koinos::log Koinos::util fizzy::fizzy)
@@ -355,6 +382,7 @@ set(P2P_SOURCES
   p2p/gorpc_codec.hpp
   p2p/p2p_node.cpp
   p2p/p2p_node.hpp
+  p2p/seen_cache.hpp
   p2p/transport.hpp
   p2p/error_handler.hpp
   p2p/fork_watchdog.hpp
@@ -362,6 +390,8 @@ set(P2P_SOURCES
   p2p/types.hpp
   p2p/libp2p_transport.hpp
   p2p/libp2p_transport.cpp
+  p2p/peer_rpc_write.hpp
+  p2p/peer_rpc_read.hpp
   p2p/go_bridge_transport.hpp
   p2p/go_bridge_transport.cpp)
 
@@ -373,6 +403,9 @@ target_include_directories(koinos_p2p_lib PUBLIC
 target_link_libraries(koinos_p2p_lib PUBLIC
   koinos_node_core koinos_node_interfaces
   Koinos::log Koinos::proto Boost::thread)
+if(WIN32)
+  target_link_libraries(koinos_p2p_lib PUBLIC ws2_32)
+endif()
 
 # cpp-libp2p integration (optional — enable with -DKOINOS_ENABLE_LIBP2P=ON)
 option(KOINOS_ENABLE_LIBP2P "Enable cpp-libp2p transport for P2P networking" OFF)
@@ -431,6 +464,16 @@ if(KOINOS_ENABLE_LIBP2P)
     endforeach()
   endif()
 
+  string(TOUPPER "${CMAKE_BUILD_TYPE}" _teleno_tsan_build_type)
+  set(_teleno_tsan_compile_flags "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_teleno_tsan_build_type}}")
+  if(_teleno_tsan_compile_flags MATCHES "-fsanitize=[^ ]*thread")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/TelenoTsanScopes.cmake")
+    teleno_make_tsan_scope_overlay(
+      "${CPP_LIBP2P_THIRDPARTY_INCLUDE_DIR}/boost/di/extension/scopes/shared.hpp"
+      TELENO_TSAN_SCOPE_OVERLAY)
+    target_include_directories(koinos_p2p_lib BEFORE PUBLIC "${TELENO_TSAN_SCOPE_OVERLAY}")
+  endif()
+
   if(TARGET libsecp256k1::secp256k1 AND TARGET secp256k1-vrf::secp256k1-vrf)
     get_target_property(_cpp_libp2p_vrf_configs
       secp256k1-vrf::secp256k1-vrf IMPORTED_CONFIGURATIONS)
@@ -487,6 +530,29 @@ else()
 endif()
 
 if(KOINOS_BUILD_TESTS)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME koinos_fizzy_dependency_recipe_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/scripts/fizzy_dependency_recipe_test.py
+        ${CMAKE_COMMAND} ${TELENO_FIZZY_SOURCE_DIR})
+    set_tests_properties(koinos_fizzy_dependency_recipe_test PROPERTIES TIMEOUT 90)
+    add_test(NAME koinos_protobuf_dependency_recipe_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/scripts/protobuf_dependency_recipe_test.py
+        ${CMAKE_COMMAND} ${TELENO_PROTOBUF_SOURCE_DIR})
+    set_tests_properties(koinos_protobuf_dependency_recipe_test PROPERTIES TIMEOUT 90)
+    add_test(NAME teleno_preflight_cli_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cli/preflight_test.py $<TARGET_FILE:teleno_node>)
+    set_tests_properties(teleno_preflight_cli_test PROPERTIES TIMEOUT 90)
+    add_executable(teleno_compatibility_fixture
+      ../tests/integration/compatibility_fixture.cpp)
+    target_link_libraries(teleno_compatibility_fixture PRIVATE chain koinos_storage_lib)
+    add_test(NAME koinos_compatibility_node_test
+      COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tests/integration/compatibility_node_test.py
+        --node $<TARGET_FILE:teleno_node>
+        --fixture $<TARGET_FILE:teleno_compatibility_fixture>)
+    set_tests_properties(koinos_compatibility_node_test PROPERTIES TIMEOUT 100)
+  endif()
   add_executable(koinos_config_test
     ../tests/core/config_test.cpp)
 
@@ -494,6 +560,16 @@ if(KOINOS_BUILD_TESTS)
     koinos_node_core)
 
   add_test(NAME koinos_config_test COMMAND koinos_config_test)
+
+  add_executable(koinos_process_memory_test ../tests/core/process_memory_test.cpp)
+  target_link_libraries(koinos_process_memory_test PRIVATE koinos_node_core)
+  add_test(NAME koinos_process_memory_test COMMAND koinos_process_memory_test)
+  set_tests_properties(koinos_process_memory_test PROPERTIES TIMEOUT 30)
+
+  add_executable(koinos_transaction_work_budget_test ../tests/core/transaction_work_budget_test.cpp)
+  target_link_libraries(koinos_transaction_work_budget_test PRIVATE koinos_node_core koinos_node_interfaces)
+  add_test(NAME koinos_transaction_work_budget_test COMMAND koinos_transaction_work_budget_test)
+  set_tests_properties(koinos_transaction_work_budget_test PROPERTIES TIMEOUT 30)
 
   add_executable(koinos_service_registry_test
     ../tests/core/service_registry_test.cpp)
@@ -507,9 +583,14 @@ if(KOINOS_BUILD_TESTS)
     ../tests/chain/controller_delta_test.cpp)
 
   target_link_libraries(koinos_controller_delta_test PRIVATE
-    chain)
+    chain mempool_lib)
 
   add_test(NAME koinos_controller_delta_test COMMAND koinos_controller_delta_test)
+
+  add_executable(koinos_host_memory_test ../tests/vm/host_memory_test.cpp)
+  target_link_libraries(koinos_host_memory_test PRIVATE chain)
+  add_test(NAME koinos_host_memory_test COMMAND koinos_host_memory_test)
+  set_tests_properties(koinos_host_memory_test PROPERTIES TIMEOUT 30)
 
   add_executable(koinos_indexer_lookahead_test
     ../tests/chain/indexer_lookahead_test.cpp)
@@ -540,6 +621,48 @@ if(KOINOS_BUILD_TESTS)
 
   add_test(NAME koinos_rocksdb_manager_test COMMAND koinos_rocksdb_manager_test)
 
+  add_executable(koinos_cache_invariants_test ../tests/storage/cache_invariants_test.cpp)
+  target_link_libraries(koinos_cache_invariants_test PRIVATE koinos_state_db_local vm_manager)
+  add_test(NAME koinos_cache_invariants_test COMMAND koinos_cache_invariants_test)
+  set_tests_properties(koinos_cache_invariants_test PROPERTIES TIMEOUT 30)
+
+  add_executable(koinos_state_value_lifetime_test ../tests/storage/state_value_lifetime_test.cpp)
+  target_link_libraries(koinos_state_value_lifetime_test PRIVATE koinos_state_db_local)
+  add_test(NAME koinos_state_value_lifetime_test COMMAND koinos_state_value_lifetime_test)
+  set_tests_properties(koinos_state_value_lifetime_test PROPERTIES TIMEOUT 60)
+
+  add_executable(koinos_atomic_write_batch_test ../tests/storage/atomic_write_batch_test.cpp)
+  target_link_libraries(koinos_atomic_write_batch_test PRIVATE koinos_state_db_local)
+  add_test(NAME koinos_atomic_write_batch_test COMMAND koinos_atomic_write_batch_test)
+
+  add_executable(koinos_retained_memory_test ../tests/storage/retained_memory_test.cpp)
+  target_compile_definitions(koinos_retained_memory_test PRIVATE
+    TELENO_LR2_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+  target_link_libraries(koinos_retained_memory_test PRIVATE koinos_state_db_local mempool_lib)
+  add_test(NAME koinos_retained_memory_test COMMAND koinos_retained_memory_test)
+  set_tests_properties(koinos_retained_memory_test PROPERTIES TIMEOUT 60)
+
+  add_executable(koinos_mempool_pending_record_budget_test ../tests/mempool/pending_record_budget_test.cpp)
+  add_executable(koinos_protobuf_unknown_field_ownership_test ../tests/core/protobuf_unknown_field_ownership_test.cpp)
+  target_link_libraries(koinos_protobuf_unknown_field_ownership_test PRIVATE protobuf::libprotobuf)
+  add_test(NAME koinos_protobuf_unknown_field_ownership_test COMMAND koinos_protobuf_unknown_field_ownership_test)
+  set_tests_properties(koinos_protobuf_unknown_field_ownership_test PROPERTIES TIMEOUT 30)
+  target_compile_definitions(koinos_mempool_pending_record_budget_test PRIVATE
+    TELENO_LR2_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+  target_link_libraries(koinos_mempool_pending_record_budget_test PRIVATE koinos_state_db_local mempool_lib)
+  add_test(NAME koinos_mempool_pending_record_budget_test COMMAND koinos_mempool_pending_record_budget_test)
+  set_tests_properties(koinos_mempool_pending_record_budget_test PROPERTIES TIMEOUT 120)
+
+  add_executable(koinos_fizzy_lifetime_test ../tests/vm/fizzy_lifetime_test.cpp)
+  target_link_libraries(koinos_fizzy_lifetime_test PRIVATE vm_manager)
+  add_test(NAME koinos_fizzy_lifetime_test COMMAND koinos_fizzy_lifetime_test)
+  set_tests_properties(koinos_fizzy_lifetime_test PROPERTIES TIMEOUT 90)
+  add_executable(koinos_module_capacity_test ../tests/vm/module_capacity_test.cpp)
+  target_include_directories(koinos_module_capacity_test PRIVATE "${TELENO_FIZZY_SOURCE_DIR}/lib")
+  target_link_libraries(koinos_module_capacity_test PRIVATE vm_manager chain)
+  add_test(NAME koinos_module_capacity_test COMMAND koinos_module_capacity_test)
+  set_tests_properties(koinos_module_capacity_test PROPERTIES TIMEOUT 60)
+
   add_executable(koinos_state_db_durability_test
     ../tests/storage/state_db_durability_test.cpp)
 
@@ -555,6 +678,25 @@ if(KOINOS_BUILD_TESTS)
     koinos_state_db_local)
 
   add_test(NAME koinos_state_db_pending_root_test COMMAND koinos_state_db_pending_root_test)
+
+  add_executable(koinos_persistence_failure_test ../tests/storage/persistence_failure_test.cpp
+    ../tests/storage/fault_db.cpp)
+  target_compile_definitions(koinos_persistence_failure_test PRIVATE
+    TELENO_LR1_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+  target_link_libraries(koinos_persistence_failure_test PRIVATE
+    koinos_state_db_local koinos_storage_lib koinos_block_store_lib)
+  set_source_files_properties(../tests/storage/fault_db.cpp PROPERTIES
+    COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-fno-rtti>")
+  add_test(NAME koinos_persistence_failure_test COMMAND koinos_persistence_failure_test)
+  set_tests_properties(koinos_persistence_failure_test PROPERTIES TIMEOUT 30)
+
+  add_executable(koinos_block_receipt_completion_test
+    ../tests/storage/block_receipt_completion_test.cpp ../tests/storage/fault_db.cpp)
+  target_compile_definitions(koinos_block_receipt_completion_test PRIVATE
+    TELENO_LR1_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+  target_link_libraries(koinos_block_receipt_completion_test PRIVATE koinos_block_store_lib)
+  add_test(NAME koinos_block_receipt_completion_test COMMAND koinos_block_receipt_completion_test)
+  set_tests_properties(koinos_block_receipt_completion_test PROPERTIES TIMEOUT 30)
 
   add_executable(koinos_backup_plan_test
     ../tests/backup/backup_plan_test.cpp)
@@ -580,6 +722,14 @@ if(KOINOS_BUILD_TESTS)
 
   add_test(NAME koinos_backup_snapshot_test COMMAND koinos_backup_snapshot_test)
 
+  if(UNIX)
+    add_executable(koinos_durable_publication_test ../tests/backup/durable_publication_test.cpp)
+    target_compile_definitions(koinos_durable_publication_test PRIVATE TELENO_LR1_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    target_link_libraries(koinos_durable_publication_test PRIVATE koinos_backup_snapshot_lib)
+    add_test(NAME koinos_durable_publication_test COMMAND koinos_durable_publication_test)
+    set_tests_properties(koinos_durable_publication_test PROPERTIES TIMEOUT 30)
+  endif()
+
   add_executable(koinos_backup_sftp_test
     ../tests/backup/backup_sftp_test.cpp)
 
@@ -595,6 +745,83 @@ if(KOINOS_BUILD_TESTS)
     koinos_backup_public_restore_lib)
 
   add_test(NAME koinos_backup_public_restore_test COMMAND koinos_backup_public_restore_test)
+
+  add_executable(koinos_backup_restore_plan_test ../tests/backup/restore_plan_test.cpp)
+  target_link_libraries(koinos_backup_restore_plan_test PRIVATE koinos_backup_public_restore_lib nlohmann_json::nlohmann_json)
+  target_compile_definitions(koinos_backup_restore_plan_test PRIVATE TELENO_SC1_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+  add_test(NAME koinos_backup_restore_plan_test COMMAND koinos_backup_restore_plan_test)
+  if(UNIX)
+    add_executable(koinos_direct_restore_fixture ../tools/backup/direct_restore_fixture.cpp)
+    target_link_libraries(koinos_direct_restore_fixture PRIVATE koinos_backup_public_restore_lib nlohmann_json::nlohmann_json)
+    target_compile_definitions(koinos_direct_restore_fixture PRIVATE TELENO_SC2_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    add_executable(koinos_backup_direct_restore_test ../tests/backup/direct_restore_test.cpp)
+    target_link_libraries(koinos_backup_direct_restore_test PRIVATE koinos_backup_public_restore_lib nlohmann_json::nlohmann_json)
+    target_compile_definitions(koinos_backup_direct_restore_test PRIVATE TELENO_SC2_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    add_test(NAME koinos_backup_direct_restore_test COMMAND koinos_backup_direct_restore_test)
+    set_tests_properties(koinos_backup_direct_restore_test PROPERTIES TIMEOUT 120)
+    add_executable(koinos_backup_direct_activation_test ../tests/backup/direct_activation_test.cpp)
+    target_link_libraries(koinos_backup_direct_activation_test PRIVATE koinos_backup_public_restore_lib nlohmann_json::nlohmann_json)
+    target_compile_definitions(koinos_backup_direct_activation_test PRIVATE TELENO_SC3_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    add_test(NAME koinos_backup_direct_activation_test COMMAND koinos_backup_direct_activation_test $<TARGET_FILE:teleno_node>)
+    set_tests_properties(koinos_backup_direct_activation_test PROPERTIES TIMEOUT 180)
+  endif()
+  if(UNIX)
+    if(NOT Python3_Interpreter_FOUND)
+      find_package(Python3 COMPONENTS Interpreter QUIET)
+    endif()
+  endif()
+  if(UNIX AND Python3_Interpreter_FOUND)
+    add_test(NAME teleno_direct_restore_harness_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/backup/direct_restore_harness_test.py
+        --fixture $<TARGET_FILE:koinos_direct_restore_fixture> --legacy $<TARGET_FILE:koinos_restore_baseline_fixture>
+        --repository ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    set_tests_properties(teleno_direct_restore_harness_test PROPERTIES TIMEOUT 120)
+    add_test(NAME teleno_direct_restore_preflight_cli_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cli/direct_restore_preflight_test.py
+        --node $<TARGET_FILE:teleno_node> --fixture $<TARGET_FILE:koinos_restore_baseline_fixture>
+        --repository ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    set_tests_properties(teleno_direct_restore_preflight_cli_test PROPERTIES TIMEOUT 90)
+    add_test(NAME teleno_direct_restore_workflow_cli_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cli/direct_restore_workflow_test.py
+        --node $<TARGET_FILE:teleno_node> --fixture $<TARGET_FILE:koinos_backup_direct_activation_test>
+        --repository ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    set_tests_properties(teleno_direct_restore_workflow_cli_test PROPERTIES TIMEOUT 180)
+    add_test(NAME teleno_single_copy_measurement_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/scripts/validate_single_copy_restore_test.py)
+    add_test(NAME teleno_low_resource_baseline_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/scripts/low_resource_baseline_test.py)
+    set_tests_properties(teleno_low_resource_baseline_test PROPERTIES TIMEOUT 30)
+    add_test(NAME teleno_lr2_memory_admission_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/scripts/lr2_memory_test.py)
+    set_tests_properties(teleno_lr2_memory_admission_test PROPERTIES TIMEOUT 30)
+    add_test(NAME teleno_fixture_paths_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/scripts/fixture_paths_test.py)
+    set_tests_properties(teleno_fixture_paths_test PROPERTIES TIMEOUT 30)
+    add_test(NAME teleno_single_copy_experiment_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/backup/validate_single_copy_restore.py
+        --build-dir ${CMAKE_BINARY_DIR} --repetitions 5)
+    set_tests_properties(teleno_single_copy_experiment_test PROPERTIES TIMEOUT 240)
+  endif()
+
+  # Diagnostic-only SC0 fixture; uses the existing restore APIs and owned scratch data.
+  if(UNIX)
+    add_executable(koinos_restore_baseline_fixture
+      ../tools/backup/restore_baseline_fixture.cpp)
+    target_link_libraries(koinos_restore_baseline_fixture PRIVATE
+      koinos_backup_public_restore_lib)
+    target_compile_definitions(koinos_restore_baseline_fixture PRIVATE
+      TELENO_SC0_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    if(NOT Python3_Interpreter_FOUND)
+      find_package(Python3 COMPONENTS Interpreter QUIET)
+    endif()
+    if(Python3_Interpreter_FOUND)
+      add_test(NAME teleno_restore_baseline_harness_test
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/../tools/backup/record_sc0_baseline.py
+          --build-dir ${CMAKE_BINARY_DIR} --repetitions 1)
+      set_tests_properties(teleno_restore_baseline_harness_test PROPERTIES TIMEOUT 90)
+    endif()
+  endif()
 
   add_executable(koinos_backup_service_test
     ../tests/backup/backup_service_test.cpp)
@@ -630,11 +857,36 @@ if(KOINOS_BUILD_TESTS)
 
   add_test(NAME koinos_p2p_one_peer_sync_test COMMAND koinos_p2p_one_peer_sync_test)
 
+  add_executable(koinos_peer_dial_budget_test ../tests/p2p/peer_dial_budget_test.cpp)
+  target_link_libraries(koinos_peer_dial_budget_test PRIVATE koinos_p2p_lib)
+  target_compile_options(koinos_peer_dial_budget_test PRIVATE -UNDEBUG)
+  add_test(NAME koinos_peer_dial_budget_test COMMAND koinos_peer_dial_budget_test)
+  set_tests_properties(koinos_peer_dial_budget_test PROPERTIES TIMEOUT 30)
+
+  foreach(_peer_component peer_advice_store peer_snapshot_budget)
+    add_executable(koinos_${_peer_component}_test ../tests/p2p/${_peer_component}_test.cpp)
+    target_link_libraries(koinos_${_peer_component}_test PRIVATE koinos_p2p_lib)
+    target_compile_options(koinos_${_peer_component}_test PRIVATE -UNDEBUG)
+    add_test(NAME koinos_${_peer_component}_test COMMAND koinos_${_peer_component}_test)
+    set_tests_properties(koinos_${_peer_component}_test PROPERTIES TIMEOUT 30)
+  endforeach()
+
+  add_executable(koinos_peer_error_handler_test ../tests/p2p/peer_error_handler_test.cpp)
+  target_link_libraries(koinos_peer_error_handler_test PRIVATE koinos_p2p_lib)
+  add_test(NAME koinos_peer_error_handler_test COMMAND koinos_peer_error_handler_test)
+  set_tests_properties(koinos_peer_error_handler_test PROPERTIES TIMEOUT 30)
+
+  add_executable(koinos_p2p_seen_cache_test ../tests/p2p/seen_cache_test.cpp)
+  target_include_directories(koinos_p2p_seen_cache_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(koinos_p2p_seen_cache_test PRIVATE Threads::Threads)
+  add_test(NAME koinos_p2p_seen_cache_test COMMAND koinos_p2p_seen_cache_test)
+
   add_executable(koinos_block_producer_test
     ../tests/block_production/block_producer_test.cpp)
 
   target_link_libraries(koinos_block_producer_test PRIVATE
-    koinos_block_producer_lib)
+    koinos_block_producer_lib
+    mempool_lib)
 
   add_test(NAME koinos_block_producer_test COMMAND koinos_block_producer_test)
 
@@ -648,6 +900,17 @@ if(KOINOS_BUILD_TESTS)
 
   add_test(NAME koinos_mempool_adapter_test COMMAND koinos_mempool_adapter_test)
 
+  add_executable(koinos_mempool_admission_atomicity_test
+    ../tests/mempool/admission_atomicity_test.cpp)
+  target_link_libraries(koinos_mempool_admission_atomicity_test PRIVATE mempool_lib)
+  add_test(NAME koinos_mempool_admission_atomicity_test COMMAND koinos_mempool_admission_atomicity_test)
+  set_tests_properties(koinos_mempool_admission_atomicity_test PROPERTIES TIMEOUT 60)
+
+  add_executable(koinos_mempool_cleanup_atomicity_test ../tests/mempool/cleanup_atomicity_test.cpp)
+  target_link_libraries(koinos_mempool_cleanup_atomicity_test PRIVATE mempool_lib)
+  add_test(NAME koinos_mempool_cleanup_atomicity_test COMMAND koinos_mempool_cleanup_atomicity_test)
+  set_tests_properties(koinos_mempool_cleanup_atomicity_test PROPERTIES TIMEOUT 120)
+
   add_executable(koinos_grpc_server_test
     ../tests/grpc/grpc_server_test.cpp)
 
@@ -660,6 +923,38 @@ if(KOINOS_BUILD_TESTS)
   add_test(NAME koinos_grpc_server_test COMMAND koinos_grpc_server_test)
 
   if(KOINOS_ENABLE_LIBP2P)
+    add_executable(koinos_sdk_address_repository_test ../tests/p2p/sdk_address_repository_test.cpp)
+    target_link_libraries(koinos_sdk_address_repository_test PRIVATE koinos_p2p_lib)
+    target_compile_options(koinos_sdk_address_repository_test PRIVATE -UNDEBUG)
+    add_test(NAME koinos_sdk_address_repository_test COMMAND koinos_sdk_address_repository_test)
+    set_tests_properties(koinos_sdk_address_repository_test PROPERTIES TIMEOUT 30)
+    if(TELENO_TSAN_SCOPE_OVERLAY)
+      add_executable(koinos_tsan_scope_lifetime_test ../tests/p2p/tsan_scope_lifetime_test.cpp)
+      target_include_directories(koinos_tsan_scope_lifetime_test PRIVATE "${TELENO_TSAN_SCOPE_OVERLAY}")
+      target_link_libraries(koinos_tsan_scope_lifetime_test PRIVATE Threads::Threads)
+      add_test(NAME koinos_tsan_scope_lifetime_test COMMAND koinos_tsan_scope_lifetime_test)
+      set_tests_properties(koinos_tsan_scope_lifetime_test PROPERTIES TIMEOUT 30)
+    endif()
+    add_executable(koinos_peer_rpc_client_test ../tests/p2p/peer_rpc_client_test.cpp)
+    target_link_libraries(koinos_peer_rpc_client_test PRIVATE koinos_p2p_lib)
+    add_test(NAME koinos_peer_rpc_client_test COMMAND koinos_peer_rpc_client_test)
+    set_tests_properties(koinos_peer_rpc_client_test PROPERTIES TIMEOUT 30)
+
+    add_executable(koinos_peer_rpc_read_test ../tests/p2p/peer_rpc_read_test.cpp)
+    target_link_libraries(koinos_peer_rpc_read_test PRIVATE koinos_p2p_lib)
+    add_test(NAME koinos_peer_rpc_read_test COMMAND koinos_peer_rpc_read_test)
+    set_tests_properties(koinos_peer_rpc_read_test PROPERTIES TIMEOUT 30)
+
+    add_executable(koinos_peer_rpc_transport_test ../tests/p2p/peer_rpc_transport_test.cpp)
+    target_link_libraries(koinos_peer_rpc_transport_test PRIVATE koinos_p2p_lib)
+    add_test(NAME koinos_peer_rpc_transport_test COMMAND koinos_peer_rpc_transport_test)
+    set_tests_properties(koinos_peer_rpc_transport_test PROPERTIES TIMEOUT 60)
+
+    add_executable(koinos_peer_rpc_write_test ../tests/p2p/peer_rpc_write_test.cpp)
+    target_link_libraries(koinos_peer_rpc_write_test PRIVATE koinos_p2p_lib)
+    add_test(NAME koinos_peer_rpc_write_test COMMAND koinos_peer_rpc_write_test)
+    set_tests_properties(koinos_peer_rpc_write_test PROPERTIES TIMEOUT 30)
+
     add_executable(koinos_libp2p_peer_rpc_live_test
       ../tests/p2p/libp2p_peer_rpc_live_test.cpp)
 
@@ -700,11 +995,17 @@ if(KOINOS_BUILD_TESTS)
     koinos_backup_admin_server_test
     koinos_gorpc_codec_test
     koinos_p2p_one_peer_sync_test
+    koinos_p2p_seen_cache_test
+    koinos_peer_error_handler_test
     koinos_block_producer_test
     koinos_mempool_adapter_test
     koinos_grpc_server_test)
   if(KOINOS_ENABLE_LIBP2P)
     list(APPEND _teleno_asserting_test_targets
+      koinos_peer_rpc_read_test
+      koinos_peer_rpc_client_test
+      koinos_peer_rpc_transport_test
+      koinos_peer_rpc_write_test
       koinos_libp2p_peer_rpc_live_test
       koinos_libp2p_one_peer_sync_live_test
       koinos_libp2p_gossip_live_test)
@@ -766,6 +1067,17 @@ target_link_libraries(
       protobuf::libprotobuf)
 
 # ── Main executable ──
+
+if(KOINOS_BUILD_TESTS)
+  add_executable(koinos_jsonrpc_session_lifecycle_test ../tests/jsonrpc/session_lifecycle_test.cpp)
+  target_link_libraries(koinos_jsonrpc_session_lifecycle_test PRIVATE koinos_jsonrpc_lib)
+  add_test(NAME koinos_jsonrpc_session_lifecycle_test COMMAND koinos_jsonrpc_session_lifecycle_test)
+  set_tests_properties(koinos_jsonrpc_session_lifecycle_test PROPERTIES TIMEOUT 30)
+  add_executable(koinos_jsonrpc_batch_memory_test ../tests/jsonrpc/batch_memory_test.cpp)
+  target_link_libraries(koinos_jsonrpc_batch_memory_test PRIVATE koinos_jsonrpc_lib)
+  add_test(NAME koinos_jsonrpc_batch_memory_test COMMAND koinos_jsonrpc_batch_memory_test)
+  set_tests_properties(koinos_jsonrpc_batch_memory_test PROPERTIES TIMEOUT 30)
+endif()
 #
 # Phase 1: Links the existing chain library directly.
 # The chain library is built from the koinos-chain submodule but used

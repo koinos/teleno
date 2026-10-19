@@ -1,4 +1,5 @@
 #pragma once
+#include <koinos/vm_manager/vm_memory.hpp>
 
 #include <koinos/chain/constants.hpp>
 #include "core/monolith_client.hpp"
@@ -34,7 +35,8 @@ class controller final
 public:
   controller( uint64_t read_compute_bandwith_limit                = 0,
               uint32_t syscall_bufsize                            = 0,
-              std::optional< uint64_t > pending_transaction_limit = {} );
+              std::optional< uint64_t > pending_transaction_limit = {},
+              uint64_t vm_module_cache_max_capacity_bytes = 0 );
   ~controller();
 
   void
@@ -44,6 +46,7 @@ public:
              fork_resolution_algorithm algo,
              bool reset );
   void close();
+  vm_manager::module_cache_memory vm_cache_memory() const;
   void set_client( std::shared_ptr< node::IRpcClient > c );
 
   rpc::chain::submit_block_response

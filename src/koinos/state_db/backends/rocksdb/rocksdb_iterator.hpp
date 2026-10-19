@@ -24,6 +24,7 @@ public:
   virtual ~rocksdb_iterator() override;
 
   virtual const value_type& operator*() const override;
+  virtual value_ptr share_value() const override;
 
   virtual const key_type& key() const override;
 

@@ -18,6 +18,9 @@
 
 #include "transport.hpp"
 #include "types.hpp"
+#include "peer_dial_budget.hpp"
+#include "peer_advice_store.hpp"
+#include "peer_snapshot_budget.hpp"
 
 #include <atomic>
 #include <map>
@@ -37,12 +40,15 @@
 #include <libp2p/protocol/common/subscription.hpp>
 #include <libp2p/peer/peer_id.hpp>
 #include <libp2p/multi/multiaddress.hpp>
+#include "sdk_address_repository.hpp"
 
 namespace libp2p::protocol::kademlia {
 class Kademlia;
 }
 
 namespace koinos::node::p2p {
+
+namespace detail { class RpcRequestRead; }
 
 class Libp2pTransport final : public ITransport
 {
@@ -57,6 +63,15 @@ public:
 	    bool enable_dht_local = false;
 	    std::string protocol_version = "koinos/p2p/1.0.0";
 	    unsigned int requested_io_threads = 1;
+        size_t max_pending_dials = 32;
+        size_t pending_dial_peer_capacity_bytes = 1024 * 1024;
+        size_t max_known_peer_advice = 1024;
+        size_t known_peer_advice_capacity_bytes = 1024 * 1024;
+        size_t max_peer_snapshots = 4;
+        size_t peer_snapshot_entries = 4096;
+        size_t peer_snapshot_capacity_bytes = 4 * 1024 * 1024;
+        detail::SdkAddressLimits sdk_address_limits;
+        uint32_t sdk_metadata_collection_interval_ms = 60'000;
 	  };
 
   explicit Libp2pTransport( const Config& config );
@@ -70,8 +85,12 @@ public:
   void connect_peer( const PeerID& peer ) override;
   void disconnect_peer( const PeerID& peer ) override;
   uint32_t connected_peer_count() const override;
-  std::vector< PeerID > connected_peers() const override;
-  std::vector< PeerID > known_peers() const override;
+  PeerSnapshot connected_peers() const override;
+  PeerSnapshot known_peers() const override;
+  detail::DialBudget::Stats dial_stats() const { return _dial_budget->stats(); }
+  detail::PeerSnapshotBudget::Stats peer_snapshot_stats() const { return _peer_snapshot_budget->stats(); }
+  detail::PeerAdviceStore::Stats peer_advice_stats() const { std::lock_guard lock(_peers_mutex);return _known_peers.stats(); }
+  detail::SdkAddressBudget::Stats sdk_address_stats() const { return _sdk_address_budget->stats(); }
 
   // ── Peer RPC (custom protocol /koinos/peerrpc/1.0.0) ──
   std::string peer_get_chain_id( const PeerID& peer ) override;
@@ -122,7 +141,14 @@ private:
   /** Convert between PeerID types. */
   static PeerID to_peer_id( const libp2p::peer::PeerId& pid );
 
+  // Caller holds _peers_mutex; optional advice must not suppress connection notification.
+  void remember_known_peer_locked( const PeerID& peer, bool seed = false ) noexcept;
+  bool publish_connected_peer_locked( const PeerID& peer );
+
   Config _config;
+  std::shared_ptr< detail::DialBudget > _dial_budget;
+  std::shared_ptr< detail::PeerSnapshotBudget > _peer_snapshot_budget;
+  std::shared_ptr< detail::SdkAddressBudget > _sdk_address_budget;
   struct Libp2pRuntime;
   std::unique_ptr< Libp2pRuntime > _runtime;
 	  std::shared_ptr< libp2p::Host > _host;
@@ -139,6 +165,12 @@ private:
   BlockReceivedCallback _on_block;
   TxReceivedCallback _on_tx;
   PeerRpcRequestCallback _on_peer_rpc_request;
+  std::shared_ptr< std::atomic< bool > > _rpc_read_active;
+  struct RpcClientContext;
+  // Published/retired atomically; outbound callers never race mutable _host.
+  std::shared_ptr< RpcClientContext > _rpc_client_context;
+  // Accessed by the serialized I/O runner, or after that runner has joined.
+  std::vector< std::weak_ptr< detail::RpcRequestRead > > _rpc_reads;
 
   // IO
   std::shared_ptr< boost::asio::io_context > _io;
@@ -152,8 +184,7 @@ private:
 
   mutable std::mutex _peers_mutex;
   std::map< std::string, PeerID > _connected;
-  std::set< std::string > _connecting;
-  std::map< std::string, PeerID > _known_peers;
+  detail::PeerAdviceStore _known_peers;
 };
 
 } // namespace koinos::node::p2p

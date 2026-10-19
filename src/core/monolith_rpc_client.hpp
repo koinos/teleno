@@ -9,9 +9,14 @@
 #include <koinos/rpc/block_store/block_store_rpc.pb.h>
 #include <koinos/rpc/mempool/mempool_rpc.pb.h>
 #include <koinos/util/services.hpp>
+#include <koinos/log.hpp>
 
+#include <atomic>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 
 namespace koinos::node {
 
@@ -22,9 +27,30 @@ namespace koinos::node {
 class MonolithRpcClient final : public IRpcClient
 {
 public:
-  MonolithRpcClient( IBlockStore* block_store, IMempool* mempool, EventBus* event_bus )
-      : _block_store( block_store ), _mempool( mempool ), _event_bus( event_bus )
+  // Native admission must finish before notifying accepted-work observers.
+  // No new protobuf/RPC surface is introduced; disabled mempool keeps the
+  // legacy notification-only behavior through an empty callback.
+  using TransactionAdmission = std::function< void( const ::koinos::broadcast::transaction_accepted& ) >;
+  MonolithRpcClient( IBlockStore* block_store, IMempool* mempool, EventBus* event_bus,
+                     TransactionAdmission transaction_admission = {},
+                     TransactionWorkLimits work_limits = {} )
+      : _block_store( block_store ), _mempool( mempool ), _event_bus( event_bus ),
+        _transaction_admission( std::move( transaction_admission ) ), _transaction_work( work_limits )
   {
+  }
+
+  std::unique_ptr< TransactionWorkReservation >
+  reserve_transaction_work( const protocol::transaction& transaction ) override
+  {
+    if( !_transaction_work.enabled() ) return {};
+    return _transaction_work.reserve( transaction.ByteSizeLong() );
+  }
+
+  TransactionWorkSnapshot transaction_work_snapshot() const { return _transaction_work.snapshot(); }
+
+  uint64_t transaction_notification_failures() const noexcept
+  {
+    return _transaction_notification_failures.load();
   }
 
   std::shared_future< std::string > rpc( const std::string& service,
@@ -57,6 +83,33 @@ public:
 
   void broadcast( const std::string& topic, const std::string& payload ) override
   {
+    if( topic == "koinos.transaction.accept" && _transaction_admission )
+    {
+      ::koinos::broadcast::transaction_accepted ta;
+      if( !ta.ParseFromString( payload ) || !ta.has_transaction() || !ta.has_receipt() )
+        throw std::invalid_argument( "Malformed native transaction admission message" );
+
+      // Admission failures propagate to submit_transaction, before any
+      // accepted-work notification. Never acknowledge a swallowed refusal.
+      _transaction_admission( ta );
+      if( _event_bus )
+      {
+        try { _event_bus->on_transaction_accepted( ta ); }
+        catch( const std::exception& e )
+        {
+          ++_transaction_notification_failures;
+          try { LOG( warning ) << "[mempool] Transaction retained, but accepted-work notification failed: " << e.what(); }
+          catch( ... ) {}
+        }
+        catch( ... )
+        {
+          ++_transaction_notification_failures;
+          try { LOG( warning ) << "[mempool] Transaction retained, but accepted-work notification failed: unknown exception"; }
+          catch( ... ) {}
+        }
+      }
+      return;
+    }
     if( !_event_bus )
       return;
 
@@ -140,6 +193,9 @@ private:
   IBlockStore* _block_store;
   IMempool* _mempool;
   EventBus* _event_bus;
+  TransactionAdmission _transaction_admission;
+  TransactionWorkBudget _transaction_work;
+  std::atomic< uint64_t > _transaction_notification_failures{ 0 };
 };
 
 } // namespace koinos::node

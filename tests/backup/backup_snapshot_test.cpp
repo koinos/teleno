@@ -244,17 +244,11 @@ int main()
     assert( preserved_db.read_metadata( "backup.snapshot.old" ) == "preserved" );
     preserved_db.close();
 
-    bool removed_object = false;
-    for( const auto& entry: std::filesystem::recursive_directory_iterator( root / "repo" / "objects" ) )
-    {
-      if( entry.is_regular_file() )
-      {
-        std::filesystem::remove( entry.path() );
-        removed_object = true;
-        break;
-      }
-    }
-    assert( removed_object );
+    // Directory order can select an old snapshot's unused object. Remove a
+    // required database object referenced by the selected latest snapshot.
+    const auto current_sha = snapshot_file_sha256( second.files_path, "db/CURRENT" );
+    assert( !current_sha.empty() );
+    assert( std::filesystem::remove( snapshot_object_path( cfg.backup.local.directory, current_sha ) ) );
     auto missing_preflight = build_local_restore_preflight( cfg.backup.local.directory, restore_target );
     assert( missing_preflight.missing_object_count > 0 );
     assert( !missing_preflight.ready_to_restore );

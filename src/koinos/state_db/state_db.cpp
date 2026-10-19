@@ -4,6 +4,7 @@
 #include <koinos/state_db/merge_iterator.hpp>
 #include <koinos/state_db/state_db.hpp>
 #include <koinos/state_db/state_delta.hpp>
+#include <koinos/state_db/retained_memory.hpp>
 #include <koinos/util/conversion.hpp>
 
 #include <condition_variable>
@@ -14,6 +15,7 @@
 #include <shared_mutex>
 #include <unordered_set>
 #include <utility>
+#include <iostream>
 
 namespace std {
 template<>
@@ -96,12 +98,13 @@ public:
 
   ~state_node_impl() {}
 
-  const object_value* get_object( const object_space& space, const object_key& key ) const;
-  std::pair< const object_value*, const object_key > get_next_object( const object_space& space,
+  object_value_ptr get_object( const object_space& space, const object_key& key ) const;
+  std::pair< object_value_ptr, const object_key > get_next_object( const object_space& space,
                                                                       const object_key& key ) const;
-  std::pair< const object_value*, const object_key > get_prev_object( const object_space& space,
+  std::pair< object_value_ptr, const object_key > get_prev_object( const object_space& space,
                                                                       const object_key& key ) const;
   int64_t put_object( const object_space& space, const object_key& key, const object_value* val );
+  int64_t put_object_owned( const object_space& space, const object_key& key, object_value_ptr val );
   int64_t remove_object( const object_space& space, const object_key& key, bool preserve_tombstone = false );
   crypto::multihash merkle_root() const;
   crypto::multihash pending_merkle_root() const;
@@ -126,7 +129,8 @@ public:
 
   ~database_impl()
   {
-    close_lockless();
+    try { close_lockless(); }
+    catch( ... ) { std::cerr << "[state_db] shutdown persistence failed; preserve database for recovery\n"; }
   }
 
   shared_lock_ptr get_shared_lock() const;
@@ -197,6 +201,7 @@ public:
   std::vector< state_node_ptr > get_fork_heads( const unique_lock_ptr& lock ) const;
   std::vector< state_node_ptr > get_all_nodes( const shared_lock_ptr& lock ) const;
   std::vector< state_node_ptr > get_all_nodes( const unique_lock_ptr& lock ) const;
+  retained_memory_usage get_retained_memory_usage( const unique_lock_ptr& lock ) const;
   state_node_ptr get_root( const shared_lock_ptr& lock ) const;
   state_node_ptr get_root( const unique_lock_ptr& lock ) const;
   state_node_ptr get_root_lockless() const;
@@ -382,10 +387,15 @@ void database_impl::close( const unique_lock_ptr& lock )
 
 void database_impl::close_lockless()
 {
+  std::exception_ptr failure;
+  if( _root )
+    if( auto backend = std::dynamic_pointer_cast<backends::rocksdb::rocksdb_backend>(_root->backend()) )
+      try { backend->close(); } catch( ... ) { failure=std::current_exception(); }
   _fork_heads.clear();
   _root.reset();
   _head.reset();
   _index.clear();
+  if(failure) std::rethrow_exception(failure);
 }
 
 state_node_ptr database_impl::get_node_at_revision( uint64_t revision,
@@ -1033,7 +1043,7 @@ bool database_impl::is_open() const
   return (bool)_root && (bool)_head;
 }
 
-const object_value* state_node_impl::get_object( const object_space& space, const object_key& key ) const
+object_value_ptr state_node_impl::get_object( const object_space& space, const object_key& key ) const
 {
   chain::database_key db_key;
   *db_key.mutable_space() = space;
@@ -1050,7 +1060,7 @@ const object_value* state_node_impl::get_object( const object_space& space, cons
   return nullptr;
 }
 
-std::pair< const object_value*, const object_key > state_node_impl::get_next_object( const object_space& space,
+std::pair< object_value_ptr, const object_key > state_node_impl::get_next_object( const object_space& space,
                                                                                      const object_key& key ) const
 {
   chain::database_key db_key;
@@ -1072,14 +1082,14 @@ std::pair< const object_value*, const object_key > state_node_impl::get_next_obj
 
     if( next_key.space() == space )
     {
-      return { &*it, next_key.key() };
+      return { it.share_value(), next_key.key() };
     }
   }
 
   return { nullptr, null_key };
 }
 
-std::pair< const object_value*, const object_key > state_node_impl::get_prev_object( const object_space& space,
+std::pair< object_value_ptr, const object_key > state_node_impl::get_prev_object( const object_space& space,
                                                                                      const object_key& key ) const
 {
   chain::database_key db_key;
@@ -1097,7 +1107,7 @@ std::pair< const object_value*, const object_key > state_node_impl::get_prev_obj
 
     if( next_key.space() == space )
     {
-      return { &*it, next_key.key() };
+      return { it.share_value(), next_key.key() };
     }
   }
 
@@ -1124,6 +1134,20 @@ int64_t state_node_impl::put_object( const object_space& space, const object_key
   bytes_used += val->size();
   _state->put( key_string, *val );
 
+  return bytes_used;
+}
+
+int64_t state_node_impl::put_object_owned( const object_space& space, const object_key& key, object_value_ptr val )
+{
+  KOINOS_ASSERT( !_state->is_finalized(), node_finalized, "cannot write to a finalized node" );
+  KOINOS_ASSERT( val, illegal_argument, "owned state value is null" );
+  chain::database_key db_key;
+  *db_key.mutable_space() = space; db_key.set_key( key );
+  auto key_string = util::converter::as< std::string >( db_key );
+  auto previous = merge_state( _state ).find( key_string );
+  int64_t bytes_used = previous ? -static_cast< int64_t >( previous->size() ) : static_cast< int64_t >( key_string.size() );
+  bytes_used += val->size();
+  _state->put_owned( key_string, std::move( val ) );
   return bytes_used;
 }
 
@@ -1173,18 +1197,18 @@ abstract_state_node::abstract_state_node():
 
 abstract_state_node::~abstract_state_node() {}
 
-const object_value* abstract_state_node::get_object( const object_space& space, const object_key& key ) const
+object_value_ptr abstract_state_node::get_object( const object_space& space, const object_key& key ) const
 {
   return _impl->get_object( space, key );
 }
 
-std::pair< const object_value*, const object_key > abstract_state_node::get_next_object( const object_space& space,
+std::pair< object_value_ptr, const object_key > abstract_state_node::get_next_object( const object_space& space,
                                                                                          const object_key& key ) const
 {
   return _impl->get_next_object( space, key );
 }
 
-std::pair< const object_value*, const object_key > abstract_state_node::get_prev_object( const object_space& space,
+std::pair< object_value_ptr, const object_key > abstract_state_node::get_prev_object( const object_space& space,
                                                                                          const object_key& key ) const
 {
   return _impl->get_prev_object( space, key );
@@ -1193,6 +1217,11 @@ std::pair< const object_value*, const object_key > abstract_state_node::get_prev
 int64_t abstract_state_node::put_object( const object_space& space, const object_key& key, const object_value* val )
 {
   return _impl->put_object( space, key, val );
+}
+
+int64_t abstract_state_node::put_object_owned( const object_space& space, const object_key& key, object_value_ptr val )
+{
+  return _impl->put_object_owned( space, key, std::move( val ) );
 }
 
 int64_t abstract_state_node::remove_object( const object_space& space, const object_key& key )
@@ -1321,6 +1350,49 @@ void anonymous_state_node::commit()
 void anonymous_state_node::reset()
 {
   _impl->_state = _impl->_state->make_child();
+}
+
+void anonymous_state_node::commit_all_writes( const std::vector< anonymous_state_node_ptr >& nodes )
+{
+  std::vector< std::shared_ptr< detail::state_delta > > children, resets;
+  children.reserve( nodes.size() );
+  resets.reserve( nodes.size() );
+  for( const auto& node: nodes )
+  {
+    KOINOS_ASSERT( node && node->_impl->_state && node->_impl->_state->parent(),
+                   illegal_argument, "atomic write batch requires initialized anonymous nodes" );
+    // Nested anonymous parents can also be a consumed source in this batch.
+    // Named database parents cannot alias these unindexed write overlays.
+    KOINOS_ASSERT( dynamic_cast< state_node* >( node->_parent.get() ),
+                   illegal_argument, "atomic write batch requires named state-node parents" );
+    children.push_back( node->_impl->_state );
+    // Even the reset allocations must finish before publication. A fresh
+    // overlay refers directly to its original parent, not the consumed overlay.
+    resets.push_back( node->_impl->_state->parent()->make_child() );
+  }
+  detail::state_delta::squash_all_writes( children );
+  for( size_t i = 0; i < nodes.size(); ++i )
+    nodes[ i ]->_impl->_state = std::move( resets[ i ] );
+}
+
+void anonymous_state_node::commit_all_changes( const std::vector< anonymous_state_node_ptr >& nodes )
+{
+  std::vector< std::shared_ptr< detail::state_delta > > children, resets;
+  children.reserve( nodes.size() );
+  resets.reserve( nodes.size() );
+  for( const auto& node: nodes )
+  {
+    KOINOS_ASSERT( node && node->_impl->_state && node->_impl->_state->parent(),
+                   illegal_argument, "change batch requires initialized anonymous nodes" );
+    KOINOS_ASSERT( dynamic_cast< state_node* >( node->_parent.get() ),
+                   illegal_argument, "change batch requires named state-node parents" );
+    children.push_back( node->_impl->_state );
+    resets.push_back( node->_impl->_state->parent()->make_child() );
+  }
+  auto batch = detail::state_delta::prepare_all_changes( children );
+  batch.apply();
+  for( size_t i = 0; i < nodes.size(); ++i )
+    nodes[ i ]->_impl->_state = std::move( resets[ i ] );
 }
 
 abstract_state_node_ptr anonymous_state_node::shared_from_derived()
@@ -1554,6 +1626,22 @@ std::vector< state_node_ptr > database::get_all_nodes( const shared_lock_ptr& lo
 std::vector< state_node_ptr > database::get_all_nodes( const unique_lock_ptr& lock ) const
 {
   return impl->get_all_nodes( lock );
+}
+
+retained_memory_usage detail::database_impl::get_retained_memory_usage( const unique_lock_ptr& lock ) const
+{
+  KOINOS_ASSERT( verify_unique_lock( lock ), illegal_argument, "database is not properly locked" );
+  std::lock_guard< std::timed_mutex > index_lock( _index_mutex );
+  KOINOS_ASSERT( is_open(), database_not_open, "database is not open" );
+  detail::retained_memory_accumulator inventory;
+  for( const auto& delta: _index )
+    delta->inventory_retained_memory( inventory );
+  return inventory.usage;
+}
+
+retained_memory_usage database::get_retained_memory_usage( const unique_lock_ptr& lock ) const
+{
+  return impl->get_retained_memory_usage( lock );
 }
 
 state_node_ptr database::get_root( const shared_lock_ptr& lock ) const

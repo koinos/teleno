@@ -8,6 +8,7 @@
 
 #include <exception>
 #include <iostream>
+#include <new>
 #include <optional>
 #include <string>
 
@@ -48,8 +49,8 @@ char* resolve_ptr( FizzyInstance* fizzy_instance, uint32_t ptr, uint32_t size )
   return mem_data + ptr;
 }
 
-fizzy_vm_backend::fizzy_vm_backend():
-    _cache( constants::module_cache_size )
+fizzy_vm_backend::fizzy_vm_backend( uint64_t module_cache_max_capacity_bytes ):
+    _cache( constants::module_cache_size, module_cache_max_capacity_bytes )
 {}
 
 fizzy_vm_backend::~fizzy_vm_backend() {}
@@ -126,6 +127,9 @@ module_ptr parse_bytecode( const char* bytecode_data, size_t bytecode_size )
 
   if( ptr == nullptr )
   {
+    // A local allocation failure is not a deterministic contract reversion.
+    if( fizzy_err.code == FizzyErrorMemoryAllocationFailed )
+      throw std::bad_alloc();
     std::string error_code    = fizzy_error_code_name( fizzy_err.code );
     std::string error_message = fizzy_err.message;
     KOINOS_THROW( module_parse_exception,
@@ -133,7 +137,12 @@ module_ptr parse_bytecode( const char* bytecode_data, size_t bytecode_size )
                   ( "code", error_code )( "msg", error_message ) );
   }
 
-  return std::make_shared< const module_guard >( ptr );
+  // The pinned Koinos Fizzy fork returns an owned module and instances borrow
+  // it. Guard it before the shared control-block allocation can fail.
+  std::unique_ptr< const FizzyModule, decltype( &fizzy_free_module ) > owned( ptr, fizzy_free_module );
+  auto result = std::make_shared< const module_guard >( owned.get() );
+  owned.release();
+  return result;
 }
 
 void fizzy_runner::instantiate_module()
@@ -204,6 +213,8 @@ void fizzy_runner::instantiate_module()
                                          &fizzy_err );
   if( _instance == nullptr )
   {
+    if( fizzy_err.code == FizzyErrorMemoryAllocationFailed )
+      throw std::bad_alloc();
     std::string error_code    = fizzy_error_code_name( fizzy_err.code );
     std::string error_message = fizzy_err.message;
     KOINOS_THROW( module_instantiate_exception,
@@ -317,7 +328,10 @@ void fizzy_runner::call_start()
   KOINOS_ASSERT( _fizzy_context == nullptr, runner_state_exception, "_fizzy_context was unexpectedly non-null" );
   _previous_ticks = _hapi.get_meter_ticks();
   _fizzy_context  = fizzy_create_metered_execution_context( constants::fizzy_max_call_depth, _previous_ticks );
-  KOINOS_ASSERT( _fizzy_context != nullptr, create_context_exception, "could not create execution context" );
+  // The pinned context constructor returns null only when allocation fails.
+  // Do not charge/accept a reverted transaction for a machine-local failure.
+  if( _fizzy_context == nullptr )
+    throw std::bad_alloc();
 
   uint32_t start_func_idx = 0;
   bool success            = fizzy_find_exported_function_index( _module->get(), "_start", &start_func_idx );
@@ -346,21 +360,7 @@ void fizzy_runner::call_start()
 
 void fizzy_vm_backend::run( abstract_host_api& hapi, const std::string& bytecode, const std::string& id )
 {
-  module_ptr ptr;
-
-  if( id.size() )
-  {
-    ptr = _cache.get_module( id );
-    if( !ptr )
-    {
-      ptr = parse_bytecode( bytecode.data(), bytecode.size() );
-      _cache.put_module( id, ptr );
-    }
-  }
-  else
-  {
-    ptr = parse_bytecode( bytecode.data(), bytecode.size() );
-  }
+  auto ptr = _cache.get_or_load( id, [&] { return parse_bytecode( bytecode.data(), bytecode.size() ); } );
 
   fizzy_runner runner( hapi, ptr );
   runner.instantiate_module();

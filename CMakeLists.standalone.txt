@@ -1,5 +1,5 @@
 # Standalone build that uses pre-built Hunter packages from koinos-chain.
-# Bypasses Hunter entirely — no re-downloading, no re-compilation.
+# Reuses Hunter packages; Fizzy is rebuilt from a pinned, corrected source.
 #
 # Usage:
 #   cmake -S . -B build \
@@ -59,7 +59,8 @@ if(LIBSSH_ROOT)
 else()
   find_package(libssh CONFIG REQUIRED PATHS "/opt/homebrew" "/usr/local")
 endif()
-find_package(fizzy CONFIG REQUIRED)
+include(cmake/TelenoFizzy.cmake)
+include(cmake/TelenoProtobuf.cmake)
 find_package(ethash CONFIG REQUIRED)
 find_package(libsecp256k1-vrf CONFIG REQUIRED)
 find_package(koinos_log CONFIG REQUIRED)

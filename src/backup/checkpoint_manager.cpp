@@ -13,20 +13,15 @@ std::pair< uint64_t, uint64_t > directory_file_stats( const std::filesystem::pat
 {
   uint64_t file_count = 0;
   uint64_t total_bytes = 0;
-  std::error_code ec;
-
-  if( !std::filesystem::exists( root, ec ) )
+  if( !std::filesystem::exists( root ) )
     return { file_count, total_bytes };
 
-  for( const auto& entry: std::filesystem::recursive_directory_iterator( root, ec ) )
+  for( const auto& entry: std::filesystem::recursive_directory_iterator( root ) )
   {
-    if( ec )
-      break;
-    if( !entry.is_regular_file( ec ) )
+    if( !entry.is_regular_file() )
       continue;
     ++file_count;
-    total_bytes += entry.file_size( ec );
-    ec.clear();
+    total_bytes += entry.file_size();
   }
 
   return { file_count, total_bytes };

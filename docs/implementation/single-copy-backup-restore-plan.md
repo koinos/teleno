@@ -1,11 +1,38 @@
 # Single-copy backup restore implementation plan
 
-Date: 2026-09-29. Status: **PROPOSED — documentation only; implementation and
-capacity validation have not started.**
+Date: 2026-09-29. Updated: 2026-10-03. Status: **SC0 baseline collected with
+recorded blockers; SC1 planning, SC2 staging and SC3 internal offline validation/
+observer activation implemented. SC3 verification is recorded separately;
+SC4 standalone CLI integration is implemented with recorded validation/blockers;
+SC5 local measurement tooling is implemented with synthetic evidence; actual
+capacity/Linux qualification remains blocked; SC6 documentation handoff is
+prepared with release readiness blocked.**
+
+Resource adaptation follow-up (2026-10-03): the
+[low-resource mainnet observer plan](low-resource-mainnet-observer-plan.md)
+adds LR0–LR6 for the selected 2-vCPU / 4-GB / 40-GB whole-server target.
+LR0 local baseline tooling is implemented with [recorded results and blockers](../validation/low-resource-lr0-baseline.md);
+LR1–LR6 remain proposed and full-history capacity qualification remains blocked.
+It keeps SC results/gates intact and, following the user's clarification,
+requires complete history from genesis with lossless storage improvements only.
+[`teleno_light`](teleno-light-concept.md) is a separate deferred concept, not
+a fallback for this target. No low-resource profile, retention change or
+replacement reserve policy is implemented yet.
 
 Planning checkout: `49b2a36f0255dfe1e0e601351c903e5989434889`, with pre-existing
 tracked and untracked work. This plan describes the inspected working tree,
 not a clean release. Workspace: `/Users/pgarcgo/code/teleno` on the Mac.
+
+Latest qualification update (2026-10-15): the user reaffirmed the full-backup
+40 GB whole-server requirement. The designated replacement VPS is now available
+for isolated qualification, without production activation. The separately
+updated observer publisher now provides checkpoint-verified public identity.
+Current native VPS metadata preflight passes source/minimum checks, but the
+unchanged space model has a 4.140 GB deficit and stage refuses before payload or
+target creation. Full historical/source-signature and capacity gates remain.
+See [current evidence](../validation/restore-40gb-current-baseline.md).
+Earlier authorization and host observations below retain their historical
+context; the current [issue 9 contract](issue-9-goal.md) controls the active scope.
 
 ## 1. Goal and authorization boundary
 
@@ -18,12 +45,52 @@ Separately determine whether an identified snapshot can be restored, reopened,
 and advanced within a measured **40,000,000,000-byte storage budget**. A smaller
 restore footprint is not proof of sustainable operation on a 40 GB disk.
 
-The planning request authorized documentation only. A subsequent explicit
-request authorized committing and pushing this plan, not implementing it.
-Later implementation requires authorization. No runtime code, configuration,
-node, database, backup, release, or deployment is changed by preparing or
-publishing this document. Do not contact private servers or activate production
-as a side effect.
+### Intended server outcome (user clarification, 2026-10-01)
+
+The intended result is to launch Teleno from an independently stored native
+backup on the user-selected Linux VPS shown in the supplied screenshot:
+**2 vCPUs, 4 GB RAM and 40 GB local disk**. Treat this as the whole-server disk
+profile, including Ubuntu, installed runtime, logs and restore metadata, not
+just a separate 40 GB data volume. The independent backup must not need a
+second complete local payload before startup. Start as an observer, validate
+database/network identity and demonstrate advancing verified head after restore.
+
+These are screenshot-advertised resources, not measured usable bytes, kernel,
+CPU architecture, filesystem, free space or runtime readiness. Qualification
+must measure the actual server-equivalent environment, peak/steady RSS within
+4 GB, disk reserve and sustained operation. A snapshot that cannot fit safely
+must be rejected; do not weaken durability, validation or reserves to pass.
+No universal or indefinite 40 GB capacity guarantee is implied. Keep host names,
+addresses and credentials out of public documents. Repository implementation
+does not authorize connecting to, deploying on or modifying that server.
+
+Subsequent read-only observations on 2026-10-03 established Linux x86_64/ext4,
+2 processors, 4,000,043,008 bytes RAM, a 39,956,590,592-byte root filesystem and
+36,146,835,456 available bytes at the recorded sample. Those facts supersede
+the screenshot-only resource uncertainty, not the missing qualification. The
+selected Foundation snapshot declares about 29.40 GB, has source-identity/trust
+blockers, and exceeds that free space under the existing reserve model. See the
+low-resource plan for exact evidence, assumptions and proposed adaptation.
+
+The planning request authorized documentation only; a subsequent request
+authorized committing and pushing the plan. The request "Implement SC0"
+authorizes baseline tooling, builds and isolated synthetic restore fixtures.
+The subsequent "Implement next milestone" request authorizes SC1 metadata
+planning and tests, not SC2–SC6, unrelated production remediation, live-node
+operation or publication of a release. The SC0 tools exercise existing APIs
+against new scratch data without changing runtime defaults or implementing
+direct restore.
+The 2026-10-01 follow-up authorizes SC2 bounded direct transfer and resumable
+staging in isolated local fixtures, plus this server goal and memory update.
+SC3 activation, SC4 operational CLI integration, SC5 qualification and SC6 release
+handoff remain later milestones; no server operation or publication is authorized.
+Do not contact private servers or activate production as a side effect.
+
+The 2026-10-02 "proceed with the next milestone" request authorizes SC3 native
+offline validation, crash-recoverable activation and isolated local verification.
+It does not authorize operational CLI integration, server access, deployment,
+commit/push, release, data cleanup or block-production activation. Required
+Koinos One documentation handoff is documentation-only, not app integration.
 
 All future experiments must use repository-local scratch directories and
 fixtures. Large artifacts belong under an ignored `build-single-copy-evidence/`
@@ -32,6 +99,30 @@ under that scratch directory; never format an existing device or use a live
 basedir. Public snapshot reads and isolated read-only network catch-up must use
 an explicitly selected source and scope; they are not authorization to operate
 an existing node. No producer keys or transaction submission are needed.
+
+The subsequent 2026-10-02 request authorizes SC4 standalone CLI integration,
+end-to-end local regression and documentation handoff only. It does not authorize
+SC5/SC6 execution, audit remediation, server/live-node actions, production,
+commit/push, package/submodule integration or publication.
+
+The subsequent "Next step" request authorizes SC5 local measurement tooling,
+owned synthetic experiments and documentation. It does not authorize live VPS
+access, producer operation, audit remediation, cleanup of existing datasets,
+commit/push or release. Missing representative inputs/platforms remain explicit
+qualification blockers, not permission to substitute a tiny fixture.
+
+The 2026-10-03 "Next step" continues local work with the independent SC6
+documentation/checklist preparation and bounded existing verification. It does
+not waive preceding SC4/SC5 gates or authorize missing-source selection, VM/VPS
+provisioning, audit remediation, cleanup, app integration, commit/push or release.
+
+The subsequent request to adapt requirements to the selected server authorizes
+the LR planning/documentation supplement. It proposes a separately measured
+operational reserve and resource optimization, not weakened consensus,
+durability, authentication or automatic pruning. The user's subsequent
+clarification makes complete history mandatory and moves bounded history to
+the separate deferred `teleno_light` concept. It does not authorize runtime
+implementation, server writes, deployment, publisher changes or publication.
 
 ## 2. Evidence and present behavior
 
@@ -112,6 +203,14 @@ make snapshot bootstrap equivalent to independent validation from genesis.
 - Do not change pruning, historical retention, RocksDB compression, consensus,
   resource accounting, WAL policy, or fsync guarantees.
 - Do not automatically delete backups, abandoned user data, or `.pre-restore/`.
+
+These exclusions also govern the current full-history LR follow-up. LR may
+implement lossless archival storage improvements and an independently qualified
+resource policy in separate milestones; complete history, consensus, required
+state/tail, source-trust, WAL/fsync and preservation boundaries remain unchanged.
+Bounded retention belongs only to a separately authorized future project. Do not lower
+the current reserve to pass SC5; any replacement must satisfy LR's measured
+policy and compatibility gates before it can qualify a different profile.
 
 SST hard-link sharing is a separate optional follow-up. RocksDB checkpoints
 [share immutable SSTs on the same filesystem while copying mutable metadata](https://github.com/facebook/rocksdb/wiki/Checkpoints).
@@ -263,10 +362,13 @@ new focused direct-restore component if needed, `src/main.cpp`, backup tests.
 2. Add a mode-aware space estimator and target eligibility/ownership checks.
    Make metadata-only planning available without downloading payloads or
    opening the target DB; identify any small scratch writes in its output.
-3. Specify the opt-in CLI, JSON schema, and error/exit behavior. A proposed
-   selector is `--backup-restore-mode direct`; it **does not exist yet**. Keep
-   the legacy default. Provide separate preflight and stage-only actions, plus
-   explicit activation of a validated attempt; finalize names before coding.
+3. Specify the opt-in CLI, JSON schema, and error/exit behavior. SC1 implements
+   `--backup-restore-mode direct --backup-restore-preflight`, with separate
+   `--backup-metadata-dir` and optional `--backup-expected-chain-id`. The default
+   remains `repository`. Reserve `--backup-restore-stage` for stage-only work
+   and `--backup-restore-activate` for explicit validated-attempt activation;
+   direct invocations of those actions fail closed until SC4 integrates the
+   SC2 engine with SC3 validation/activation.
 4. Add tests for modes, mixed/unknown flags, incompatible layouts, bad metadata,
    space arithmetic, existing targets, and source/target filesystem accounting.
 
@@ -310,6 +412,26 @@ startup; clean and interrupted reopen tests pass. **Risk:** highest-risk package
 file-level atomic operations are not a multi-file transaction. **Rollback:**
 recover the owned attempt using its journal, not by deleting target chain data.
 
+Implementation detail (2026-10-02): validation uses `OpenForReadOnly` for every
+existing CF, including in-memory WAL recovery; it does not invoke writable
+recovery or runtime services. It rehashes pinned files before/after opening,
+checks genesis/expected chain ID, unified schema, every iterator and checksum,
+state size/header/ID/root and stored checkpoint ancestry. This is trusted-backup
+storage/identity consistency, **not** a recomputation of historical consensus
+or proof that the existing WP1 runtime storage defects are repaired. The expected
+chain ID must be independently selected in native `0x` multihash hex form.
+Geneses over 32 MiB, WAL input over 128 MiB, oversized block records or recovery
+requiring a writable open are refused with the sole stage preserved.
+
+Validation report, activation intent and observer markers bind the same attempt
+generation and manifest/inventory hashes. A lifetime-held POSIX sidecar gate
+excludes node startup and direct restore across processes. The intent is durable
+outside the target before markers/runtime/DB placement. A DB is moved once by
+exclusive same-filesystem rename; no copy or overwrite fallback exists. An
+unfinished intent blocks node startup until explicit offline recovery completes.
+SC4 connects these engines to explicit CLI actions below; internal fault/fixture
+test functions are still not operator tools.
+
 ### SC4 — CLI integration and regression coverage
 
 **Files/components:** `src/main.cpp`, CLI/config parsing only where necessary,
@@ -327,6 +449,20 @@ focused suites, broader CTest, version/help, and applicable container smoke pass
 **Risk:** concurrent edits already exist in main/config/CMake/docs; integrate
 carefully without replacing user changes. **Rollback:** retain legacy mode and
 source-format compatibility; no automatic migration or data cleanup.
+
+Implementation detail (2026-10-02): exactly one direct action is supported:
+preflight, stage, or explicit activation. `--backup-restore-resume` modifies only
+stage; `--backup-output` identifies the private sibling attempt. Stage/activation
+require an independently expected chain ID. Resume/activation omit backup ID or
+select the pinned concrete ID and explicitly reject `latest`. The first CLI
+version re-authenticates pinned metadata from the original available source;
+it does not persist an offline trust proof, alter provenance policy or replay
+payload after validation. Text/JSON expose phase, trust, declared limits,
+post-command allocation samples, observer hold and unverified gates. Repository
+remains the default; direct runtime admin, SFTP, combined convenience restore,
+feature overrides and unsupported combinations fail closed. See the
+[SC4 report](../validation/single-copy-restore-sc4-cli.md) for actual outcomes,
+not an all-green or deployment-ready claim.
 
 ### SC5 — Mac capacity experiment and Linux portability qualification
 
@@ -358,6 +494,11 @@ report under `docs/validation/` when results exist.
    first; any public catch-up requires the source/scope selection described above.
 7. Repeat critical durability and capacity checks in a disposable Linux VM with
    an ext4 data volume. Mac/APFS evidence alone does not prove Linux behavior.
+8. Qualify the intended **2-vCPU / 4-GB-RAM / 40-GB whole-server** profile from
+   section 1 using an Ubuntu-equivalent OS/runtime footprint. Record actual
+   usable disk, architecture, filesystem, OS/service memory, peak and steady
+   node RSS, swap allocation and catch-up/head progress. Resource claims must
+   cover the full server, not just transfer buffers or an empty data volume.
 
 Two different claims need different experiments:
 
@@ -436,6 +577,9 @@ Feature Definition of Done:
 - [ ] Default restore behavior remains compatible; direct mode is explicit.
 - [ ] Direct mode preserves all required snapshot contents with no second full
   local payload, and uses bounded memory/transfer resources.
+- [ ] The selected input and restored node preserve complete canonical history
+  from the first network block and all backed-up historical block/receipt records;
+  full-corpus/continuity evidence, not merely sampled replay, proves retention.
 - [ ] Input identity, provenance policy, file integrity, coherent DB reopen, and
   unchanged protocol/replay outcomes are verified at the stated evidence level.
 - [ ] Fresh-target restrictions, process exclusion, resume, disk-full handling,
@@ -461,22 +605,51 @@ Additional **40 GB claim gate**, separate from feature implementation:
 Open prerequisites before qualification: an identified representative trusted
 snapshot and deterministic successor-block fixture; enough Mac scratch space;
 an isolated Linux/ext4 test environment; agreed platform durability semantics;
-and current disposition of the relevant audit findings. These have not been
-verified or provisioned by this documentation task.
+and current disposition of the relevant audit findings. SC0 provides a tiny
+synthetic baseline, not these representative capacity prerequisites.
 
 | Package | Current status | Evidence / next gate |
 | --- | --- | --- |
 | Planning | Complete as a proposal | Current restore code and prior sizing report inspected; this file added |
-| SC0 | Not started | Record reproducible build/test and duplication baseline |
-| SC1 | Not started | Validate interface, metadata-only preflight, and budget model |
-| SC2 | Not started | Prove bounded, resumable direct materialization |
-| SC3 | Not started | Prove recovery and observer-only activation |
-| SC4 | Not started | Integrate CLI and pass compatibility suites |
-| SC5 | Not started | Measure Mac/Linux results; qualify or reject each 40 GB claim |
-| SC6 | Not started | Complete implemented-behavior documentation and review handoff |
+| SC0 | Baseline complete with recorded blockers | [Build/test, signed fixtures and measured duplication](../validation/single-copy-restore-sc0-baseline.md); canonical build workflow and diagnostic error-formatting discrepancy recorded |
+| SC1 | Metadata-planning exit gates satisfied; broader blockers recorded | [Contract, 68 unit checks, 9/9 focused tests, UBSan and 23/24 broader tests](../validation/single-copy-restore-sc1-preflight.md) |
+| SC2 | Local staging exit gates satisfied; shared/operational blockers recorded | [Streaming, pinned resume, 11/11 focused tests and 25/26 broader tests](../validation/single-copy-restore-sc2-staging.md); no server qualification |
+| SC3 | Internal engine implemented; local validation and remaining gates recorded | [Offline consistency, process-fault recovery and observer startup report](../validation/single-copy-restore-sc3-activation.md); operational/portability qualification remains pending |
+| SC4 | Standalone CLI implemented; all-green exit gate remains blocked | [Signed fixture CLI, pinned resume/recovery, regression and build report](../validation/single-copy-restore-sc4-cli.md); full-suite/environment and operational qualification remain gated |
+| SC5 | Local tooling/synthetic comparison implemented; qualification blocked | [SC5 measurements and capacity blockers](../validation/single-copy-restore-sc5-capacity.md); no 40 GB or Linux claim |
+| SC6 | Documentation checklist prepared; release readiness blocked | [SC6 review handoff](../validation/single-copy-restore-sc6-handoff.md); preceding qualification gates remain open |
+| LR0–LR6 | LR0 local baseline implemented; LR1–LR6 proposed, qualification blocked | [Low-resource mainnet observer plan](low-resource-mainnet-observer-plan.md) and [LR0 evidence](../validation/low-resource-lr0-baseline.md); no 40 GB or mainnet memory claim; `teleno_light` separate/deferred |
 
 For each implemented package append: files changed; invariants; commands and
 actual outcomes; artifact paths; remaining risks/blockers; and exit-gate status.
-Do not mark implementation complete merely because this plan exists. No build,
-restore, capacity experiment, or historical/differential validation was run to
-prepare this document.
+Do not mark implementation complete merely because this plan exists. The
+original planning task ran no build or restore experiments. SC0 subsequently
+ran a fresh local native build, existing tests and isolated synthetic restore
+measurements; its [progress log](../validation/single-copy-restore-sc0-baseline.md#sc0-progress-log-and-exit-criteria)
+records files, invariants, actual commands/results, evidence and blockers.
+No 40 GB capacity or historical/differential qualification was performed.
+
+SC1 subsequently added the opt-in metadata-only CLI, immutable validated input,
+fresh-target inspection and mode-aware budget, without object acquisition or DB
+opening. Its [progress log](../validation/single-copy-restore-sc1-preflight.md#remaining-blockers-and-sc1-progress-log)
+lists changed files, invariants, actual commands/results and retained artifacts.
+At the SC/LR0 baseline, SC0's truncated-response diagnostic was the only broader
+CTest failure. The subsequent [LR1 prerequisites report](../validation/low-resource-lr1-prerequisites.md)
+records its correction, current suite results and scoped persistence/publication
+fixes. ASan initialization and container availability were baseline blockers;
+they are not implied resolved by local LR1 tests.
+SC2's [progress log](../validation/single-copy-restore-sc2-staging.md#sc2-progress-log-and-exit-status)
+records bounded transfer, pinned metadata/journal, rehash-based resume, fault
+coverage and the remaining baseline/environment blockers. The intended outcome
+is backup-based observer launch on the user-selected 2-vCPU, 4-GB-RAM, 40-GB
+Linux server; that outcome is not proven by local staging or SC3's genesis smoke.
+SC3's [progress log](../validation/single-copy-restore-sc3-activation.md#sc3-progress-and-exit-status)
+records its actual verification and missing qualification.
+SC4's [progress log](../validation/single-copy-restore-sc4-cli.md#sc4-progress-and-exit-status)
+records local CLI evidence, blocked checks and the pending representative/Linux
+gates. SC5's [progress log](../validation/single-copy-restore-sc5-capacity.md#sc5-progress-and-exit-status)
+records five paired local measurements and an actual small-volume reserve
+rejection. Representative/Linux/40 GB qualification remains pending. SC6's
+[documentation handoff](../validation/single-copy-restore-sc6-handoff.md#sc6-progress-and-verification-record)
+records preserved boundaries and a reviewable unexecuted verification/release
+sequence; it does not mark dependent readiness gates complete.

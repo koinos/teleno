@@ -52,33 +52,28 @@ public:
   /**
    * Fetch an object if one exists.
    *
-   * - Size of the object is written into result.size
-   * - Object's value is copied into args.buf, provided buf != nullptr and buf_size is large enough
-   * - If buf is too small, buf is unchanged, however result is still updated
-   * - args.key is copied into result.key
+   * Returns immutable ownership, or null if absent. Keep the result alive
+   * through consumption. Cache eviction/replacement and database close cannot
+   * invalidate the returned bytes. Existing DB/node locking is still required.
    */
-  const object_value* get_object( const object_space& space, const object_key& key ) const;
+  object_value_ptr get_object( const object_space& space, const object_key& key ) const;
 
   /**
    * Get the next object.
    *
-   * - Size of the object is written into result.size
-   * - Object's value is copied into args.buf, provided buf != nullptr and buf_size is large enough
-   * - If buf is too small, buf is unchanged, however result is still updated
-   * - Found key is written into result
+   * Returns immutable value ownership and the found key. The value survives
+   * destruction of the temporary iterator; no result is {null, null_key}.
    */
-  std::pair< const object_value*, const object_key > get_next_object( const object_space& space,
+  std::pair< object_value_ptr, const object_key > get_next_object( const object_space& space,
                                                                       const object_key& key ) const;
 
   /**
    * Get the previous object.
    *
-   * - Size of the object is written into result.size
-   * - Object's value is copied into args.buf, provided buf != nullptr and buf_size is large enough
-   * - If buf is too small, buf is unchanged, however result is still updated
-   * - Found key is written into result
+   * Returns immutable value ownership and the found key. The value survives
+   * destruction of the temporary iterator; no result is {null, null_key}.
    */
-  std::pair< const object_value*, const object_key > get_prev_object( const object_space& space,
+  std::pair< object_value_ptr, const object_key > get_prev_object( const object_space& space,
                                                                       const object_key& key ) const;
 
   /**
@@ -88,6 +83,11 @@ public:
    * - If object exists, object is overwritten.
    */
   int64_t put_object( const object_space& space, const object_key& key, const object_value* val );
+  /** Immutable owner insertion; caller must not retain/create a mutable alias.
+   * Map publication/clone/LIB keeps ownership. Persistent backends copy through
+   * their ordinary write batch. Same byte accounting and tombstone semantics.
+   */
+  int64_t put_object_owned( const object_space& space, const object_key& key, object_value_ptr val );
 
   /**
    * Remove an object from the state_node
@@ -159,6 +159,22 @@ public:
   const protocol::block_header& block_header() const override;
 
   void commit();
+  /**
+   * Publish write-only overlays to distinct writable map state-node parents as
+   * one logical batch. All fallible preparation precedes all parent mutations.
+   * Requires exclusive access to every parent/overlay for the whole call.
+   * Resets overlays to fresh children after publication. Does not support
+   * removals, anonymous/persistent parents, or durability. commit() is unchanged.
+   */
+  static void commit_all_writes( const std::vector< anonymous_state_node_ptr >& nodes );
+  /**
+   * Map-only writes/removals to distinct writable, non-root named parents.
+   * Prepare reset overlays and tombstone bucket workspace before publication;
+   * fixed-allocator publication transfers nodes/owners without allocation.
+   * Exclusive access through the call is required. Not a durable transaction;
+   * does not replace general commit(), squash() or normal remove semantics.
+   */
+  static void commit_all_changes( const std::vector< anonymous_state_node_ptr >& nodes );
   void reset();
 
   friend class abstract_state_node;
@@ -489,6 +505,16 @@ public:
    * unique lock.
    */
   std::vector< state_node_ptr > get_all_nodes( const unique_lock_ptr& lock ) const;
+
+  /**
+   * Inspect retained indexed map/delta data across all forks, not visible state.
+   * Requires this database's owned unique lock and exclusion of any writes via
+   * unlocked node handles. No shared-lock overload: state writes may otherwise
+   * run under shared database locks. O(entries) time, O(unique values/backends)
+   * temporary space; may throw without mutation. Not a memory/admission limit.
+   * Unindexed overlays and caller-only held owners are deliberately excluded.
+   */
+  retained_memory_usage get_retained_memory_usage( const unique_lock_ptr& lock ) const;
 
   /**
    * Get and return the current "root" node.

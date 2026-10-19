@@ -20,7 +20,7 @@ public:
   using value_type = abstract_backend::value_type;
   using size_type  = abstract_backend::size_type;
 
-  rocksdb_backend();
+  explicit rocksdb_backend(std::size_t object_cache_bytes = 64 << 20);
   ~rocksdb_backend();
 
   void open( const std::filesystem::path& p );
@@ -34,6 +34,7 @@ public:
 
   virtual void start_write_batch() override;
   virtual void end_write_batch( write_durability durability = write_durability::default_async ) override;
+  void abort_write_batch() noexcept override;
 
   // Iterators
   virtual iterator begin() override;
@@ -41,7 +42,7 @@ public:
 
   // Modifiers
   virtual void put( const key_type& k, const value_type& v ) override;
-  virtual const value_type* get( const key_type& ) const override;
+  virtual value_ptr get( const key_type& ) const override;
   virtual void erase( const key_type& k ) override;
   virtual void clear() override;
 
@@ -57,6 +58,8 @@ public:
 
 private:
   void load_metadata();
+  void check_usable() const;
+  void release_database() noexcept;
   void put_metadata_value( const std::string& key, const std::string& value );
 
   using column_handles = std::vector< std::shared_ptr< ::rocksdb::ColumnFamilyHandle > >;
@@ -65,6 +68,7 @@ private:
   std::optional< ::rocksdb::WriteBatch > _write_batch;
   column_handles _handles;
   bool _borrowed = false;
+  bool _failed = false;
   ::rocksdb::WriteOptions _wopts;
   bool _force_async_writes = false;
   std::shared_ptr< ::rocksdb::ReadOptions > _ropts;

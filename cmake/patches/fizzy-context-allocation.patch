@@ -1,0 +1,52 @@
+diff --git a/lib/fizzy/capi.cpp b/lib/fizzy/capi.cpp
+--- a/lib/fizzy/capi.cpp
++++ b/lib/fizzy/capi.cpp
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <cstring>
+ #include <memory>
++#include <new>
+ 
+ namespace
+ {
+@@ -708,18 +709,32 @@ size_t fizzy_get_instance_memory_size(FizzyInstance* instance) noexcept
+ 
+ FizzyExecutionContext* fizzy_create_execution_context(int depth) noexcept
+ {
+-    auto ctx = std::make_unique<fizzy::ExecutionContext>();
+-    ctx->depth = depth;
+-    return wrap(ctx.release());
++    try
++    {
++        auto ctx = std::make_unique<fizzy::ExecutionContext>();
++        ctx->depth = depth;
++        return wrap(ctx.release());
++    }
++    catch (const std::bad_alloc&)
++    {
++        return nullptr;
++    }
+ }
+ 
+ FizzyExecutionContext* fizzy_create_metered_execution_context(int depth, int64_t ticks) noexcept
+ {
+-    auto ctx = std::make_unique<fizzy::ExecutionContext>();
+-    ctx->depth = depth;
+-    ctx->metering_enabled = true;
+-    ctx->ticks = ticks;
+-    return wrap(ctx.release());
++    try
++    {
++        auto ctx = std::make_unique<fizzy::ExecutionContext>();
++        ctx->depth = depth;
++        ctx->metering_enabled = true;
++        ctx->ticks = ticks;
++        return wrap(ctx.release());
++    }
++    catch (const std::bad_alloc&)
++    {
++        return nullptr;
++    }
+ }
+ 
+ void fizzy_free_execution_context(FizzyExecutionContext* c_ctx) noexcept

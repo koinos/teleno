@@ -2,8 +2,6 @@
 
 #include <koinos/state_db/backends/types.hpp>
 
-#include <rocksdb/slice.h>
-
 #include <list>
 #include <map>
 #include <memory>
@@ -39,6 +37,14 @@ public:
   void remove( const key_type& k );
 
   void clear();
+
+  // Caller holds get_mutex(), as for the existing get/put/clear API. Payload
+  // excludes map/list nodes, key copies, shared_ptr/string headers and allocator
+  // retention and caller-held/evicted owners. Oversized/zero-budget values
+  // return an owner without retention; payload_bytes never exceeds capacity.
+  std::size_t payload_bytes() const { return _cache_size; }
+  std::size_t entry_count() const { return _object_map.size(); }
+  std::size_t capacity_bytes() const { return _cache_max_size; }
 
   std::mutex& get_mutex();
 };

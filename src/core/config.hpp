@@ -124,6 +124,9 @@ struct NodeConfig
   uint64_t read_compute_bandwidth_limit  = 10'000'000;
   uint64_t pending_transaction_limit     = 10;
   bool disable_pending_transaction_limit = false;
+  uint64_t transaction_work_max_jobs = 0;
+  uint64_t transaction_work_max_wire_bytes = 0;
+  uint64_t vm_module_cache_max_capacity_bytes = 0;
   bool reset                             = false;
 
   // ── P2P ──
@@ -136,6 +139,8 @@ struct NodeConfig
   bool p2p_peer_discovery_enabled = true;
   uint64_t p2p_target_peer_count = 20;
   uint64_t p2p_max_peer_candidates = 200;
+  uint64_t p2p_max_peer_error_records = 4096;
+  uint64_t p2p_peer_error_key_capacity_bytes = 1024 * 1024;
   uint64_t p2p_max_candidate_dials_per_cycle = 3;
   uint64_t p2p_peer_acquisition_interval_seconds = 5;
   uint64_t p2p_candidate_redial_interval_seconds = 60;
@@ -146,6 +151,7 @@ struct NodeConfig
   // ── JSON-RPC ──
   std::string jsonrpc_listen = "0.0.0.0:8080";
   uint64_t jsonrpc_jobs      = 4;
+  uint64_t jsonrpc_io_timeout_seconds = 30;
 
   // ── gRPC ──
   std::string grpc_listen = "0.0.0.0:50051";
@@ -163,6 +169,8 @@ struct NodeConfig
 
   // ── Mempool ──
   uint64_t mempool_transaction_expiration = 120;
+  uint64_t mempool_pending_record_max_owners = 0;
+  uint64_t mempool_pending_record_max_capacity_bytes = 0;
 
   // ── RocksDB ──
   uint64_t rocksdb_block_cache_mb                 = 256;
@@ -174,10 +182,17 @@ struct NodeConfig
   uint64_t rocksdb_max_bytes_for_level_base       = 512 * 1024 * 1024;
   uint64_t rocksdb_write_buffer_size              = 64 * 1024 * 1024;
   uint64_t rocksdb_db_write_buffer_size           = 256 * 1024 * 1024;
+  // Zero keeps RocksDB's automatic policy. Nonzero bytes trigger flushes;
+  // they are not a hard WAL or whole-disk ceiling.
+  uint64_t rocksdb_max_total_wal_size             = 0;
   uint64_t rocksdb_max_write_buffer_number        = 3;
   std::string rocksdb_compression                 = "zstd";
   std::string rocksdb_blocks_compression;
   bool rocksdb_require_compression                = false;
+  // Zero preserves the linked library's defaults. Dictionary training uses
+  // fixed 1-MiB samples and an 8-MiB buffer per active table builder.
+  uint64_t rocksdb_blocks_zstd_level               = 0;
+  uint64_t rocksdb_blocks_zstd_dictionary_bytes    = 0;
 
   // ── Backup ──
   BackupConfig backup;
@@ -204,16 +219,21 @@ struct NodeConfig
   }
 };
 
+/** Validate opt-in block Zstd parameters without opening a database. */
+void validate_rocksdb_blocks_zstd_options( const NodeConfig& cfg );
+
 /**
  * Load configuration from YAML file and merge CLI overrides.
  *
  * @param config_path  Path to config.yml
  * @param cli_enables  Components explicitly enabled via --enable
  * @param cli_disables Components explicitly disabled via --disable
+ * @param strict Reject invalid recognized scalar values and feature settings (preflight only).
  * @return Merged configuration
  */
 NodeConfig load_config( const std::filesystem::path& config_path,
                         const std::vector< std::string >& cli_enables  = {},
-                        const std::vector< std::string >& cli_disables = {} );
+                        const std::vector< std::string >& cli_disables = {},
+                        bool strict = false );
 
 } // namespace koinos::node

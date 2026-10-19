@@ -47,6 +47,7 @@ RUN --mount=type=cache,target=/opt/teleno-deps,sharing=locked \
     scripts/build-zstd-static.sh \
     scripts/build-gmp-static.sh \
     scripts/build-libssh-static.sh \
+    && JOBS="${JOBS}" scripts/build-gmp-static.sh \
     && if [[ "${VCS_REF}" =~ ^[0-9A-Fa-f]{7,40}$ ]]; then \
          export TELENO_GIT_COMMIT_OVERRIDE="${VCS_REF:0:12}"; \
        fi \

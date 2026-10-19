@@ -13,8 +13,11 @@
 #include <memory>
 #include <mutex>
 #include <unordered_set>
+#include <vector>
 
 namespace koinos::state_db::detail {
+
+class retained_memory_accumulator;
 
 class state_delta: public std::enable_shared_from_this< state_delta >
 {
@@ -22,6 +25,7 @@ public:
   using backend_type = backends::abstract_backend;
   using key_type     = backend_type::key_type;
   using value_type   = backend_type::value_type;
+  using value_ptr    = backend_type::value_ptr;
 
 private:
   std::shared_ptr< state_delta > _parent;
@@ -45,10 +49,42 @@ public:
   ~state_delta() = default;
 
   void put( const key_type& k, const value_type& v );
+  void put_owned( const key_type& k, value_ptr v );
   void erase( const key_type& k, bool preserve_tombstone = false );
-  const value_type* find( const key_type& key ) const;
+  value_ptr find( const key_type& key ) const;
 
   void squash();
+  // Internal helper: caller must provide named database parents disjoint from
+  // every unindexed source overlay (commit_all_writes validates that contract).
+  // Preparation/validation may throw; application does not allocate.
+  // This is not a RocksDB/durable commit and does not replace general squash().
+  static void squash_all_writes( const std::vector< std::shared_ptr< state_delta > >& children );
+  // Internal map-only, non-root parent batch. Exclusive access is required
+  // through preparation and apply; prepared ownership keeps inputs alive.
+  class prepared_change_batch
+  {
+    struct transfer
+    {
+      std::shared_ptr< state_delta > child, parent;
+      backends::map::map_backend* source;
+      backends::map::map_backend* target;
+      std::unordered_set< key_type > removed;
+    };
+    std::vector< transfer > _transfers;
+    bool _applied = false;
+    prepared_change_batch() = default;
+    friend class state_delta;
+
+  public:
+    prepared_change_batch( const prepared_change_batch& ) = delete;
+    prepared_change_batch& operator=( const prepared_change_batch& ) = delete;
+    prepared_change_batch( prepared_change_batch&& ) = default;
+    prepared_change_batch& operator=( prepared_change_batch&& ) = default;
+    // Fixed default allocators/hash/comparison only. Does not allocate,
+    // perform persistence, or invalidate any general cached root semantics.
+    void apply() noexcept;
+  };
+  static prepared_change_batch prepare_all_changes( const std::vector< std::shared_ptr< state_delta > >& children );
   void commit();
 
   void clear();
@@ -81,6 +117,9 @@ public:
   std::shared_ptr< state_delta > clone( const state_node_id& id, const protocol::block_header& header );
 
   const std::shared_ptr< backend_type > backend() const;
+
+  // Internal diagnostic scan; caller must exclude backend/delta mutations.
+  void inventory_retained_memory( retained_memory_accumulator& inventory ) const;
 
 private:
   void commit_helper();
