@@ -1484,7 +1484,7 @@ int main( int argc, char** argv )
     node::storage::RocksDBManager storage_db;
     chain::controller controller(
       cfg.read_compute_bandwidth_limit,
-      64'000,
+      131'072,
       pending_limit,
       cfg.vm_module_cache_max_capacity_bytes
     );
