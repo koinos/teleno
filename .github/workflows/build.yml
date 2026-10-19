@@ -31,10 +31,11 @@ jobs:
             python3 tar xz-utils zlib1g-dev
 
       - name: Cache native dependencies
-        uses: actions/cache@v4
+        id: native-deps
+        uses: actions/cache/restore@v4
         with:
           path: .deps
-          key: teleno-deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakeLists.hunter.txt', 'scripts/build-*.sh') }}
+          key: teleno-deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakeLists.hunter.txt', 'cmake/**/*.cmake', 'cmake/**/*.patch', 'scripts/build-*.sh') }}
           restore-keys: |
             teleno-deps-${{ runner.os }}-
 
@@ -42,6 +43,13 @@ jobs:
         env:
           KOINOS_BUILD_TESTS: 'ON'
         run: ./scripts/build-cpp-libp2p-koinos.sh
+
+      - name: Preserve reusable dependency build state
+        if: always() && steps.native-deps.outputs.cache-primary-key != '' && steps.native-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .deps
+          key: ${{ steps.native-deps.outputs.cache-primary-key }}
 
       - name: Report version
         run: ./build/teleno_node --version | tee build/native-version.txt

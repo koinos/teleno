@@ -94,7 +94,10 @@ if(LIBSSH_ROOT)
 else()
   find_package(libssh CONFIG REQUIRED PATHS "/opt/homebrew" "/usr/local")
 endif()
-koinos_add_package(Protobuf CONFIG REQUIRED)
+# Keep the version variable in this directory scope. koinos_add_package wraps
+# find_package in a function, so its Protobuf_VERSION does not reach the recipe.
+hunter_add_package(Protobuf)
+find_package(Protobuf 3.17.3.0 EXACT CONFIG REQUIRED)
 include(cmake/TelenoFizzy.cmake)
 include(cmake/TelenoProtobuf.cmake)
 koinos_add_package(gRPC CONFIG REQUIRED)

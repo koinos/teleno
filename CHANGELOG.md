@@ -27,6 +27,11 @@ See the [detailed alpha release notes](docs/releases/1.3.0-alpha.1.md).
 - Retain the clean Linux binary, native version/help, complete JUnit report,
   linked-library hashes and committed-source manifest as CI release inputs.
   Prerelease container tags cannot replace `latest`; `beta` follows `main`.
+- Apply pinned dependency patches independently of enclosing/inherited Git
+  worktrees, with unchanged archive and patched-file hashes. Discover the exact
+  Protobuf package in directory scope so fresh Hunter builds retain its version.
+  Keep reusable dependency state after build failures and avoid recompiling
+  the container's native runtime for a timestamp-only image publication.
 - The alpha is an independent Teleno release. Koinos One GUI packaging and its
   native submodule pin are separate; no running node is upgraded by publishing it.
 

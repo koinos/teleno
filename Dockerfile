@@ -6,7 +6,8 @@ FROM ubuntu:${UBUNTU_VERSION} AS build
 
 ARG JOBS=4
 ARG VCS_REF=unknown
-ARG BUILD_DATE=unknown
+# Keep BUILD_DATE in runtime metadata so a new image timestamp does not
+# invalidate the already verified native compilation for the same revision.
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \

@@ -15,12 +15,18 @@ if(NOT _hash STREQUAL _before)
   message(FATAL_ERROR "Unexpected Fizzy capi.cpp: refusing context patch")
 endif()
 find_package(Git REQUIRED)
-execute_process(COMMAND "${GIT_EXECUTABLE}" apply --check "${FIZZY_PATCH}"
+# The extracted archive has no repository. An enclosing checkout would make
+# Git silently skip extended-diff paths relative to that enclosing repository.
+get_filename_component(_patch_root "${FIZZY_SOURCE_DIR}" REALPATH)
+get_filename_component(_git_ceiling "${_patch_root}" DIRECTORY)
+set(_patch_git "${CMAKE_COMMAND}" -E env --unset=GIT_DIR --unset=GIT_WORK_TREE
+  "GIT_CEILING_DIRECTORIES=${_git_ceiling}" "${GIT_EXECUTABLE}")
+execute_process(COMMAND ${_patch_git} apply --check "${FIZZY_PATCH}"
   WORKING_DIRECTORY "${FIZZY_SOURCE_DIR}" RESULT_VARIABLE _check)
 if(NOT _check EQUAL 0)
   message(FATAL_ERROR "Pinned Fizzy patch preflight failed")
 endif()
-execute_process(COMMAND "${GIT_EXECUTABLE}" apply "${FIZZY_PATCH}"
+execute_process(COMMAND ${_patch_git} apply "${FIZZY_PATCH}"
   WORKING_DIRECTORY "${FIZZY_SOURCE_DIR}" RESULT_VARIABLE _applied)
 file(SHA256 "${_file}" _hash)
 if(NOT _applied EQUAL 0 OR NOT _hash STREQUAL _after)

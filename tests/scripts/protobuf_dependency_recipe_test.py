@@ -40,10 +40,10 @@ class Recipe(unittest.TestCase):
         return {name: hashlib.sha256(path.read_bytes()).hexdigest()
                 for name, path in self.files.items()}
 
-    def run_patch(self, patch=PATCH):
+    def run_patch(self, patch=PATCH, env=None):
         return subprocess.run([CMAKE, f"-DPROTOBUF_SOURCE_DIR={self.source}",
                                f"-DPROTOBUF_PATCH={patch}", "-P", str(SCRIPT)],
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=30, env=env)
 
     def unpatch(self):
         subprocess.run(["git", "apply", "--reverse", str(PATCH)], cwd=self.source,
@@ -86,6 +86,26 @@ class Recipe(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("mixed patch state", result.stderr)
                 self.assertEqual(self.digest(), before)
+
+    def test_archive_inside_ignored_git_directory(self):
+        self.unpatch()
+        parent = Path(self.tmp.name)
+        subprocess.run(["git", "init", "-q", str(parent)], check=True, timeout=30)
+        (parent / ".gitignore").write_text("source/\n")
+        result = self.run_patch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.digest(), AFTER)
+        self.assertFalse((parent / "src").exists())
+
+    def test_inherited_git_worktree_does_not_redirect_patch(self):
+        self.unpatch()
+        other = Path(self.tmp.name) / "other-checkout"
+        subprocess.run(["git", "init", "-q", str(other)], check=True, timeout=30)
+        env = dict(os.environ, GIT_DIR=str(other / ".git"), GIT_WORK_TREE=str(other))
+        result = self.run_patch(env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.digest(), AFTER)
+        self.assertFalse((other / "src").exists())
 
     def test_missing_patch_preserves_preimage(self):
         self.unpatch()

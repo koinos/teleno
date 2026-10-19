@@ -32,12 +32,16 @@ if(NOT _all_before)
   message(FATAL_ERROR "Unexpected protobuf source or mixed patch state: refusing ownership patch")
 endif()
 find_package(Git REQUIRED)
-execute_process(COMMAND "${GIT_EXECUTABLE}" apply --check "${PROTOBUF_PATCH}"
+get_filename_component(_patch_root "${PROTOBUF_SOURCE_DIR}" REALPATH)
+get_filename_component(_git_ceiling "${_patch_root}" DIRECTORY)
+set(_patch_git "${CMAKE_COMMAND}" -E env --unset=GIT_DIR --unset=GIT_WORK_TREE
+  "GIT_CEILING_DIRECTORIES=${_git_ceiling}" "${GIT_EXECUTABLE}")
+execute_process(COMMAND ${_patch_git} apply --check "${PROTOBUF_PATCH}"
   WORKING_DIRECTORY "${PROTOBUF_SOURCE_DIR}" RESULT_VARIABLE _check)
 if(NOT _check EQUAL 0)
   message(FATAL_ERROR "Pinned protobuf ownership patch preflight failed")
 endif()
-execute_process(COMMAND "${GIT_EXECUTABLE}" apply "${PROTOBUF_PATCH}"
+execute_process(COMMAND ${_patch_git} apply "${PROTOBUF_PATCH}"
   WORKING_DIRECTORY "${PROTOBUF_SOURCE_DIR}" RESULT_VARIABLE _applied)
 if(NOT _applied EQUAL 0)
   message(FATAL_ERROR "Pinned protobuf ownership patch result did not match")
