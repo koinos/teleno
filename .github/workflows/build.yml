@@ -31,7 +31,7 @@ jobs:
             python3 tar xz-utils zlib1g-dev
 
       - name: Cache native dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .deps
           key: teleno-deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakeLists.hunter.txt', 'scripts/build-*.sh') }}
