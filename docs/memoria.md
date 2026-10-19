@@ -1,5 +1,16 @@
 # Teleno Conversation Memory
 
+## Native alpha published; issue 9 remains open (2026-10-19)
+
+The operator authorizes publishing all accumulated native changes. Native
+[1.3.0-alpha.1](https://github.com/koinos/teleno/releases/tag/teleno-node-v1.3.0-alpha.1) is published from `2380fcb545ed056a548adbcd5e1cffcefe61ecc0` after 64/64 normal Linux tests,
+version/help and exact-binary container verification. The startup syscall buffer
+restoration found by the compatibility regression is included; original failures
+remain retained. The published alpha and the running measured producer have
+distinct identities. No VPS deployment or producer restart occurs. `main` remains
+unchanged; LR2 continues at `1.3.0-dev.1`. See the
+[publication qualification](validation/alpha-1.3.0-publication.md).
+
 ## Continued own-block observation completed (2026-10-18)
 
 After the finite repair goal is complete, the operator requests extending

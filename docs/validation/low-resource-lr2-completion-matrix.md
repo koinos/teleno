@@ -1,5 +1,15 @@
 # LR2 completion matrix and execution log
 
+## Native alpha publication checkpoint — 2026-10-19
+
+Native [1.3.0-alpha.1](https://github.com/koinos/teleno/releases/tag/teleno-node-v1.3.0-alpha.1) is published from `2380fcb545ed056a548adbcd5e1cffcefe61ecc0`. All 64 normal Linux
+entries, native version/help and the exact-binary container checks pass. The
+compatibility regression restores the published 131,072-byte external syscall
+capacity. This updates the scoped current normal-build evidence; integrated
+diagnostics, aggregate policies and final whole-node/loaded producer gates
+remain open. Predecessor VPS observations keep their original identities. See
+[the publication record](alpha-1.3.0-publication.md).
+
 Updated: 2026-10-18. Status: **active implementation; LR2 NOT qualified**.
 
 **Subsequent own-block observation completed:** under the operator's separate

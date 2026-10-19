@@ -9,6 +9,8 @@ checks pass.
 
 ## Pages
 
+- [Native alpha publication qualification](validation/alpha-1.3.0-publication.md) -
+  exact clean source, Linux executable, container, normal tests and remaining gates.
 - [Native 1.3.0-alpha.1 release notes](releases/1.3.0-alpha.1.md) -
   detailed accumulated updates, selected VPS/mainnet evidence and remaining
   experimental qualification limits.
