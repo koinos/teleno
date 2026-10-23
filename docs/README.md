@@ -34,7 +34,7 @@ checks pass.
 - [Controlled Native Producer](validation/controlled-native-producer.md) -
   actual producer/controller/shared-storage construction and clean reopen on
   an isolated federated chain; PoB and full producer qualification remain open.
-- [Fogata Producer Heap-Corruption Investigation](validation/fogata-producer-heap-corruption-2026-10-21.md) -
+- [Fogata Producer Heap-Corruption Investigation](validation/fogata-gossip-publication.md) -
   preserved 2026-10-21 failure, reproducible GossipSub publication race and
   isolated candidate checks; historical-crash attribution and final qualification
   remain open.

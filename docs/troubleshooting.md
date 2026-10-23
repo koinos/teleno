@@ -90,7 +90,7 @@ original logs before attempting a restart. An allocator message such as
 the instruction that damaged memory. Keep the chain database, configuration
 and producer keys unchanged while investigating in a separate observer state
 with production disabled. Do not treat an isolated component pass as clearance
-to restart a producer. The [Fogata investigation](validation/fogata-producer-heap-corruption-2026-10-21.md)
+to restart a producer. The [Fogata investigation](validation/fogata-gossip-publication.md)
 records a reproduced GossipSub publication race, an unqualified source
 correction and the remaining evidence gates for the 2026-10-21 abort.
 
