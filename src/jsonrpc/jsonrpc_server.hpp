@@ -30,6 +30,11 @@ namespace http  = beast::http;
 namespace net   = boost::asio;
 using tcp       = net::ip::tcp;
 
+// Each mixed-batch mempool/transaction result retains its attribution until the
+// complete HTTP body is no longer borrowed by an asynchronous write.
+using MempoolOutputLeases = std::vector< OwnedMemoryBudget::Lease,
+  OwnedMemoryBudget::Allocator< OwnedMemoryBudget::Lease > >;
+
 /**
  * HTTP JSON-RPC 2.0 server replacing the Go koinos-jsonrpc service.
  *
@@ -72,6 +77,11 @@ public:
   // partial ingress, headers, transport buffers and service/JSON work are extra.
   HTTPBodyMemory http_body_memory() const;
 
+  // Independent, bounded workspace permits for replies after ordinary M1
+  // admission is full. Actual allocations remain attributed to the M1 owner;
+  // do not add these conservative permits to its physical allocation counters.
+  OwnedMemorySnapshot refusal_workspace_memory() const { return _refusal_workspace.snapshot(); }
+
 private:
   /** Accept incoming TCP connections. */
   void do_accept();
@@ -82,10 +92,13 @@ private:
                                std::size_t new_request, std::size_t new_response );
 
   /** Process an HTTP request body and return the JSON-RPC response. */
-  std::string process_body( const std::string& body );
+  std::string process_body( const std::string& body, MempoolOutputLeases& mempool_output_leases,
+                            OwnedMemoryBudget::Lease& refusal_workspace );
 
   /** Process a single JSON-RPC request object. */
-  nlohmann::json process_single_request( const nlohmann::json& request );
+  struct PreparedTransactionReply;
+  nlohmann::json process_single_request( const nlohmann::json& request,
+                                         PreparedTransactionReply* prepared = nullptr );
 
   /**
    * Parse method string → (service, method).
@@ -119,6 +132,8 @@ private:
 
   /** Build a JSON-RPC error response. */
   static nlohmann::json make_error( int code, const std::string& message, const nlohmann::json& id = nullptr );
+  static nlohmann::json make_local_capacity_error( const LocalCapacityExceeded& error,
+                                                   const nlohmann::json& id );
 
   /** Build a JSON-RPC success response. */
   static nlohmann::json make_result( const nlohmann::json& id );
@@ -143,6 +158,8 @@ private:
   contract_meta_store::ContractMetaStore* _contract_meta;
   transaction_store::TransactionStore* _tx_store;
   account_history::AccountHistory* _acct_history;
+
+  OwnedMemoryBudget _refusal_workspace;
 
   net::io_context _ioc;
   tcp::acceptor _acceptor;

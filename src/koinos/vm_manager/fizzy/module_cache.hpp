@@ -2,6 +2,7 @@
 #include <fizzy/fizzy.h>
 #include <koinos/vm_manager/fizzy/module_memory.hpp>
 #include <koinos/vm_manager/vm_memory.hpp>
+#include "core/local_capacity.hpp"
 
 #include <list>
 #include <map>
@@ -103,6 +104,10 @@ public:
       try
       {
         put_module( id, parsed );
+      }
+      catch( const node::LocalCapacityExceeded& )
+      {
+        // Retaining an already owned module is optional under local capacity.
       }
       catch( const std::bad_alloc& )
       {

@@ -17,6 +17,13 @@ Build the native node and its C++ dependency stack:
 ./scripts/build-cpp-libp2p-koinos.sh
 ```
 
+The script applies `cmake/cpp-libp2p-listener-lifetime.patch` after the pinned
+cpp-libp2p compatibility patch. It gives asynchronous inbound-listener callbacks
+a weak owner, so a callback queued across transport stop/restart can safely
+observe that its listener manager has been destroyed. See the
+[Fogata heap-corruption investigation](validation/fogata-producer-heap-corruption-2026-10-21.md)
+for the reproduced lifecycle fault and current qualification status.
+
 When `build/` already exists, a focused rebuild is faster:
 
 ```bash
@@ -41,7 +48,7 @@ Koinos One packaged-binary update.
 
 The native entrypoints also rebuild the pinned Koinos protobuf `3.17.3.0`
 runtime from commit `e1b1477875a8b022903b548eb144f2c7bf4d9561`, with a scoped
-unknown-field ownership correction. Hunter packages, installed public headers
+unknown-field, arena-string and repeated-field exception cleanup. Hunter packages, installed public headers
 and `protoc` remain read-only inputs. The archive SHA-256 is
 `824eca40d5a9b7e1090961e84efe7b90fba818156c32d92e447f7daf61522318`.
 Use `TELENO_PROTOBUF_ARCHIVE` for a local copy of that exact archive and
@@ -49,6 +56,67 @@ Use `TELENO_PROTOBUF_ARCHIVE` for a local copy of that exact archive and
 Parent compiler/toolchain and diagnostic flags propagate to this isolated
 runtime build. This is a build setting, not a node memory limit. See the
 [ownership validation and remaining Linux gates](validation/protobuf-unknown-field-ownership.md).
+
+The M1 repair also requires a Python 3 interpreter at configure time and
+rebuilds the matching generated Koinos protobuf sources from
+`koinos-proto-cpp@a24bb5ff91b2f245863bddb02496cc4831ad96c2`
+(archive SHA-256
+`7152e153ff9a5af0add6a485faa83a1ce93803cd2c6bf9cf7b5fda5542c8832a`).
+The build-owned copy repairs generated copy construction and oneof allocation
+publication using a checked input/output manifest. All native consumers use the
+corrected build-owned inline headers; installed SDK headers are verified against
+the original pinned inputs. No protoc run or installed SDK modification occurs.
+`TELENO_KOINOS_PROTO_ARCHIVE` can select a local copy of the exact archive for
+offline configuration. Rebuild C++ consumers against matching headers and
+libraries; unchanged message layouts/wire bytes do not make mixed inline
+implementations a qualified build. See the [active repair status](validation/low-resource-lr2-m1-repair.md).
+
+The current M1 development build also stages the pinned nlohmann JSON 3.11.2
+headers in its own build tree with an allocation-free destructor backport.
+It verifies every installed header and the patched result; mixed or modified
+inputs are refused. Installed SDK files remain unchanged. Unchanged pinned
+Koinos exception/crypto 1.0.2 sources are rebuilt against those same headers
+to avoid old JSON template code remaining in imported libraries. For offline
+configuration, `TELENO_KOINOS_EXCEPTION_ARCHIVE` and
+`TELENO_KOINOS_CRYPTO_ARCHIVE` may select the exact checked archives; their
+SHA-256 values are respectively
+`22e9593ca476be7a74a94a5f2d0ab02adc29c163e9c88d288b7ce91c1fc9b5af`
+and `45f8bf8f1d337ae18c3f8f0196d4e9da1902ec301b49f453b876d02a9bf8be18`.
+Source overrides cannot bypass verification. This build recipe and its passing
+dependency regressions do not establish final native or whole-node
+qualification; see the [JSON cleanup continuation](validation/low-resource-lr2-m1-json-cleanup.md#r4-and-dependency-internal-cleanup-results).
+
+The continuing M1 build also repairs synchronous interceptor call binding in
+pinned gRPC 1.31.0-p0. `TELENO_GRPC_ARCHIVE` can select a local copy of the
+exact source archive, SHA-256
+`48f52c566a03b3bea26e8440798d2ff4ce181221935e5983fb9495e13618dd55`.
+The recipe verifies matching installed public headers, compiles the corrected
+`server_cc.cc`, and replaces only that member in a build-owned static SDK
+archive. The installed SDK is preserved. Archive identity reports under
+`build/teleno-grpc/` identify the original, replacement and patched hashes and
+the unchanged-member count. Single-config builds select their matching SDK
+configuration; multi-config outputs are kept separately.
+
+An identified instrumented C++ SDK base can be supplied through
+`TELENO_GRPC_BASE_ARCHIVE` and its mandatory `TELENO_GRPC_BASE_SHA256`.
+Diagnostic target remapping must preserve this repaired archive instead of
+later replacing `gRPC::grpc++` with an unpatched SDK. Other SDK dependencies
+still need their declared instrumentation closure. Component recipe/server
+checks pass; final whole-source Linux qualification remains open. See the
+[refusal and SDK lifecycle work](implementation/issue-9-m1-grpc-control-ownership.md#aggregate-refusal-follow-up--2026-10-22).
+
+For scoped ASan/UBSan diagnostics against the normal pinned prebuilt gRPC
+runtime, compile every gRPC consumer with its upstream
+`GRPC_ASAN_SUPPRESSED=1` compatibility define while keeping the compiler's
+`-fsanitize=address,undefined` instrumentation enabled. Otherwise the headers
+add ASan-only mutex/CV fields absent from that library and change public context
+layout. This compatibility mode omits the SDK's conditional mutex/CV leak
+checker; it does not instrument the prebuilt library. Verify application
+detection with clean and deliberate callback-fault controls. Default TSan
+diagnostics instead use separately identified instrumented pinned gRPC archives,
+with their public headers verified against the installation. Preserve all
+remaining dependency exclusions; see the
+[detector evidence](validation/low-resource-lr2-m1-json-cleanup.md#usable-grpc-detector-closure-and-r8-controls).
 
 Verify the binary and command surface:
 

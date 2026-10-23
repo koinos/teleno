@@ -74,6 +74,10 @@ find_package(koinos_proto CONFIG REQUIRED)
 find_package(koinos_exception CONFIG REQUIRED)
 find_package(koinos_crypto CONFIG REQUIRED)
 find_package(koinos_state_db CONFIG REQUIRED)
+include(cmake/TelenoGrpcCallBinding.cmake)
+include(cmake/TelenoKoinosProto.cmake)
+include(cmake/TelenoJson.cmake)
+include(cmake/TelenoJsonSdk.cmake)
 
 # Node build version metadata.
 set(KOINOS_NODE_GIT_COMMIT "unknown")

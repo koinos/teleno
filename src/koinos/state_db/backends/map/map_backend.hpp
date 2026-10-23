@@ -16,6 +16,7 @@ public:
   using size_type  = abstract_backend::size_type;
 
   map_backend();
+  map_backend( const map_backend& other );
   virtual ~map_backend() override;
 
   // Iterators
@@ -46,7 +47,8 @@ public:
   // Transfer already allocated writes, replacing owners without copying values.
   // Uses this backend's fixed std::allocator/std::less<string> map. Callers must
   // exclude readers/writers and validate the entire batch before any transfer.
-  void merge_writes_from( map_backend& source, std::unordered_set< key_type >& removed ) noexcept;
+  void merge_writes_from( map_backend& source, removed_key_set& removed ) noexcept;
+  node::OwnedMemoryBudget memory_budget() const noexcept { return _map.get_allocator().memory_budget(); }
 
   // Internal diagnostic scan; caller must exclude all map mutations.
   // Avoids payload copies and allocating virtual iterator wrappers.

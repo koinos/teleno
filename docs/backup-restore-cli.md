@@ -523,6 +523,10 @@ refusal. See [SC4 evidence](validation/single-copy-restore-sc4-cli.md).
 Local SC5 measurement tools compare the modes on owned synthetic fixtures, not
 operator data. See [the tool contract](../tools/backup/README.md#sc5-local-capacity-experiment)
 and [actual capacity blockers](validation/single-copy-restore-sc5-capacity.md).
+Its optional `--retire-completed-pairs` retires only newly generated, verified
+synthetic destination cases after recording hashes and measurements; source,
+logs and failed cases remain. This is diagnostic fixture management, not a
+native restore option or permission to remove an existing database or backup.
 Do not infer 40 GB whole-server capacity from a small fixture, a volume label,
 or a successful restore. Keep the reserve and independent backup unchanged.
 

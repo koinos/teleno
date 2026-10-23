@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import resource
 import signal
+import shutil
 import stat
 import statistics
 import subprocess
@@ -103,8 +104,65 @@ def check_build(build):
     return values
 
 
+def retire_owned_pair(destination, number, pair, owners, evidence):
+    """Retire only this run's verified synthetic cases, after recording hashes."""
+    started, before = time.monotonic(), resource.getrusage(resource.RUSAGE_SELF)
+    require(destination.parent == evidence and destination.name == "destination" and
+            not evidence.is_symlink() and not destination.is_symlink(),
+            "foreign synthetic destination")
+    require(set(pair) == {"direct", "repository"} and
+            pair["direct"]["verification"] == pair["repository"]["verification"],
+            "unverified synthetic pair")
+    require(shutil.rmtree.avoids_symlink_attacks, "safe fixture retirement is unavailable")
+    prepared = {}
+    for mode in ("direct", "repository"):
+        row = pair[mode]
+        require(row["mode"] == mode and row["number"] == number,
+                "foreign synthetic pair result")
+        case = destination / (mode + "-" + str(number))
+        require(case in owners and not case.is_symlink(), "unowned synthetic case")
+        identity = case.stat()
+        require((identity.st_dev, identity.st_ino) == owners[case],
+                "synthetic case identity changed")
+        prepared[mode] = dict(case=case.name, identity=list(owners[case]),
+                              files=hashes(case), allocation=allocation(case))
+    journal = evidence / ("retired-pair-" + str(number) + ".json")
+    require(not journal.exists() and not journal.is_symlink(),
+            "synthetic pair retirement already recorded")
+    record = dict(number=number, status="prepared", cases=prepared, retired=[])
+    save(journal, record)  # A failed evidence write must preserve both cases.
+    parent = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for mode in ("direct", "repository"):
+            case = destination / prepared[mode]["case"]
+            identity = os.stat(case.name, dir_fd=parent, follow_symlinks=False)
+            require(stat.S_ISDIR(identity.st_mode) and
+                    (identity.st_dev, identity.st_ino) == owners[case],
+                    "synthetic case identity changed before retirement")
+            if sys.version_info >= (3, 11):
+                shutil.rmtree(case.name, dir_fd=parent)
+            else:
+                # Python 3.9/3.10 lack rmtree's parent-fd argument. Their
+                # required fd-based safe implementation still protects the
+                # freshly owned case tree; its identity was checked above.
+                shutil.rmtree(case)
+            record["retired"].append(mode)
+            save(evidence / ("retired-pair-" + str(number) + "-" + mode + ".json"), record)
+    finally:
+        os.close(parent)
+    after = resource.getrusage(resource.RUSAGE_SELF)
+    record.update(status="retired", retirement_elapsed_seconds=time.monotonic() - started,
+                  retirement_user_cpu_seconds=after.ru_utime - before.ru_utime,
+                  retirement_system_cpu_seconds=after.ru_stime - before.ru_stime,
+                  retirement_input_blocks=after.ru_inblock - before.ru_inblock,
+                  retirement_output_blocks=after.ru_oublock - before.ru_oublock)
+    save(evidence / ("retired-pair-" + str(number) + "-result.json"), record)
+    return record
+
+
 class Experiment:
-    def __init__(self, build, repetitions, image_bytes=None, measurement_sampler=None):
+    def __init__(self, build, repetitions, image_bytes=None, measurement_sampler=None,
+                 retire_completed_pairs=False):
         self.build = build
         self.cache = check_build(build)
         require(5 <= repetitions <= 10, "use five to ten measured pairs")
@@ -118,6 +176,8 @@ class Experiment:
         self.destination.mkdir()
         self.repetitions, self.image_bytes = repetitions, image_bytes
         self.measurement_sampler = measurement_sampler
+        self.retire_completed_pairs = retire_completed_pairs
+        self.case_owners, self.retirements = {}, []
         self.mounted = False
         self.commands, self.rows = [], []
         self.node = build / "teleno_node"
@@ -131,7 +191,8 @@ class Experiment:
         self.summary = dict(format="teleno-sc5-experiment", version=1, status="BLOCKED",
                             image_label_bytes=image_bytes,
                             capacity_40gb_qualified=False, whole_server_qualified=False,
-                            historical_replay_validated=False, linux_qualified=False)
+                            historical_replay_validated=False, linux_qualified=False,
+                            fixture_retention="retire-verified-pairs" if retire_completed_pairs else "retain")
 
     def command(self, name, argv, case=None, expected=0, observer_signal=None, timeout_seconds=120):
         require(0 < timeout_seconds <= 600, "invalid owned command timeout")
@@ -222,6 +283,8 @@ class Experiment:
     def restore(self, mode, number):
         case = self.destination / (mode + "-" + str(number))
         case.mkdir(mode=0o700)
+        identity = case.stat()
+        self.case_owners[case] = identity.st_dev, identity.st_ino
         target, attempt, config = case / "target", case / "attempt", case / "config.yml"
         config.write_text("features: {block_producer: false, p2p: false, jsonrpc: false, grpc: false, "
                           "mempool: false, account_history: false, contract_meta_store: false, transaction_store: false}\n"
@@ -328,6 +391,10 @@ class Experiment:
                 modes = ("repository", "direct") if number % 2 else ("direct", "repository")
                 pair = {mode: self.restore(mode, number) for mode in modes}
                 require(pair["direct"]["verification"] == pair["repository"]["verification"], "checkpoint parity mismatch")
+                if self.retire_completed_pairs:
+                    self.retirements.append(retire_owned_pair(
+                        self.destination, number, pair, self.case_owners, self.root))
+                    self.summary["fixture_retirements"] = self.retirements
             require(hashes(self.source) == self.source_hashes, "independent source changed")
             measured = [r for r in self.rows if not r["warmup"]]
             keys = ("elapsed_seconds", "peak_child_rss_bytes", "sampled_peak_allocated_bytes", "min_available_bytes")
@@ -361,8 +428,12 @@ def main():
     parser.add_argument("--build-dir", type=Path, default=REPO / "build")
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--apfs-capacity-bytes", type=int)
+    parser.add_argument("--retire-completed-pairs", action="store_true",
+                        help="retire this run's verified synthetic case trees after each pair; "
+                             "retain source, logs, measurements and file hashes")
     args = parser.parse_args()
-    experiment = Experiment(args.build_dir.resolve(), args.repetitions, args.apfs_capacity_bytes)
+    experiment = Experiment(args.build_dir.resolve(), args.repetitions, args.apfs_capacity_bytes,
+                            retire_completed_pairs=args.retire_completed_pairs)
     code = experiment.run()
     return 2 if experiment.summary["status"] == "BLOCKED" else code
 

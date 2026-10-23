@@ -1,6 +1,9 @@
 #pragma once
 
+#include "core/transaction_response_preparer.hpp"
+
 #include <koinos/rpc/chain/chain_rpc.pb.h>
+#include <stdexcept>
 
 namespace koinos::node {
 
@@ -45,6 +48,17 @@ public:
 
   virtual rpc::chain::propose_block_response
   propose_block( const rpc::chain::propose_block_request& ) = 0;
+
+  // Implementations must invoke preparation before publishing admission, not
+  // after submit_transaction returns. Unsupported adapters fail before work;
+  // silently preparing after a mutating call would misclassify local refusal.
+  virtual rpc::chain::submit_transaction_response
+  submit_transaction_with_prepared_response( const rpc::chain::submit_transaction_request& request,
+                                              TransactionResponsePreparer prepare )
+  {
+    if( prepare ) throw std::logic_error( "Pre-admission transaction response preparation is unavailable" );
+    return submit_transaction( request );
+  }
 };
 
 } // namespace koinos::node

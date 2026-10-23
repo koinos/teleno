@@ -1,3 +1,4 @@
+#include "core/owned_allocation.hpp"
 #include "../artifact_root.hpp"
 #include <koinos/state_db/backends/rocksdb/rocksdb_backend.hpp>
 #include <koinos/state_db/backends/map/map_backend.hpp>
@@ -20,13 +21,13 @@
 static std::atomic<const void*> watched_buffer{nullptr};
 static std::atomic<bool> buffer_deleted{false};
 void* operator new(std::size_t n) {
-  if (auto p = std::malloc(n ? n : 1)) return p;
+  if (auto p = koinos::node::owned_allocation::allocate(n ? n : 1)) return p;
   throw std::bad_alloc();
 }
 void* operator new[](std::size_t n) { return ::operator new(n); }
 void operator delete(void* p) noexcept {
   if (p && p == watched_buffer.load()) buffer_deleted = true;
-  std::free(p);
+  koinos::node::owned_allocation::deallocate(p);
 }
 void operator delete[](void* p) noexcept { ::operator delete(p); }
 void operator delete(void* p, std::size_t) noexcept { ::operator delete(p); }

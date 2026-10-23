@@ -348,6 +348,7 @@ NodeConfig load_config( const std::filesystem::path& config_path,
       cfg.mempool_transaction_expiration = yaml_get< uint64_t >( m, "transaction-expiration", cfg.mempool_transaction_expiration, strict );
       cfg.mempool_pending_record_max_owners = yaml_get< uint64_t >( m, "pending-record-max-owners", cfg.mempool_pending_record_max_owners, true );
       cfg.mempool_pending_record_max_capacity_bytes = yaml_get< uint64_t >( m, "pending-record-max-capacity-bytes", cfg.mempool_pending_record_max_capacity_bytes, true );
+      cfg.mempool_aggregate_max_accounted_bytes = yaml_get< uint64_t >( m, "aggregate-max-accounted-bytes", cfg.mempool_aggregate_max_accounted_bytes, true );
     }
 
     // ── RocksDB ──

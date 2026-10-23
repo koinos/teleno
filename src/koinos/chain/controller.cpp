@@ -165,7 +165,8 @@ public:
                           uint64_t,
                           const std::optional< std::string >& expected_root = {} );
 
-  rpc::chain::submit_transaction_response submit_transaction( const rpc::chain::submit_transaction_request& );
+  rpc::chain::submit_transaction_response
+  submit_transaction( const rpc::chain::submit_transaction_request&, node::TransactionResponsePreparer );
   rpc::chain::get_head_info_response get_head_info( const rpc::chain::get_head_info_request& );
   rpc::chain::get_chain_id_response get_chain_id( const rpc::chain::get_chain_id_request& );
   rpc::chain::get_fork_heads_response get_fork_heads( const rpc::chain::get_fork_heads_request& );
@@ -579,7 +580,7 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
       ba.set_live( live );
       ba.set_head( new_head );
 
-      _client->broadcast( "koinos.block.accept", util::converter::as< std::string >( ba ) );
+      _client->broadcast_block_accepted( ba );
 
       broadcast::fork_heads fh;
       fh.set_allocated_last_irreversible_block( bc.release_topology() );
@@ -883,11 +884,14 @@ bool controller_impl::apply_block_delta( const protocol::block& block,
 }
 
 rpc::chain::submit_transaction_response
-controller_impl::submit_transaction( const rpc::chain::submit_transaction_request& request )
+controller_impl::submit_transaction( const rpc::chain::submit_transaction_request& request,
+                                     node::TransactionResponsePreparer prepare )
 {
   // Declare first: release after execution state, receipt and notifications on
   // every success/failure path. Applies to dry runs too, never canonical blocks.
   auto work = _client ? _client->reserve_transaction_work( request.transaction() ) : nullptr;
+  node::OwnedMemoryBudget::Scope transaction_memory_scope(
+    work ? work->memory_budget() : node::OwnedMemoryBudget{}, false );
   validate_transaction( request.transaction() );
 
   rpc::chain::submit_transaction_response resp;
@@ -1041,6 +1045,11 @@ controller_impl::submit_transaction( const rpc::chain::submit_transaction_reques
                    "expected transaction receipt" );
     *resp.mutable_receipt() = std::get< protocol::transaction_receipt >( ctx.receipt() );
 
+    // Optional transport preparation is ordinary local admission work. Finish
+    // its allocations/reservations before the accepted-work publication below.
+    // Canonical block execution never enters this callback.
+    prepare( resp );
+
     if( request.broadcast() && _client )
     {
       broadcast::transaction_accepted ta;
@@ -1067,7 +1076,8 @@ controller_impl::submit_transaction( const rpc::chain::submit_transaction_reques
   }
   catch( ... )
   {
-    LOG( debug ) << "Transaction application failed - ID: " << transaction_id << ", for an unknown reason";
+    try { LOG( debug ) << "Transaction application failed - ID: " << transaction_id << ", for an unknown reason"; }
+    catch( ... ) {}
     throw;
   }
 
@@ -1411,6 +1421,9 @@ rpc::chain::submit_block_response controller::submit_block( const rpc::chain::su
                                                             uint64_t index_to,
                                                             std::chrono::system_clock::time_point now )
 {
+  // Canonical/proposal execution never inherits a caller's standalone local
+  // mempool quota, including synchronous reentry from transaction observers.
+  node::OwnedMemoryBudget::Scope canonical_memory_scope( node::OwnedMemoryBudget{}, true );
   rpc::chain::submit_block_response resp;
 
   auto res = _my->apply_block( request.block(), detail::apply_block_options{ index_to, now, false } );
@@ -1425,6 +1438,9 @@ void controller::apply_block_delta( const protocol::block& block,
                                     const protocol::block_receipt& receipt,
                                     uint64_t index_to )
 {
+  // Canonical/proposal execution never inherits a caller's standalone local
+  // mempool quota, including synchronous reentry from transaction observers.
+  node::OwnedMemoryBudget::Scope canonical_memory_scope( node::OwnedMemoryBudget{}, true );
   _my->apply_block_delta( block, receipt, index_to );
 }
 
@@ -1433,6 +1449,9 @@ bool controller::apply_block_delta_checked( const protocol::block& block,
                                             const std::string& expected_root,
                                             uint64_t index_to )
 {
+  // Canonical/proposal execution never inherits a caller's standalone local
+  // mempool quota, including synchronous reentry from transaction observers.
+  node::OwnedMemoryBudget::Scope canonical_memory_scope( node::OwnedMemoryBudget{}, true );
   return _my->apply_block_delta( block, receipt, index_to, expected_root );
 }
 
@@ -1440,6 +1459,9 @@ rpc::chain::propose_block_response controller::propose_block( const rpc::chain::
                                                               uint64_t index_to,
                                                               std::chrono::system_clock::time_point now )
 {
+  // Canonical/proposal execution never inherits a caller's standalone local
+  // mempool quota, including synchronous reentry from transaction observers.
+  node::OwnedMemoryBudget::Scope canonical_memory_scope( node::OwnedMemoryBudget{}, true );
   rpc::chain::propose_block_response resp;
 
   auto res = _my->apply_block( request.block(), detail::apply_block_options{ index_to, now, true } );
@@ -1460,7 +1482,14 @@ rpc::chain::propose_block_response controller::propose_block( const rpc::chain::
 rpc::chain::submit_transaction_response
 controller::submit_transaction( const rpc::chain::submit_transaction_request& request )
 {
-  return _my->submit_transaction( request );
+  return _my->submit_transaction( request, {} );
+}
+
+rpc::chain::submit_transaction_response
+controller::submit_transaction( const rpc::chain::submit_transaction_request& request,
+                                node::TransactionResponsePreparer prepare )
+{
+  return _my->submit_transaction( request, prepare );
 }
 
 rpc::chain::get_head_info_response controller::get_head_info( const rpc::chain::get_head_info_request& request )

@@ -81,7 +81,8 @@ using state_multi_index_type = boost::multi_index_container<
       boost::multi_index::const_mem_fun< state_delta, const state_node_id&, &state_delta::parent_id > >,
     boost::multi_index::ordered_non_unique<
       boost::multi_index::tag< by_revision >,
-      boost::multi_index::const_mem_fun< state_delta, uint64_t, &state_delta::revision > > > >;
+      boost::multi_index::const_mem_fun< state_delta, uint64_t, &state_delta::revision > > >,
+  node::OwnedMemoryBudget::Allocator< state_delta_ptr > >;
 
 const object_key null_key = object_key();
 
@@ -214,7 +215,9 @@ public:
 
   state_multi_index_type _index;
   state_delta_ptr _head;
-  std::map< state_node_id, state_delta_ptr > _fork_heads;
+  using fork_allocator = node::OwnedMemoryBudget::Allocator< std::pair< const state_node_id, state_delta_ptr > >;
+  std::map< state_node_id, state_delta_ptr, std::less< state_node_id >, fork_allocator > _fork_heads{
+    std::less< state_node_id >{}, fork_allocator( node::OwnedMemoryBudget::current(), 128 ) };
   state_delta_ptr _root;
 
   /* Regarding mutexes used for synchronizing state_db...
@@ -237,12 +240,12 @@ public:
 
 shared_lock_ptr database_impl::get_shared_lock() const
 {
-  return std::make_shared< std::shared_lock< std::shared_mutex > >( _node_mutex );
+  return ::koinos::node::make_owned_shared< std::shared_lock< std::shared_mutex > >( _node_mutex );
 }
 
 unique_lock_ptr database_impl::get_unique_lock() const
 {
-  return std::make_shared< std::unique_lock< std::shared_mutex > >( _node_mutex );
+  return ::koinos::node::make_owned_shared< std::unique_lock< std::shared_mutex > >( _node_mutex );
 }
 
 bool database_impl::verify_shared_lock( const shared_lock_ptr& lock ) const
@@ -337,8 +340,8 @@ void database_impl::open_lockless( const std::optional< std::filesystem::path >&
                                    genesis_init_function init,
                                    state_node_comparator_function comp )
 {
-  auto root           = std::make_shared< state_node >();
-  root->_impl->_state = std::make_shared< state_delta >( p );
+  auto root           = ::koinos::node::make_owned_shared< state_node >();
+  root->_impl->_state = ::koinos::node::make_owned_shared< state_delta >( p );
   _init_func          = init;
   _comp               = comp;
 
@@ -359,8 +362,8 @@ void database_impl::open_lockless( std::shared_ptr< backends::abstract_backend >
                                    genesis_init_function init,
                                    state_node_comparator_function comp )
 {
-  auto root           = std::make_shared< state_node >();
-  root->_impl->_state = std::make_shared< state_delta >( std::move( backend ) );
+  auto root           = ::koinos::node::make_owned_shared< state_node >();
+  root->_impl->_state = ::koinos::node::make_owned_shared< state_delta >( std::move( backend ) );
   _init_func          = init;
   _comp               = comp;
 
@@ -437,7 +440,7 @@ state_node_ptr database_impl::get_node_at_revision( uint64_t revision,
                  "could not find state node associated with linked state_delta ${id}",
                  ( "id", delta->id() ) );
 
-  auto node           = std::make_shared< state_node >();
+  auto node           = ::koinos::node::make_owned_shared< state_node >();
   node->_impl->_state = *node_itr;
   node->_impl->_lock  = lock;
   return node;
@@ -480,7 +483,7 @@ state_node_ptr database_impl::get_node_at_revision( uint64_t revision,
                  "could not find state node associated with linked state_delta ${id}",
                  ( "id", delta->id() ) );
 
-  auto node           = std::make_shared< state_node >();
+  auto node           = ::koinos::node::make_owned_shared< state_node >();
   node->_impl->_state = *node_itr;
   return node;
 }
@@ -515,7 +518,7 @@ state_node_ptr database_impl::get_node_lockless( const state_node_id& node_id ) 
 
   if( node_itr != _index.end() )
   {
-    auto node           = std::make_shared< state_node >();
+    auto node           = ::koinos::node::make_owned_shared< state_node >();
     node->_impl->_state = *node_itr;
     return node;
   }
@@ -554,7 +557,7 @@ state_node_ptr database_impl::create_writable_node( const state_node_id& parent_
       // Finally, if the node is finalized, we can create a new writable node with the desired parent
       if( is_finalized )
       {
-        auto node           = std::make_shared< state_node >();
+        auto node           = ::koinos::node::make_owned_shared< state_node >();
         node->_impl->_state = parent_state->_impl->_state->make_child( new_id, header );
 
         std::unique_lock< std::timed_mutex > index_lock( _index_mutex, timeout );
@@ -604,7 +607,7 @@ state_node_ptr database_impl::create_writable_node( const state_node_id& parent_
       // Finally, if the node is finalized, we can create a new writable node with the desired parent
       if( is_finalized )
       {
-        auto node           = std::make_shared< state_node >();
+        auto node           = ::koinos::node::make_owned_shared< state_node >();
         node->_impl->_state = parent_state->_impl->_state->make_child( new_id, header );
 
         std::unique_lock< std::timed_mutex > index_lock( _index_mutex, timeout );
@@ -635,7 +638,7 @@ state_node_ptr database_impl::clone_node( const state_node_id& node_id,
   KOINOS_ASSERT( node, illegal_argument, "node ${n} not found.", ( "n", node_id ) );
   KOINOS_ASSERT( !node->is_finalized(), illegal_argument, "cannot clone finalized node" );
 
-  auto new_node           = std::make_shared< state_node >();
+  auto new_node           = ::koinos::node::make_owned_shared< state_node >();
   new_node->_impl->_state = node->_impl->_state->clone( new_id, header );
 
   if( _index.insert( new_node->_impl->_state ).second )
@@ -660,7 +663,7 @@ state_node_ptr database_impl::clone_node( const state_node_id& node_id,
   KOINOS_ASSERT( node, illegal_argument, "node ${n} not found.", ( "n", node_id ) );
   KOINOS_ASSERT( !node->is_finalized(), illegal_argument, "cannot clone finalized node" );
 
-  auto new_node           = std::make_shared< state_node >();
+  auto new_node           = ::koinos::node::make_owned_shared< state_node >();
   new_node->_impl->_state = node->_impl->_state->clone( new_id, header );
 
   if( _index.insert( new_node->_impl->_state ).second )
@@ -701,7 +704,7 @@ void database_impl::finalize_node( const state_node_id& node_id, const shared_lo
                     std::back_inserter( forks ),
                     []( const auto& entry )
                     {
-                      state_node_ptr s = std::make_shared< state_node >();
+                      state_node_ptr s = ::koinos::node::make_owned_shared< state_node >();
                       s->_impl->_state = entry.second;
                       return s;
                     } );
@@ -763,7 +766,7 @@ void database_impl::finalize_node( const state_node_id& node_id, const unique_lo
                     std::back_inserter( forks ),
                     []( const auto& entry )
                     {
-                      state_node_ptr s = std::make_shared< state_node >();
+                      state_node_ptr s = ::koinos::node::make_owned_shared< state_node >();
                       s->_impl->_state = entry.second;
                       return s;
                     } );
@@ -889,17 +892,43 @@ void database_impl::commit_node( const state_node_id& node_id, const unique_lock
   auto node = get_node_lockless( node_id );
   KOINOS_ASSERT( node, illegal_argument, "node ${n} not found", ( "n", node_id ) );
 
-  auto old_root = _root;
-  _root         = node->_impl->_state;
+  // Prepare the complete prune plan and new root off to the side. Boost
+  // multi_index::modify erases an element if its modifier throws, so no
+  // fallible root commit belongs inside a live-index modifier.
+  using pending_nodes = std::vector< state_delta_ptr, node::OwnedMemoryBudget::Allocator< state_delta_ptr > >;
+  pending_nodes discarded{ _root };
+  const auto& parents = _index.template get< by_parent >();
+  for( size_t i = 0; i < discarded.size(); ++i )
+  {
+    KOINOS_ASSERT( discarded[ i ]->id() != _head->id(), cannot_discard,
+                   "cannot discard head while committing a competing branch" );
+    auto child = parents.lower_bound( discarded[ i ]->id() );
+    while( child != parents.end() && ( *child )->parent_id() == discarded[ i ]->id() )
+    {
+      if( ( *child )->id() != node_id ) discarded.push_back( *child );
+      ++child;
+    }
+  }
+  auto original = node->_impl->_state;
+  auto replacement = original->clone( original->id(), original->block_header() );
+  replacement->commit();
 
-  _index.modify( _index.find( node_id ),
-                 []( state_delta_ptr& n )
-                 {
-                   n->commit();
-                 } );
-
-  std::unordered_set< state_node_id > whitelist{ node_id };
-  discard_node_lockless( old_root->id(), whitelist );
+  // All preparation has succeeded. Ordered-index comparison, shared-pointer
+  // assignments and erasure below do not allocate. ID uniqueness is unchanged.
+  const auto entry = _index.find( node_id );
+  const bool replaced = _index.replace( entry, replacement );
+  assert( replaced );
+  for( auto child = parents.lower_bound( node_id );
+       child != parents.end() && ( *child )->parent_id() == node_id; ++child )
+    ( *child )->replace_parent_after_commit( replacement );
+  if( _head == original ) _head = replacement;
+  if( auto head = _fork_heads.find( node_id ); head != _fork_heads.end() ) head->second = replacement;
+  _root = std::move( replacement );
+  for( const auto& old: discarded )
+  {
+    _fork_heads.erase( old->id() );
+    _index.erase( old->id() );
+  }
 }
 
 state_node_ptr database_impl::get_head( const shared_lock_ptr& lock ) const
@@ -927,7 +956,7 @@ state_node_ptr database_impl::get_head( const unique_lock_ptr& lock ) const
 state_node_ptr database_impl::get_head_lockless() const
 {
   KOINOS_ASSERT( is_open(), database_not_open, "database is not open" );
-  auto head           = std::make_shared< state_node >();
+  auto head           = ::koinos::node::make_owned_shared< state_node >();
   head->_impl->_state = _head;
   return head;
 }
@@ -943,7 +972,7 @@ std::vector< state_node_ptr > database_impl::get_fork_heads( const shared_lock_p
 
   for( auto& head: _fork_heads )
   {
-    auto fork_head           = std::make_shared< state_node >();
+    auto fork_head           = ::koinos::node::make_owned_shared< state_node >();
     fork_head->_impl->_state = head.second;
     fork_head->_impl->_lock  = lock;
     fork_heads.push_back( fork_head );
@@ -963,7 +992,7 @@ std::vector< state_node_ptr > database_impl::get_fork_heads( const unique_lock_p
 
   for( auto& head: _fork_heads )
   {
-    auto fork_head           = std::make_shared< state_node >();
+    auto fork_head           = ::koinos::node::make_owned_shared< state_node >();
     fork_head->_impl->_state = head.second;
     fork_heads.push_back( fork_head );
   }
@@ -981,7 +1010,7 @@ std::vector< state_node_ptr > database_impl::get_all_nodes( const shared_lock_pt
 
   for( const auto& delta: _index )
   {
-    auto node           = std::make_shared< state_node >();
+    auto node           = ::koinos::node::make_owned_shared< state_node >();
     node->_impl->_state = delta;
     node->_impl->_lock  = lock;
     nodes.push_back( node );
@@ -1000,7 +1029,7 @@ std::vector< state_node_ptr > database_impl::get_all_nodes( const unique_lock_pt
 
   for( const auto& delta: _index )
   {
-    auto node           = std::make_shared< state_node >();
+    auto node           = ::koinos::node::make_owned_shared< state_node >();
     node->_impl->_state = delta;
     nodes.push_back( node );
   }
@@ -1033,7 +1062,7 @@ state_node_ptr database_impl::get_root( const unique_lock_ptr& lock ) const
 state_node_ptr database_impl::get_root_lockless() const
 {
   KOINOS_ASSERT( is_open(), database_not_open, "database is not open" );
-  auto root           = std::make_shared< state_node >();
+  auto root           = ::koinos::node::make_owned_shared< state_node >();
   root->_impl->_state = _root;
   return root;
 }
@@ -1192,6 +1221,7 @@ std::vector< protocol::state_delta_entry > state_node_impl::get_delta_entries() 
 } // namespace detail
 
 abstract_state_node::abstract_state_node():
+    _implementation_memory( node::OwnedMemoryBudget::current().reserve( sizeof( detail::state_node_impl ) + 64 ) ),
     _impl( new detail::state_node_impl() )
 {}
 
@@ -1257,7 +1287,7 @@ std::vector< protocol::state_delta_entry > abstract_state_node::get_delta_entrie
 
 anonymous_state_node_ptr abstract_state_node::create_anonymous_node()
 {
-  auto anonymous_node           = std::make_shared< anonymous_state_node >();
+  auto anonymous_node           = ::koinos::node::make_owned_shared< anonymous_state_node >();
   anonymous_node->_parent       = shared_from_derived();
   anonymous_node->_impl->_state = _impl->_state->make_child();
   anonymous_node->_impl->_lock  = _impl->_lock;
@@ -1290,7 +1320,7 @@ abstract_state_node_ptr state_node::parent() const
   auto parent_delta = _impl->_state->parent();
   if( parent_delta )
   {
-    auto parent_node           = std::make_shared< state_node >();
+    auto parent_node           = ::koinos::node::make_owned_shared< state_node >();
     parent_node->_impl->_state = parent_delta;
     parent_node->_impl->_lock  = _impl->_lock;
     return parent_node;
@@ -1456,6 +1486,7 @@ state_node_ptr pob_comparator( fork_list& forks, state_node_ptr head_block, stat
 }
 
 database::database():
+    _implementation_memory( node::OwnedMemoryBudget::current().reserve( sizeof( detail::database_impl ) + 64 ) ),
     impl( new detail::database_impl() )
 {}
 
@@ -1596,6 +1627,35 @@ void database::discard_node( const state_node_id& node_id, const unique_lock_ptr
 void database::commit_node( const state_node_id& node_id, const unique_lock_ptr& lock )
 {
   impl->commit_node( node_id, lock ? lock : get_unique_lock() );
+}
+
+bool database::contains_node( const state_node_id& id, const unique_lock_ptr& lock ) const
+{
+  KOINOS_ASSERT( impl->verify_unique_lock( lock ), illegal_argument, "database is not properly locked" );
+  std::lock_guard index_lock( impl->_index_mutex );
+  return impl->_index.find( id ) != impl->_index.end();
+}
+
+void database::with_reversible_fork_update( const unique_lock_ptr& lock, const std::function< void() >& update )
+{
+  KOINOS_ASSERT( impl->verify_unique_lock( lock ), illegal_argument, "database is not properly locked" );
+  KOINOS_ASSERT( impl->is_open() && dynamic_cast< backends::map::map_backend* >( impl->_root->backend().get() ),
+                 illegal_argument, "fork metadata rollback requires an open memory database" );
+  // The supplied unique node lock excludes all database access while these
+  // temporary physical index/key allocations and the callback are alive.
+  auto index = impl->_index;
+  auto forks = impl->_fork_heads;
+  auto head = impl->_head;
+  auto root = impl->_root;
+  try { update(); }
+  catch( ... )
+  {
+    impl->_index.swap( index );
+    impl->_fork_heads.swap( forks );
+    impl->_head.swap( head );
+    impl->_root.swap( root );
+    throw;
+  }
 }
 
 state_node_ptr database::get_head( const shared_lock_ptr& lock ) const

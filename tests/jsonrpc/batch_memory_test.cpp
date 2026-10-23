@@ -1,3 +1,4 @@
+#include "core/owned_allocation.hpp"
 #include "jsonrpc/jsonrpc_server.hpp"
 #include <koinos/util/base64.hpp>
 
@@ -22,7 +23,7 @@ thread_local std::size_t large_count = 0, large_bytes = 0;
 constexpr std::size_t large_threshold = 32 * 1024;
 }
 void* operator new(std::size_t bytes) {
-  void* pointer = std::malloc(bytes ? bytes : 1);
+  void* pointer = koinos::node::owned_allocation::allocate(bytes ? bytes : 1);
   if(!pointer) throw std::bad_alloc();
   using namespace allocation_probe;
   if(enabled) {
@@ -44,7 +45,7 @@ void operator delete(void* pointer) noexcept {
       *found={};
     }
   }
-  std::free(pointer);
+  koinos::node::owned_allocation::deallocate(pointer);
 }
 void* operator new[](std::size_t n) { return ::operator new(n); }
 void operator delete[](void* p) noexcept { ::operator delete(p); }

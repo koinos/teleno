@@ -33,17 +33,29 @@ public:
   using TransactionAdmission = std::function< void( const ::koinos::broadcast::transaction_accepted& ) >;
   MonolithRpcClient( IBlockStore* block_store, IMempool* mempool, EventBus* event_bus,
                      TransactionAdmission transaction_admission = {},
-                     TransactionWorkLimits work_limits = {} )
+                     TransactionWorkLimits work_limits = {}, OwnedMemoryBudget transaction_memory = {} )
       : _block_store( block_store ), _mempool( mempool ), _event_bus( event_bus ),
-        _transaction_admission( std::move( transaction_admission ) ), _transaction_work( work_limits )
+        _transaction_admission( std::move( transaction_admission ) ), _transaction_work( work_limits, transaction_memory ),
+        _transaction_memory( std::move( transaction_memory ) )
   {
   }
 
   std::unique_ptr< TransactionWorkReservation >
   reserve_transaction_work( const protocol::transaction& transaction ) override
   {
-    if( !_transaction_work.enabled() ) return {};
-    return _transaction_work.reserve( transaction.ByteSizeLong() );
+    if( !_transaction_memory.enabled() )
+    {
+      if( !_transaction_work.enabled() ) return {};
+      return _transaction_work.reserve( transaction.ByteSizeLong() );
+    }
+    OwnedMemoryBudget::Scope scope( _transaction_memory, false );
+    // Supplementary workspace for native protobuf copies/serialization, not
+    // a claim about arbitrary VM, receipt, ingress or output allocation. The
+    // controller's anonymous map allocations are charged individually below.
+    auto workspace = _transaction_memory.reserve( OwnedMemoryBudget::native_message_workspace(
+      OwnedMemoryBudget::protobuf_space_used( transaction ) ) );
+    auto job = _transaction_work.reserve( transaction.ByteSizeLong() );
+    return std::make_unique< AggregateWork >( _transaction_memory, std::move( workspace ), std::move( job ) );
   }
 
   TransactionWorkSnapshot transaction_work_snapshot() const { return _transaction_work.snapshot(); }
@@ -58,6 +70,8 @@ public:
                                           std::chrono::milliseconds /* timeout */ = std::chrono::milliseconds( 5000 ),
                                           retry_policy /* rp */ = retry_policy::none ) override
   {
+    OwnedMemoryBudget::Scope response_memory_scope(
+      service == util::service::mempool ? _transaction_memory : OwnedMemoryBudget::current() );
     auto promise = std::make_shared< std::promise< std::string > >();
     try
     {
@@ -85,6 +99,10 @@ public:
   {
     if( topic == "koinos.transaction.accept" && _transaction_admission )
     {
+      OwnedMemoryBudget::Scope memory_scope( _transaction_memory, false );
+      auto parse_workspace = _transaction_memory.enabled() ? _transaction_memory.reserve(
+        OwnedMemoryBudget::checked_add( OwnedMemoryBudget::checked_multiply( payload.size(), 128 ), 65536 ) )
+        : OwnedMemoryBudget::Lease{};
       ::koinos::broadcast::transaction_accepted ta;
       if( !ta.ParseFromString( payload ) || !ta.has_transaction() || !ta.has_receipt() )
         throw std::invalid_argument( "Malformed native transaction admission message" );
@@ -145,7 +163,22 @@ public:
     }
   }
 
+  void broadcast_block_accepted( const ::koinos::broadcast::block_accepted& event ) override
+  {
+    if( _event_bus ) _event_bus->on_block_accepted( event );
+  }
+
 private:
+  struct AggregateWork final : TransactionWorkReservation
+  {
+    AggregateWork( OwnedMemoryBudget memory, OwnedMemoryBudget::Lease workspace,
+                   std::unique_ptr< TransactionWorkReservation > job )
+      : memory( std::move( memory ) ), workspace( std::move( workspace ) ), job( std::move( job ) ) {}
+    OwnedMemoryBudget memory;
+    OwnedMemoryBudget::Lease workspace;
+    std::unique_ptr< TransactionWorkReservation > job;
+    OwnedMemoryBudget memory_budget() const noexcept override { return memory; }
+  };
   std::string handle_block_store_rpc( const std::string& payload )
   {
     rpc::block_store::block_store_request req;
@@ -195,6 +228,7 @@ private:
   EventBus* _event_bus;
   TransactionAdmission _transaction_admission;
   TransactionWorkBudget _transaction_work;
+  OwnedMemoryBudget _transaction_memory;
   std::atomic< uint64_t > _transaction_notification_failures{ 0 };
 };
 

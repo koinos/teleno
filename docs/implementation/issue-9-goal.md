@@ -3,6 +3,82 @@
 Created: 2026-10-15. Purpose clarified: 2026-10-17.
 Status: **work open; LR2 not qualified**.
 
+**M1 completion, 2026-10-23:** exact R15 passes lifetime-owner/admission review,
+104 normal OVH checks, both CLI checks, 63 focused ASan/UBSan and 61 default-
+TSan cases with working controls. Five equivalent pairs per measured workload,
+100-block/12,800-test-transaction creation/reopen, and the exact full-history
+observer's one-hour mixed reads, clean restart and interruption/recovery pass.
+Measured RAM and strict disk/reserve margins satisfy this M1 profile; component
+improvements are kept separate from whole-node savings. See the
+[M1 decision and exact identities](../validation/low-resource-lr2-m1-r15.md).
+The operational Hetzner producer is untouched. M1 does not close the remaining
+issue-9 requirements or replace separately identified producer/restore evidence.
+
+**M1 execution-time amendment, 2026-10-21:** the operator removes overall
+execution-time limits. Continue memory optimization, builds and qualification
+for as long as necessary to demonstrate the acceptance criteria. Do not stop
+because an eight-hour allowance or fixed work window elapsed. Preserve all
+closed-run results/deadlines, source/candidate provenance, non-time resource
+limits and the exclusive OVH test location. The
+[current M1 execution controls](issue-9-m1-aggregate-goal.md#execution-controls-and-completion--no-overall-time-limit)
+supersede earlier future-work time limits; the Hetzner producer remains outside
+scope.
+
+**M1 purpose clarification, 2026-10-21:** optimize actual application memory
+use so that the complete Teleno node is economical to operate on the small-VPS
+baseline. Profile and reduce unnecessary allocations, copies, temporary work
+and retention; use lifetime-owned aggregate admission to keep concurrent
+mempool/transaction work bounded. Prove physical memory behavior separately
+from accounting counters. The
+[current M1 objective](issue-9-m1-aggregate-goal.md#current-objective--clarified-by-the-operator-2026-10-21)
+preserves all correctness, history, resource and evidence acceptance gates.
+Every executable M1 test remains exclusive to isolated OVH; the operational
+Hetzner producer is outside scope. This clarification extends no expired run.
+
+**M1 test-location amendment, 2026-10-20:** execute all future M1 tests only
+on the new isolated OVH VPS, including development reproductions, complete
+native suites, sanitizers/controls, controlled-chain fixtures, paired
+measurements and native CLI checks. My Passport and the authorized builder
+remain available for artifact storage/preparation and compilation without test
+execution. This overrides earlier M1 test-location permissions in this
+document; preserve their historical evidence. Keep the operational Hetzner
+producer untouched and retain all deadlines, counters, resource limits and
+recovery reserve. The [M1 memory-optimization goal](issue-9-m1-aggregate-goal.md)
+records the current scope; the [C11/C12 repair](issue-9-m1-receipt-output-repair.md)
+is a closed, unqualified attempt with its evidence preserved.
+
+The operator authorized necessary further M1 attempts on 2026-10-20. The
+separately bounded C5/C6 and C7/C8 attempts are both closed unqualified;
+the unchanged C1–C4 outcomes are recorded in the
+[M1 goal](issue-9-m1-aggregate-goal.md). The live VPS producer remains
+outside these implementation and qualification runs.
+
+A separate C9/C10 attempt reproduces and corrects two shorter-predecessor
+nonce/count read overflows. Frozen C9 passes 74/74 normal Linux checks, 22/22
+focused ASan/UBSan and 22/22 focused TSan checks, separate cleanup checks, and
+a controlled 100-block production/reopen profile. Five paired C8/C9 samples
+and all ten reopens pass without an attributable performance saving or loss.
+The finite attempt closed unqualified for M1; whole-node qualification remains
+open. See the
+[C9 report](../validation/low-resource-lr2-m1-nonce-read.md). No live VPS
+producer operation is included.
+
+The separately authorized [finite M1 aggregate-memory run](issue-9-m1-aggregate-goal.md)
+starts at 2026-10-19 08:30:38 UTC and stops by 16:30:38 UTC with at most two
+frozen candidates. It changes source and isolated tests only. It does not
+authorize a producer restart/deployment or reopen closed commissioning counters.
+See [M1 ownership and evidence](../validation/low-resource-lr2-aggregate-memory.md).
+
+The first M1 attempt is closed and unqualified. A separate operator-authorized
+repair allowance had the fixed window **2026-10-19 14:16:04–22:16:04 UTC**,
+with at most two additional frozen candidates, C3/C4, and no VPS producer
+operations. It stopped within that window with both slots consumed and M1 still
+open. Its
+[amended goal](issue-9-m1-aggregate-goal.md#authorized-finite-repair-allowance--2026-10-19)
+also requires a [legacy applicability analysis](legacy-applicability-of-teleno-findings.md),
+distinguishing reproduced failures from source-supported hypotheses. This does
+not change the first attempt's limits or make M1 complete.
+
 ## Completed operational producer milestone (2026-10-18)
 
 The repaired candidate passes the finite mainnet producer observation and

@@ -32,13 +32,13 @@ state_delta::state_delta( const std::optional< std::filesystem::path >& p )
 {
   if( p )
   {
-    auto backend = std::make_shared< backends::rocksdb::rocksdb_backend >();
+    auto backend = ::koinos::node::make_owned_shared< backends::rocksdb::rocksdb_backend >();
     backend->open( *p );
     _backend = backend;
   }
   else
   {
-    _backend = std::make_shared< backends::map::map_backend >();
+    _backend = ::koinos::node::make_owned_shared_extra< backends::map::map_backend >( 256 );
   }
 
   _revision    = _backend->revision();
@@ -69,8 +69,13 @@ void state_delta::erase( const key_type& k, bool preserve_tombstone )
 {
   if( find( k ) || preserve_tombstone )
   {
-    _backend->erase( k );
-    _removed_objects.insert( k );
+    node::OwnedMemoryBudget::KeyScope key_reservation( k.size() );
+    // Prepare the fallible marker before erasing a live map entry. In
+    // particular, a local budget refusal cannot remove a value without its
+    // tombstone. Overlay publication retains the stronger all-fork contract.
+    const auto [ marker, inserted ] = _removed_objects.insert( k );
+    try { _backend->erase( k ); }
+    catch( ... ) { if( inserted ) _removed_objects.erase( marker ); throw; }
   }
 }
 
@@ -100,6 +105,7 @@ void state_delta::squash()
 
     if( !_parent->is_root() )
     {
+      node::OwnedMemoryBudget::KeyScope key_reservation( r_key.size() );
       _parent->_removed_objects.insert( r_key );
     }
   }
@@ -118,15 +124,20 @@ void state_delta::squash()
 void state_delta::squash_all_writes( const std::vector< std::shared_ptr< state_delta > >& children )
 {
   using map_backend = backends::map::map_backend;
+  const auto* first_map = !children.empty() && children.front()
+    ? dynamic_cast< const map_backend* >( children.front()->_backend.get() ) : nullptr;
+  node::OwnedMemoryBudget::Scope memory_scope( first_map ? first_map->memory_budget()
+    : node::OwnedMemoryBudget::current() );
   struct transfer
   {
     map_backend* source;
     map_backend* target;
-    std::unordered_set< key_type >* removed;
+    backends::map::removed_key_set* removed;
   };
-  std::vector< transfer > prepared;
+  std::vector< transfer, node::OwnedMemoryBudget::Allocator< transfer > > prepared;
   prepared.reserve( children.size() );
-  std::unordered_set< state_delta* > parents;
+  std::unordered_set< state_delta*, std::hash< state_delta* >, std::equal_to< state_delta* >,
+    node::OwnedMemoryBudget::Allocator< state_delta* > > parents;
   parents.reserve( children.size() );
   for( const auto& child: children )
   {
@@ -138,10 +149,13 @@ void state_delta::squash_all_writes( const std::vector< std::shared_ptr< state_d
     auto* source = dynamic_cast< map_backend* >( child->_backend.get() );
     auto* target = dynamic_cast< map_backend* >( child->_parent->_backend.get() );
     KOINOS_ASSERT( source && target, illegal_argument, "atomic write batch requires map backends" );
+    KOINOS_ASSERT( source->memory_budget() == target->memory_budget() &&
+                   target->memory_budget() == child->_parent->_removed_objects.get_allocator().memory_budget(),
+                   illegal_argument, "atomic write batch requires matching memory owners" );
     prepared.push_back( { source, target, &child->_parent->_removed_objects } );
   }
   // Everything that allocates or can reject the batch is above this boundary.
-  // Fixed default map allocators allow node-handle transfer without allocation.
+  // Verified matching map allocators allow node-handle transfer without allocation.
   for( const auto& item: prepared )
     item.target->merge_writes_from( *item.source, *item.removed );
 }
@@ -149,10 +163,16 @@ void state_delta::squash_all_writes( const std::vector< std::shared_ptr< state_d
 state_delta::prepared_change_batch state_delta::prepare_all_changes(
   const std::vector< std::shared_ptr< state_delta > >& children )
 {
+  const auto* first_map = !children.empty() && children.front()
+    ? dynamic_cast< const backends::map::map_backend* >( children.front()->_backend.get() ) : nullptr;
+  node::OwnedMemoryBudget::Scope memory_scope( first_map ? first_map->memory_budget()
+    : node::OwnedMemoryBudget::current() );
   prepared_change_batch batch;
   batch._transfers.reserve( children.size() );
-  std::unordered_set< state_delta* > parents;
-  std::unordered_set< backend_type* > targets, sources;
+  std::unordered_set< state_delta*, std::hash< state_delta* >, std::equal_to< state_delta* >,
+    node::OwnedMemoryBudget::Allocator< state_delta* > > parents;
+  std::unordered_set< backend_type*, std::hash< backend_type* >, std::equal_to< backend_type* >,
+    node::OwnedMemoryBudget::Allocator< backend_type* > > targets, sources;
   parents.reserve( children.size() );
   targets.reserve( children.size() );
   sources.reserve( children.size() );
@@ -167,6 +187,11 @@ state_delta::prepared_change_batch state_delta::prepare_all_changes(
     auto* source = dynamic_cast< backends::map::map_backend* >( child->_backend.get() );
     auto* target = dynamic_cast< backends::map::map_backend* >( parent->_backend.get() );
     KOINOS_ASSERT( source && target, illegal_argument, "change batch requires map backends" );
+    KOINOS_ASSERT( source->memory_budget() == target->memory_budget() &&
+                   target->memory_budget() == parent->_removed_objects.get_allocator().memory_budget() &&
+                   target->memory_budget() == child->_removed_objects.get_allocator().memory_budget() &&
+                   target->memory_budget() == node::OwnedMemoryBudget::current(),
+                   illegal_argument, "change batch requires matching memory owners" );
     KOINOS_ASSERT( targets.insert( target ).second && sources.insert( source ).second,
                    illegal_argument, "change batch requires distinct backends" );
     batch._transfers.push_back( { child, parent, source, target, {} } );
@@ -227,7 +252,8 @@ void state_delta::commit()
    */
   KOINOS_ASSERT( !is_root(), internal_error, "cannot commit root" );
 
-  std::vector< std::shared_ptr< state_delta > > node_stack;
+  std::vector< std::shared_ptr< state_delta >,
+    node::OwnedMemoryBudget::Allocator< std::shared_ptr< state_delta > > > node_stack;
   auto current_node = shared_from_this();
 
   while( current_node )
@@ -241,6 +267,12 @@ void state_delta::commit()
   auto backend = node_stack.back()->_backend;
   auto previous_root = node_stack.back();
   node_stack.pop_back();
+
+  // A map backend has no transactional write batch. Prepare a private map
+  // instead: allocation failure must leave the old root and accepted records
+  // intact. Immutable payloads remain shared; keys/nodes are separately owned.
+  if( dynamic_cast< backends::map::map_backend* >( backend.get() ) )
+    backend = backend->clone();
 
   try
   {
@@ -278,7 +310,8 @@ void state_delta::commit()
   catch( ... ) { backend->abort_write_batch(); throw; }
 
   // Reset local variables to match new status as root delta
-  previous_root->_backend.reset();
+  // Caller-held old nodes retain valid payloads and their memory credits until
+  // the final owner releases them. Never invalidate that ownership early.
   _removed_objects.clear();
   _backend = backend;
   _parent.reset();
@@ -357,8 +390,21 @@ crypto::multihash state_delta::calculate_merkle_root() const
   // Do not read or populate _merkle_root here. Writable-delta mutations do not
   // invalidate that finalized-root cache, so pending validation must always
   // calculate from the current backend and tombstone set.
+  const auto memory = node::OwnedMemoryBudget::current();
+  const auto keys = node::OwnedMemoryBudget::checked_add( _backend->size(), _removed_objects.size() );
+  auto hash_workspace = memory.enabled() ? memory.reserve( node::OwnedMemoryBudget::checked_add(
+    node::OwnedMemoryBudget::checked_multiply( keys, 1024 ), 65536 ) ) : node::OwnedMemoryBudget::Lease{};
+  uint64_t strings = 0;
+  if( memory.enabled() )
+  {
+    for( auto itr = _backend->begin(); itr != _backend->end(); ++itr )
+      strings = node::OwnedMemoryBudget::checked_add( strings, node::OwnedMemoryBudget::string_reservation( itr.key().size() ) );
+    for( const auto& key: _removed_objects )
+      strings = node::OwnedMemoryBudget::checked_add( strings, node::OwnedMemoryBudget::string_reservation( key.size() ) );
+  }
+  auto string_workspace = memory.reserve( strings );
   std::vector< std::string > object_keys;
-  object_keys.reserve( _backend->size() + _removed_objects.size() );
+  object_keys.reserve( keys );
   for( auto itr = _backend->begin(); itr != _backend->end(); ++itr )
   {
     object_keys.push_back( itr.key() );
@@ -391,11 +437,16 @@ const protocol::block_header& state_delta::block_header() const
 
 std::shared_ptr< state_delta > state_delta::make_child( const state_node_id& id, const protocol::block_header& header )
 {
-  auto child       = std::make_shared< state_delta >();
+  auto* source_map = dynamic_cast< backends::map::map_backend* >( _backend.get() );
+  const auto inherited_memory = source_map ? source_map->memory_budget() : node::OwnedMemoryBudget{};
+  node::OwnedMemoryBudget::Scope memory_scope( inherited_memory.enabled() ? inherited_memory : node::OwnedMemoryBudget::current() );
+  auto child       = ::koinos::node::make_owned_shared_extra< state_delta >(
+    node::OwnedMemoryBudget::current().enabled() ? node::OwnedMemoryBudget::checked_add( 256,
+      node::OwnedMemoryBudget::checked_multiply( node::OwnedMemoryBudget::protobuf_space_used( header ), 2 ) ) : 0 );
   child->_parent   = shared_from_this();
   child->_id       = id;
   child->_revision = _revision + 1;
-  child->_backend  = std::make_shared< backends::map::map_backend >();
+  child->_backend  = ::koinos::node::make_owned_shared_extra< backends::map::map_backend >( 256 );
   child->_backend->set_block_header( header );
 
   return child;
@@ -403,10 +454,25 @@ std::shared_ptr< state_delta > state_delta::make_child( const state_node_id& id,
 
 std::shared_ptr< state_delta > state_delta::clone( const state_node_id& id, const protocol::block_header& header )
 {
-  auto new_node              = std::make_shared< state_delta >();
+  auto* source_map = dynamic_cast< backends::map::map_backend* >( _backend.get() );
+  const auto inherited_memory = source_map ? source_map->memory_budget() : node::OwnedMemoryBudget{};
+  node::OwnedMemoryBudget::Scope memory_scope( inherited_memory.enabled() ? inherited_memory : node::OwnedMemoryBudget::current() );
+  auto new_node              = ::koinos::node::make_owned_shared_extra< state_delta >(
+    node::OwnedMemoryBudget::current().enabled() ? node::OwnedMemoryBudget::checked_add( 256,
+      node::OwnedMemoryBudget::checked_multiply( node::OwnedMemoryBudget::protobuf_space_used( header ), 2 ) ) : 0 );
   new_node->_parent          = _parent;
   new_node->_backend         = _backend->clone();
-  new_node->_removed_objects = _removed_objects;
+  if( !node::OwnedMemoryBudget::current().enabled() ) new_node->_removed_objects = _removed_objects;
+  else
+  {
+    new_node->_removed_objects = backends::map::removed_key_set( node::OwnedMemoryBudget::Allocator< key_type >( node::OwnedMemoryBudget::current() ) );
+    new_node->_removed_objects.reserve( _removed_objects.size() );
+    for( const auto& key: _removed_objects )
+    {
+      node::OwnedMemoryBudget::KeyScope key_reservation( key.size() );
+      new_node->_removed_objects.insert( key );
+    }
+  }
 
   new_node->_id          = id;
   new_node->_revision    = _revision;

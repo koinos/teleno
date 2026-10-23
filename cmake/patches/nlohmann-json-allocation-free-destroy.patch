@@ -1,0 +1,217 @@
+--- a/include/nlohmann/json.hpp
++++ b/include/nlohmann/json.hpp
+@@ -17,6 +17,9 @@
+ 
+ #ifndef INCLUDE_NLOHMANN_JSON_HPP_
+ #define INCLUDE_NLOHMANN_JSON_HPP_
++
++// Build-owned Teleno cleanup backport; layout, namespace and JSON bytes unchanged.
++#define TELENO_NLOHMANN_ALLOCATION_FREE_DESTROY 1
+ 
+ #include <algorithm> // all_of, find, for_each
+ #include <cstddef> // nullptr_t, ptrdiff_t, size_t
+@@ -551,55 +554,138 @@
+         /// constructor for rvalue binary arrays (internal type)
+         json_value(binary_t&& value) : binary(create<binary_t>(std::move(value))) {}
+ 
+-        void destroy(value_t t)
+-        {
+-            if (t == value_t::array || t == value_t::object)
+-            {
+-                // flatten the current json_value to a heap-allocated stack
+-                std::vector<basic_json> stack;
+-
+-                // move the top-level items to stack
+-                if (t == value_t::array)
+-                {
+-                    stack.reserve(array->size());
+-                    std::move(array->begin(), array->end(), std::back_inserter(stack));
++        // Teleno backport: retiring a tree must not allocate. Admission may
++        // already be full, including while a container copy unwinds a failure.
++        static bool retiring_container(const basic_json& value) noexcept
++        {
++            return value.is_array() || value.is_object();
++        }
++
++        static bool retiring_leaf(const basic_json& value) noexcept
++        {
++            return !retiring_container(value) || value.empty();
++        }
++
++        static void retire_leaf(basic_json& value) noexcept
++        {
++            basic_json empty;
++            value.swap(empty); // Only a primitive or empty container is destroyed.
++        }
++
++        static void erase_last_retiring_child(basic_json& value) noexcept
++        {
++            value.erase(std::prev(value.end()));
++        }
++
++        static void collapse_retiring_child(basic_json& value) noexcept
++        {
++            basic_json child(std::move(value.back()));
++            value.clear(); // Its only child is now null.
++            value.swap(child); // child owns an empty container.
++        }
++
++        static bool erase_retiring_edge_leaf(basic_json& value) noexcept
++        {
++            if (retiring_leaf(value.back()))
++            {
++                erase_last_retiring_child(value);
++                return true;
++            }
++            if (retiring_leaf(value.front()))
++            {
++                value.front().swap(value.back());
++                erase_last_retiring_child(value);
++                return true;
++            }
++            return false;
++        }
++
++        // Beyond the fixed parent stack, rescan without recursive C++ calls.
++        // Leaf siblings are consumed first so deep combs collapse in one pass.
++        static void retire_deep_tree(basic_json& root) noexcept
++        {
++            for (;;)
++            {
++                basic_json* current = &root;
++                basic_json* parent = nullptr;
++                while (retiring_container(*current) && !current->empty())
++                {
++                    if (current->size() == 1)
++                    {
++                        collapse_retiring_child(*current);
++                    }
++                    else if (erase_retiring_edge_leaf(*current))
++                    {
++                        continue;
++                    }
++                    else
++                    {
++                        parent = current;
++                        current = &current->back();
++                    }
++                }
++                retire_leaf(*current);
++                if (parent == nullptr)
++                {
++                    return;
++                }
++                erase_last_retiring_child(*parent);
++            }
++        }
++
++        static void retire_tree(basic_json& root) noexcept
++        {
++            basic_json* parents[64] = {};
++            std::size_t depth = 1;
++            parents[0] = &root;
++            while (depth != 0)
++            {
++                basic_json& current = *parents[depth - 1];
++                if (retiring_container(current) && !current.empty())
++                {
++                    if (current.size() == 1)
++                    {
++                        collapse_retiring_child(current);
++                        continue;
++                    }
++                    if (depth < 64)
++                    {
++                        parents[depth++] = &current.back();
++                        continue;
++                    }
++                    retire_deep_tree(current);
+                 }
+                 else
+                 {
+-                    stack.reserve(object->size());
+-                    for (auto&& it : *object)
+-                    {
+-                        stack.push_back(std::move(it.second));
+-                    }
++                    retire_leaf(current);
+                 }
+-
+-                while (!stack.empty())
+-                {
+-                    // move the last item to local variable to be processed
+-                    basic_json current_item(std::move(stack.back()));
+-                    stack.pop_back();
+-
+-                    // if current_item is array/object, move
+-                    // its children to the stack to be processed later
+-                    if (current_item.is_array())
+-                    {
+-                        std::move(current_item.m_value.array->begin(), current_item.m_value.array->end(), std::back_inserter(stack));
+-
+-                        current_item.m_value.array->clear();
+-                    }
+-                    else if (current_item.is_object())
+-                    {
+-                        for (auto&& it : *current_item.m_value.object)
+-                        {
+-                            stack.push_back(std::move(it.second));
+-                        }
+-
+-                        current_item.m_value.object->clear();
+-                    }
+-
+-                    // it's now safe that current_item get destructed
+-                    // since it doesn't have any children
++                --depth;
++                if (depth != 0)
++                {
++                    erase_last_retiring_child(*parents[depth - 1]);
+                 }
++            }
++        }
++
++        void destroy(value_t t)
++        {
++            if ((t == value_t::array && !array->empty()) ||
++                    (t == value_t::object && !object->empty()))
++            {
++                basic_json retiring;
++                retiring.m_type = t;
++                retiring.m_value = *this;
++                if (t == value_t::array)
++                {
++                    array = nullptr;
++                }
++                else
++                {
++                    object = nullptr;
++                }
++                retiring.set_parents();
++                retire_tree(retiring);
++                return; // The retired root already released its container.
+             }
+ 
+             switch (t)
+@@ -920,16 +1006,17 @@
+         if (is_an_object)
+         {
+             // the initializer list is a list of pairs -> create object
+-            m_type = value_t::object;
+-            m_value = value_t::object;
+-
++            // Keep the partially populated object owned until publication.
++            // This constructor's own destructor cannot run if emplace throws.
++            basic_json object(value_t::object);
+             for (auto& element_ref : init)
+             {
+                 auto element = element_ref.moved_or_copied();
+-                m_value.object->emplace(
++                object.m_value.object->emplace(
+                     std::move(*((*element.m_value.array)[0].m_value.string)),
+                     std::move((*element.m_value.array)[1]));
+             }
++            swap(object);
+         }
+         else
+         {

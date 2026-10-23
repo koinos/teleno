@@ -1,3 +1,4 @@
+#include "core/owned_allocation.hpp"
 #include "p2p/seen_cache.hpp"
 
 #include <atomic>
@@ -21,14 +22,14 @@ void* operator new( std::size_t size )
 {
   if( counting ) ++allocations;
   if( fail_after >= 0 && fail_after.fetch_sub( 1 ) == 0 ) throw std::bad_alloc();
-  if( auto p = std::malloc( size ? size : 1 ) ) return p;
+  if( auto p = koinos::node::owned_allocation::allocate( size ? size : 1 ) ) return p;
   throw std::bad_alloc();
 }
-void operator delete( void* p ) noexcept { std::free( p ); }
+void operator delete( void* p ) noexcept { koinos::node::owned_allocation::deallocate( p ); }
 void* operator new[](std::size_t n) { return ::operator new(n); }
 void operator delete[](void* p) noexcept { ::operator delete(p); }
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { koinos::node::owned_allocation::deallocate(p); }
+void operator delete[](void* p, std::size_t) noexcept { koinos::node::owned_allocation::deallocate(p); }
 
 using Cache = koinos::node::p2p::SeenCache;
 using namespace std::chrono_literals;

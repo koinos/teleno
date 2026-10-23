@@ -7,6 +7,21 @@ The subsequently authorized observation independently confirms own block
 [the separate result](#subsequent-own-block-confirmation). This report does not
 close issue 9 or change the original finite result.
 
+**Operational update, 2026-10-22:** the identified native producer later aborts
+on 2026-10-21 at 16:18 UTC with `SIGABRT` and `corrupted double-linked list`.
+The host retains no core dump; the corrupting allocation/call site is not
+established. The original finite-hour and own-block evidence below remains
+historical and does not establish long-running stability. Following explicit
+operator approval, the existing pool's registered production key is rotated
+and production moves to a separate legacy producer. Its block **40,429,295**
+is independently canonical and irreversible at reference LIB **40,429,296**.
+The old native signer remains stopped with automatic restart and boot
+activation disabled. Previous active-producer statements below describe the
+18 October checkpoint; do not use them as current deployment instructions.
+This operational mitigation does not fix the heap corruption or close issue 9.
+Private deployment bindings, the approved transaction and complete proof are
+retained in the owned cutover evidence referenced by `docs/memoria.md`.
+
 ## Reproduction and correction
 
 The original finite attempt reports twelve unknown-parent mempool exceptions.

@@ -1,4 +1,5 @@
 #include "jsonrpc_server.hpp"
+#include "json_cleanup.hpp"
 
 #include "core/node_version.hpp"
 #include "core/transaction_work_budget.hpp"
@@ -167,7 +168,7 @@ void normalize_json_bytes_field( nlohmann::json& object, const char* field )
   if( !object.is_object() || !object.contains( field ) || !object[ field ].is_string() )
     return;
 
-  auto value = object[ field ].get< std::string >();
+  const auto& value = object[ field ].get_ref< const std::string& >();
   if( value.empty() )
     return;
 
@@ -188,6 +189,14 @@ void normalize_json_base58_field( nlohmann::json& object, const char* field )
   {
     object[ field ] = util::to_base64( util::from_base58< std::string >( value ) );
   }
+  catch( const LocalCapacityExceeded& )
+  {
+    throw;
+  }
+  catch( const std::bad_alloc& )
+  {
+    throw;
+  }
   catch( const std::exception& )
   {
     // Keep already-base64 protobuf JSON values unchanged.
@@ -204,6 +213,7 @@ void normalize_json_hash_array( nlohmann::json& object, const char* field )
     if( value.is_string() )
     {
       nlohmann::json wrapper = { { "value", value } };
+      JsonCleanup wrapper_cleanup( wrapper );
       normalize_json_bytes_field( wrapper, "value" );
       value = wrapper[ "value" ];
     }
@@ -221,6 +231,7 @@ void normalize_json_base58_array( nlohmann::json& object, const char* field )
       continue;
 
     nlohmann::json wrapper = { { "value", value } };
+    JsonCleanup wrapper_cleanup( wrapper );
     normalize_json_base58_field( wrapper, "value" );
     value = wrapper[ "value" ];
   }
@@ -385,6 +396,7 @@ nlohmann::json normalize_koinos_params( const std::string& service,
                                         const nlohmann::json& params )
 {
   auto normalized = params;
+  JsonCleanup normalized_cleanup( normalized );
 
   if( service == "chain" )
   {
@@ -427,7 +439,7 @@ nlohmann::json normalize_koinos_params( const std::string& service,
     normalize_json_base58_field( normalized, "contract_id" );
   }
 
-  return normalized;
+  return std::move( normalized );
 }
 
 nlohmann::json chain_id_to_json( const rpc::chain::get_chain_id_response& resp )
@@ -458,13 +470,15 @@ nlohmann::json account_nonce_to_json( const rpc::chain::get_account_nonce_respon
 nlohmann::json read_contract_to_json( const rpc::chain::read_contract_response& resp )
 {
   nlohmann::json logs = nlohmann::json::array();
+  JsonCleanup logs_cleanup( logs );
   for( const auto& log: resp.logs() )
     logs.push_back( log );
 
   nlohmann::json result = { { "result", util::to_base64( resp.result() ) } };
+  JsonCleanup result_cleanup( result );
   if( !logs.empty() )
     result[ "logs" ] = std::move( logs );
-  return result;
+  return std::move( result );
 }
 
 } // namespace
@@ -475,16 +489,24 @@ nlohmann::json read_contract_to_json( const rpc::chain::read_contract_response& 
 
 struct JSONRPCServer::Session: std::enable_shared_from_this< Session >
 {
+  using session_executor = net::strand< net::io_context::executor_type >;
+  using session_socket = net::basic_stream_socket< tcp, session_executor >;
+  using session_stream = beast::basic_stream< tcp, session_executor >;
   JSONRPCServer& server;
-  beast::tcp_stream stream;
+  session_stream stream;
   beast::flat_buffer buffer;
   std::optional< http::request_parser< http::string_body > > parser;
+  OwnedMemoryBudget::Lease refusal_workspace;
+  MempoolOutputLeases mempool_output_leases;
   std::optional< http::response< http::string_body > > response;
   bool closed = false;
   std::size_t attributed_request_capacity = 0;
   std::size_t attributed_response_capacity = 0;
 
-  Session( JSONRPCServer& s, tcp::socket socket ): server( s ), stream( std::move( socket ) ) {}
+  Session( JSONRPCServer& s, session_socket socket )
+    : server( s ), stream( std::move( socket ) ),
+      mempool_output_leases( OwnedMemoryBudget::Allocator< OwnedMemoryBudget::Lease >(
+        s._mempool ? s._mempool->memory_budget() : OwnedMemoryBudget{} ) ) {}
   ~Session()
   {
     server.replace_body_capacities( attributed_request_capacity,
@@ -526,7 +548,10 @@ struct JSONRPCServer::Session: std::enable_shared_from_this< Session >
         if( ec || self->closed || !self->server._running ) { self->close(); return; }
         try { self->account_bodies(); self->respond(); }
         catch( const std::exception& e ) {
-          LOG( warning ) << "[jsonrpc] Session exception: " << e.what(); self->close();
+          // Logging must not throw a second allocation failure past io.run().
+          try { LOG( warning ) << "[jsonrpc] Session exception: " << e.what(); }
+          catch( ... ) {}
+          self->close();
         }
         catch( ... ) { self->close(); }
       } );
@@ -562,7 +587,7 @@ struct JSONRPCServer::Session: std::enable_shared_from_this< Session >
       // Already-admitted service calls run to completion, including mutations.
       // Disconnect/stop cannot imply rollback; stop joins dispatch before the
       // registry releases dependencies. Service execution has no forced timeout.
-      response->body() = server.process_body( req.body() );
+      response->body() = server.process_body( req.body(), mempool_output_leases, refusal_workspace );
     }
     // Observe both completed bodies before releasing the request, so the
     // transition high water does not hide this real ownership overlap.
@@ -581,6 +606,12 @@ struct JSONRPCServer::Session: std::enable_shared_from_this< Session >
         // Cancellation must not destroy it earlier, while writes still use it.
         const bool close_connection = ec || self->closed || self->response->need_eof();
         self->response.reset();
+        // clear() alone leaves the vector's capacity charged across keepalive.
+        {
+          MempoolOutputLeases empty( self->mempool_output_leases.get_allocator() );
+          self->mempool_output_leases.swap( empty );
+        }
+        self->refusal_workspace.reset();
         self->account_bodies();
         if( close_connection ) { self->close(); return; }
         self->read();
@@ -615,6 +646,11 @@ JSONRPCServer::JSONRPCServer( IChain* chain,
 {
   if( threads > 64 || io_timeout.count() <= 0 || io_timeout > std::chrono::seconds( 300 ) )
     throw std::invalid_argument( "JSON-RPC jobs must be at most 64 and I/O timeout must be positive and at most 300 seconds" );
+  if( _mempool && _mempool->memory_budget().enabled() )
+  {
+    OwnedMemoryBudget::Scope scope( _mempool->memory_budget(), true );
+    _refusal_workspace = OwnedMemoryBudget( 64 * 1024 * 1024, true );
+  }
 }
 
 JSONRPCServer::~JSONRPCServer()
@@ -662,10 +698,12 @@ void JSONRPCServer::start()
     // same cancellation path used by stop, then drain whichever workers exist.
     net::post( _accept_strand, [this] {
       beast::error_code ec; _acceptor.close( ec );
-      std::vector< std::shared_ptr< Session > > sessions;
+      // cancel() only posts to the session's own strand. Avoid retaining a
+      // second strong owner in this accept-strand handler: if that owner were
+      // last, Beast's stream could be destroyed here while its timeout handler
+      // is still completing on the session strand.
       { std::lock_guard lock( _sessions_mutex );
-        for( const auto& entry: _sessions ) sessions.push_back( entry.second ); }
-      for( const auto& session: sessions ) session->cancel();
+        for( const auto& entry: _sessions ) entry.second->cancel(); }
     } );
     if( _threads.empty() ) _ioc.run();
     for( auto& thread: _threads ) if( thread.joinable() ) thread.join();
@@ -690,10 +728,10 @@ void JSONRPCServer::stop()
   net::post( _accept_strand, [this] {
     beast::error_code ec;
     _acceptor.close( ec );
-    std::vector< std::shared_ptr< Session > > sessions;
+    // Keep the registry as the only accept-strand owner. cancel() posts a
+    // self-owned close on each session strand; the registry is released there.
     { std::lock_guard lock( _sessions_mutex );
-      for( const auto& entry: _sessions ) sessions.push_back( entry.second ); }
-    for( const auto& session: sessions ) session->cancel();
+      for( const auto& entry: _sessions ) entry.second->cancel(); }
   } );
   for( auto& t: _threads )
   {
@@ -740,7 +778,7 @@ void JSONRPCServer::replace_body_capacities( std::size_t old_request, std::size_
 void JSONRPCServer::do_accept()
 {
   _acceptor.async_accept( net::make_strand( _ioc ), net::bind_executor( _accept_strand,
-    [this]( beast::error_code ec, tcp::socket socket ) {
+    [this]( beast::error_code ec, Session::session_socket socket ) {
     if( !ec && _running )
     {
       if( active_sessions() < _thread_count )
@@ -772,17 +810,135 @@ void JSONRPCServer::do_accept()
 // JSON-RPC processing
 // ---------------------------------------------------------------------------
 
-std::string JSONRPCServer::process_body( const std::string& body )
+struct JSONRPCServer::PreparedTransactionReply
 {
+  OwnedMemoryBudget budget;
+  nlohmann::json* envelope = nullptr; // Borrowed only during the synchronous call.
+  OwnedMemoryBudget::Lease* batch_credit = nullptr;
+  std::string encoded;
+  std::exception_ptr serialization_error;
+  bool ready = false, completed = false;
+
+  static void prepare( void* context, const rpc::chain::submit_transaction_response& receipt )
+  {
+    auto& self = *static_cast< PreparedTransactionReply* >( context );
+    if( self.ready || !self.envelope )
+      throw std::logic_error( "Invalid transaction response preparation lifetime" );
+    OwnedMemoryBudget::Scope scope( self.budget, false );
+    // Reserve before entering Protobuf's non-exception-safe JSON writer. A
+    // quota refusal therefore happens before any writer state exists. The
+    // returned JSON string remains covered by the workspace lease while the
+    // outer, normally captured nlohmann tree takes ownership of its fields.
+    auto conversion_workspace = self.budget.reserve( OwnedMemoryBudget::json_message_workspace(
+      OwnedMemoryBudget::protobuf_space_used( receipt ) ) );
+    std::string receipt_json;
+    {
+      OwnedMemoryBudget::AllocationBypass third_party_conversion;
+      receipt_json = proto_to_json( receipt );
+    }
+    self.envelope->at( "result" ) = nlohmann::json::parse( receipt_json );
+    try
+    {
+      self.encoded = self.envelope->dump();
+    }
+    catch( const nlohmann::json::type_error& error )
+    {
+      if( error.id != 316 ) throw;
+      // Preserve strict UTF-8 failure and later batch dispatch. This reply can
+      // never be published, so there is no final-body contribution to reserve.
+      self.serialization_error = std::current_exception();
+    }
+    if( !self.serialization_error && self.batch_credit )
+      *self.batch_credit = self.budget.reserve(
+        OwnedMemoryBudget::string_reservation( self.encoded.size() ) );
+    self.ready = true;
+  }
+
+  void discard() noexcept
+  {
+    std::string().swap( encoded );
+    if( batch_credit ) batch_credit->reset();
+    serialization_error = {};
+  }
+
+
+  std::string encode_unprepared( const nlohmann::json& response )
+  {
+    OwnedMemoryBudget::Scope scope( budget, false );
+    auto result = response.dump();
+    if( batch_credit )
+      *batch_credit = budget.reserve( OwnedMemoryBudget::string_reservation( result.size() ) );
+    return result;
+  }
+};
+
+std::string JSONRPCServer::process_body( const std::string& body,
+                                          MempoolOutputLeases& mempool_output_leases,
+                                          OwnedMemoryBudget::Lease& refusal_workspace )
+{
+  const auto input_bytes = body.size();
+  bool refusal_reserved = false;
+  const auto encode_refusal = [&]( const LocalCapacityExceeded& error,
+                                   const nlohmann::json& request, bool batch ) {
+    // Admit one conservative envelope for this complete HTTP request before
+    // allocating a fallback. The 1-MiB frame limit also bounds its borrowed
+    // IDs; the fixed shared gate bounds concurrent retained refusals. A full
+    // gate propagates local overload to the session's connection-close path.
+    if( !refusal_reserved )
+    {
+      refusal_workspace = _refusal_workspace.reserve(
+        OwnedMemoryBudget::checked_add( OwnedMemoryBudget::checked_multiply( input_bytes, 32 ), 65536 ) );
+      refusal_reserved = true;
+    }
+    OwnedMemoryBudget::Scope scope( _mempool->memory_budget(), true );
+    auto envelope = make_local_capacity_error( error, nullptr );
+    JsonCleanup envelope_cleanup( envelope );
+    std::string encoded;
+    StringAppendBuffer buffer( encoded );
+    std::ostream output( &buffer );
+    output.exceptions( std::ios::badbit | std::ios::failbit );
+    // Preserve the sorted object bytes while borrowing the original ID. Do
+    // not clone an arbitrarily large ID/tree to report exhausted admission.
+    output << "{\"error\":" << envelope.at( "error" ) << ",\"id\":";
+    if( request.contains( "id" ) ) output << request.at( "id" );
+    else output << "null";
+    output << ",\"jsonrpc\":\"2.0\"}";
+    if( batch )
+      mempool_output_leases.push_back( _mempool->memory_budget().reserve(
+        OwnedMemoryBudget::string_reservation( encoded.size() ) ) );
+    return encoded;
+  };
   nlohmann::json parsed;
+  JsonCleanup parsed_cleanup( parsed );
   try
   {
     parsed = nlohmann::json::parse( body );
   }
   catch( ... )
   {
-    return make_error( PARSE_ERROR, "Parse error" ).dump();
+    return dump_owned_json( make_error( PARSE_ERROR, "Parse error" ) );
   }
+
+  const auto admitted_mempool_request = [this]( const nlohmann::json& item ) {
+    if( !_mempool || !item.is_object() || !item.contains( "method" ) ||
+        !item[ "method" ].is_string() || !item.contains( "jsonrpc" ) ||
+        !item[ "jsonrpc" ].is_string() ||
+        item[ "jsonrpc" ].get_ref< const std::string& >() != "2.0" ) return false;
+    const auto& name = item[ "method" ].get_ref< const std::string& >();
+    const auto [ service, method ] = parse_method( name );
+    return service == "mempool" && _access_policy.allows( service, method );
+  };
+
+  const auto admitted_transaction_request = [this]( const nlohmann::json& item ) {
+    if( !_chain || !_mempool || !_mempool->memory_budget().enabled() ||
+        !item.is_object() || !item.contains( "method" ) ||
+        !item[ "method" ].is_string() || !item.contains( "jsonrpc" ) ||
+        !item[ "jsonrpc" ].is_string() ||
+        item[ "jsonrpc" ].get_ref< const std::string& >() != "2.0" ) return false;
+    const auto [ service, method ] = parse_method( item[ "method" ].get_ref< const std::string& >() );
+    return service == "chain" && method == "submit_transaction" &&
+           _access_policy.allows( service, method );
+  };
 
   // Batch request (JSON array)
   if( parsed.is_array() )
@@ -795,11 +951,100 @@ std::string JSONRPCServer::process_body( const std::string& body )
     bool first = true;
     for( const auto& item: parsed )
     {
-      auto response = process_single_request( item );
+      PreparedTransactionReply prepared;
+      std::optional< LocalCapacityExceeded > capacity_error;
+      nlohmann::json response;
+      JsonCleanup response_cleanup( response );
+      if( admitted_transaction_request( item ) )
+      {
+        prepared.budget = _mempool->memory_budget();
+        try
+        {
+          OwnedMemoryBudget::Scope scope( prepared.budget, false );
+          // Allocate the lease slot before calling a mutating service. Neither
+          // quota admission nor vector growth may fail after its acceptance.
+          mempool_output_leases.emplace_back();
+          prepared.batch_credit = &mempool_output_leases.back();
+          response = process_single_request( item, &prepared );
+        }
+        catch( const LocalCapacityExceeded& error )
+        {
+          capacity_error = error;
+        }
+        if( !prepared.completed ) prepared.discard();
+      }
+      else if( admitted_mempool_request( item ) )
+      {
+        try
+        {
+          OwnedMemoryBudget::Scope scope( _mempool->memory_budget(), false );
+          response = process_single_request( item );
+        }
+        catch( const LocalCapacityExceeded& error ) { capacity_error = error; }
+      }
+      else response = process_single_request( item );
       if( serialization_error )
         continue;
       try
       {
+        if( capacity_error )
+        {
+          const auto serialized = encode_refusal( *capacity_error, item, true );
+          if( !first ) output.put( ',' );
+          output << serialized;
+          first = false;
+          continue;
+        }
+        if( prepared.completed )
+        {
+          if( prepared.serialization_error ) std::rethrow_exception( prepared.serialization_error );
+          if( !first ) output.put( ',' );
+          output << prepared.encoded;
+          first = false;
+          continue;
+        }
+        if( admitted_transaction_request( item ) )
+        {
+          std::string serialized;
+          try
+          {
+            // Transaction failures can carry large contract-provided text.
+            // Attribute the final error body just like a successful receipt;
+            // a refusal becomes a small, explicitly local overload response.
+            serialized = prepared.encode_unprepared( response );
+          }
+          catch( const LocalCapacityExceeded& error )
+          {
+            serialized = encode_refusal( error, item, true );
+          }
+          if( !first ) output.put( ',' );
+          output << serialized;
+          first = false;
+          continue;
+        }
+        if( admitted_mempool_request( item ) )
+        {
+          const auto budget = _mempool->memory_budget();
+          std::string serialized;
+          try
+          {
+            OwnedMemoryBudget::Scope output_scope( budget );
+            serialized = response.dump();
+            // Reserve the mempool contribution before it is copied into the
+            // shared body. Later non-mempool items may reallocate that body;
+            // this lease stays with the HTTP response until write completion.
+            auto body_credit = budget.reserve( OwnedMemoryBudget::string_reservation( serialized.size() ) );
+            mempool_output_leases.push_back( std::move( body_credit ) );
+          }
+          catch( const LocalCapacityExceeded& error )
+          {
+            serialized = encode_refusal( error, item, true );
+          }
+          if( !first ) output.put( ',' );
+          output << serialized;
+          first = false;
+          continue;
+        }
         if( !first )
           output.put( ',' );
         output << response;
@@ -821,26 +1066,83 @@ std::string JSONRPCServer::process_body( const std::string& body )
     return body;
   }
 
-  // Single request
-  return process_single_request( parsed ).dump();
+  if( admitted_transaction_request( parsed ) )
+  {
+    PreparedTransactionReply prepared;
+    prepared.budget = _mempool->memory_budget();
+    nlohmann::json response;
+    JsonCleanup response_cleanup( response );
+    try
+    {
+      OwnedMemoryBudget::Scope scope( prepared.budget, false );
+      response = process_single_request( parsed, &prepared );
+    }
+    catch( const LocalCapacityExceeded& error )
+    {
+      prepared.discard();
+      return encode_refusal( error, parsed, false );
+    }
+    if( prepared.completed )
+    {
+      if( prepared.serialization_error ) std::rethrow_exception( prepared.serialization_error );
+      // Move the already encoded allocation; its physical final owner keeps
+      // M1 credit until the asynchronous HTTP write has stopped borrowing it.
+      return std::move( prepared.encoded );
+    }
+    prepared.discard();
+    try
+    {
+      return prepared.encode_unprepared( response );
+    }
+    catch( const LocalCapacityExceeded& error )
+    {
+      return encode_refusal( error, parsed, false );
+    }
+  }
+
+  // Keep the complete mempool reply attributed through its final HTTP body
+  // owner. The service result tree alone ends before dump() allocates the body.
+  // Only an allowed mempool method enters this domain; unrelated services do
+  // not inherit its optional local admission policy.
+  if( admitted_mempool_request( parsed ) )
+  {
+    try
+    {
+      OwnedMemoryBudget::Scope output_scope( _mempool->memory_budget() );
+      return dump_owned_json( process_single_request( parsed ) );
+    }
+    catch( const LocalCapacityExceeded& error )
+    {
+      return encode_refusal( error, parsed, false );
+    }
+  }
+
+  // Single request outside the mempool domain.
+  return dump_owned_json( process_single_request( parsed ) );
 }
 
-nlohmann::json JSONRPCServer::process_single_request( const nlohmann::json& request )
+nlohmann::json JSONRPCServer::process_single_request( const nlohmann::json& request,
+                                                       PreparedTransactionReply* prepared )
 {
   // Extract ID (default null)
   nlohmann::json id = nullptr;
+  JsonCleanup id_cleanup( id );
   if( request.contains( "id" ) )
     id = request[ "id" ];
 
   // Validate jsonrpc version
-  if( !request.contains( "jsonrpc" ) || request[ "jsonrpc" ] != "2.0" )
+  // Comparing JSON directly with a string literal constructs a temporary JSON
+  // string inside nlohmann's noexcept scalar comparison. Read the existing
+  // string instead: exhausted local admission must propagate, never terminate.
+  if( !request.contains( "jsonrpc" ) || !request[ "jsonrpc" ].is_string() ||
+      request[ "jsonrpc" ].get_ref< const std::string& >() != "2.0" )
     return make_error( INVALID_REQUEST, "Invalid JSON-RPC version", id );
 
   // Validate method
   if( !request.contains( "method" ) || !request[ "method" ].is_string() )
     return make_error( INVALID_REQUEST, "Missing or invalid method", id );
 
-  std::string method_str = request[ "method" ].get< std::string >();
+  const auto& method_str = request[ "method" ].get_ref< const std::string& >();
 
   // Parse method → service + method
   auto [service, method] = parse_method( method_str );
@@ -850,10 +1152,13 @@ nlohmann::json JSONRPCServer::process_single_request( const nlohmann::json& requ
   if( !_access_policy.allows( service, method ) )
     return make_error( METHOD_NOT_FOUND, "RPC method denied by access policy: " + service + "." + method, id );
 
-  // Extract params (default empty object)
-  nlohmann::json params = nlohmann::json::object();
-  if( request.contains( "params" ) && !request[ "params" ].is_null() )
-    params = request[ "params" ];
+  // The parsed request outlives this synchronous dispatch. Normalization owns
+  // its mutable copy, so borrowing here avoids a second complete encoded tree.
+  const bool has_params = request.contains( "params" ) && !request[ "params" ].is_null();
+  nlohmann::json empty_params;
+  JsonCleanup empty_params_cleanup( empty_params );
+  if( !has_params ) empty_params = nlohmann::json::object();
+  const auto& params = has_params ? request[ "params" ] : empty_params;
 
   // Dispatch to service
   try
@@ -861,15 +1166,35 @@ nlohmann::json JSONRPCServer::process_single_request( const nlohmann::json& requ
     // Prepare envelope/ID ownership before a potentially mutating service call.
     // Moving into the existing slot avoids copying the returned result tree.
     auto response = make_result( id );
+    JsonCleanup response_cleanup( response );
+    auto normalized_params = normalize_koinos_params( service, method, params );
+    JsonCleanup normalized_params_cleanup( normalized_params );
+    if( prepared )
+    {
+      rpc::chain::submit_transaction_request native_request;
+      json_to_proto( normalized_params, native_request );
+      // The decoded request now owns the native fields for the complete call.
+      clear_json_without_allocation( normalized_params );
+      prepared->envelope = &response;
+      // The native adapter prepares this exact envelope/body before publishing
+      // accepted work. Unsupported adapters refuse before executing anything.
+      (void)_chain->submit_transaction_with_prepared_response( native_request,
+        { prepared, &PreparedTransactionReply::prepare } );
+      prepared->envelope = nullptr;
+      if( !prepared->ready )
+        throw std::logic_error( "Native transaction response was not prepared" );
+      prepared->completed = true;
+      // The cleanup guard owns the local, so do not allow NRVO to alias it to
+      // the caller's returned tree. Moving leaves only null to clean locally.
+      return std::move( response );
+    }
     auto& result = response.at( "result" );
-    result = dispatch( service, method, normalize_koinos_params( service, method, params ) );
-    return response;
+    result = dispatch( service, method, normalized_params );
+    return std::move( response );
   }
   catch( const LocalCapacityExceeded& e )
   {
-    auto error = make_error( -32005, e.what(), id );
-    error[ "error" ][ "data" ] = { { "retryable", true }, { "reason", e.reason_code() }, { "scope", "local" } };
-    return error;
+    return make_local_capacity_error( e, id );
   }
   catch( const std::exception& e )
   {
@@ -887,22 +1212,21 @@ nlohmann::json JSONRPCServer::process_single_request( const nlohmann::json& requ
 
 std::pair< std::string, std::string > JSONRPCServer::parse_method( const std::string& method_str )
 {
-  // Split on '.'
-  std::vector< std::string > parts;
-  std::istringstream ss( method_str );
-  std::string part;
-  while( std::getline( ss, part, '.' ) )
-    parts.push_back( part );
-
-  if( parts.size() < 2 )
+  // Borrow the input and locate its final two fields. An iostream can swallow
+  // allocation exceptions as stream state, incorrectly reporting a malformed
+  // method instead of local capacity. Avoid its copies and intermediate vector.
+  // getline ignores one empty field after a final delimiter; preserve that
+  // existing behavior, including internal empty fields and repeated final dots.
+  auto end = method_str.size();
+  if( end && method_str[ end - 1 ] == '.' ) --end;
+  if( !end ) return { "", "" };
+  const auto separator = method_str.rfind( '.', end - 1 );
+  if( separator == std::string::npos )
     return { "", "" };
-
-  // "chain.get_head_info" → ("chain", "get_head_info")
-  // "koinos.rpc.chain.get_head_info" → ("chain", "get_head_info")
-  std::string service = parts[ parts.size() - 2 ];
-  std::string method  = parts[ parts.size() - 1 ];
-
-  return { service, method };
+  const auto previous = separator ? method_str.rfind( '.', separator - 1 ) : std::string::npos;
+  const auto start = previous == std::string::npos ? 0 : previous + 1;
+  return { method_str.substr( start, separator - start ),
+           method_str.substr( separator + 1, end - separator - 1 ) };
 }
 
 // ---------------------------------------------------------------------------
@@ -930,6 +1254,7 @@ nlohmann::json JSONRPCServer::dispatch( const std::string& service,
   if( service == "node" && method == "get_status" )
   {
     nlohmann::json status;
+    JsonCleanup status_cleanup( status );
     status[ "node" ]    = ::koinos::node::node_name();
     status[ "version" ] = ::koinos::node::build_version();
     status[ "mode" ]    = "monolith";
@@ -956,7 +1281,7 @@ nlohmann::json JSONRPCServer::dispatch( const std::string& service,
     status[ "services" ][ "transaction_store" ]   = _tx_store != nullptr;
     status[ "services" ][ "account_history" ]     = _acct_history != nullptr;
 
-    return status;
+    return std::move( status );
   }
 
   throw std::runtime_error( "Unknown service: " + service );
@@ -1105,6 +1430,7 @@ nlohmann::json JSONRPCServer::dispatch_mempool( const std::string& method,
   if( !_mempool )
     throw std::runtime_error( "mempool service not available" );
 
+  OwnedMemoryBudget::Scope result_memory_scope( _mempool->memory_budget() );
   if( method == "get_pending_transactions" )
   {
     rpc::mempool::get_pending_transactions_request req;
@@ -1206,6 +1532,17 @@ nlohmann::json JSONRPCServer::make_error( int code, const std::string& message, 
   };
 }
 
+nlohmann::json JSONRPCServer::make_local_capacity_error( const LocalCapacityExceeded& error,
+                                                         const nlohmann::json& id )
+{
+  auto response = make_error( -32005, error.what(), id );
+  JsonCleanup response_cleanup( response );
+  response[ "error" ][ "data" ] = {
+    { "retryable", true }, { "reason", error.reason_code() }, { "scope", "local" }
+  };
+  return std::move( response );
+}
+
 nlohmann::json JSONRPCServer::make_result( const nlohmann::json& id )
 {
   return {
@@ -1228,8 +1565,19 @@ std::string JSONRPCServer::proto_to_json( const google::protobuf::Message& msg )
   try
   {
     auto json = nlohmann::json::parse( json_str );
+    JsonCleanup json_cleanup( json );
     rewrite_koinos_json_bytes( msg, json );
     return json.dump();
+  }
+  catch( const LocalCapacityExceeded& )
+  {
+    // Capacity refusal must not fall back to the unrewritten protobuf JSON
+    // encoding (and must precede transaction admission for prepared replies).
+    throw;
+  }
+  catch( const std::bad_alloc& )
+  {
+    throw;
   }
   catch( const std::exception& )
   {

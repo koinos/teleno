@@ -1,3 +1,4 @@
+#include "core/owned_allocation.hpp"
 #include "p2p/p2p_node.hpp"
 #include "core/transaction_work_budget.hpp"
 
@@ -30,13 +31,13 @@ void* operator new(std::size_t size)
 {
   if(peer_cache_allocation_failure==0){peer_cache_allocation_failure=-1;throw std::bad_alloc();}
   if(peer_cache_allocation_failure>0)--peer_cache_allocation_failure;
-  if(auto pointer=std::malloc(size?size:1))return pointer;throw std::bad_alloc();
+  if(auto pointer=koinos::node::owned_allocation::allocate(size?size:1))return pointer;throw std::bad_alloc();
 }
 void* operator new[](std::size_t size){return ::operator new(size);}
-void operator delete(void* pointer) noexcept{std::free(pointer);}
-void operator delete[](void* pointer) noexcept{std::free(pointer);}
-void operator delete(void* pointer,std::size_t) noexcept{std::free(pointer);}
-void operator delete[](void* pointer,std::size_t) noexcept{std::free(pointer);}
+void operator delete(void* pointer) noexcept{koinos::node::owned_allocation::deallocate(pointer);}
+void operator delete[](void* pointer) noexcept{koinos::node::owned_allocation::deallocate(pointer);}
+void operator delete(void* pointer,std::size_t) noexcept{koinos::node::owned_allocation::deallocate(pointer);}
+void operator delete[](void* pointer,std::size_t) noexcept{koinos::node::owned_allocation::deallocate(pointer);}
 
 using namespace koinos::node;
 using namespace koinos::node::p2p;
@@ -715,6 +716,16 @@ void test_bounded_gossip()
   assert( node.seen_stats().transactions.entries == 2 );
   chain.local_capacity( false ); wire->emit_transaction( tx ); wire->emit_transaction( tx );
   assert( chain.transaction_attempts() == record_attempts + 3 && chain.submitted_transactions().size() == accepted + 2 );
+
+  chain.local_capacity( true, LocalCapacityReason::mempool_memory );
+  tx.set_id( "aggregate-memory-overload" );
+  const auto aggregate_attempts = chain.transaction_attempts();
+  wire->emit_transaction( tx ); wire->emit_transaction( tx );
+  assert( chain.transaction_attempts() == aggregate_attempts + 2 );
+  assert( chain.submitted_transactions().size() == accepted + 2 && wire->disconnects() == 0 );
+  assert( node.seen_stats().transactions.entries == 2 );
+  chain.local_capacity( false ); wire->emit_transaction( tx ); wire->emit_transaction( tx );
+  assert( chain.transaction_attempts() == aggregate_attempts + 3 && chain.submitted_transactions().size() == accepted + 3 );
 
   chain.reject_transactions(true); race = true;
   tx.set_id("admitted-concurrently"); wire->emit_transaction(tx);

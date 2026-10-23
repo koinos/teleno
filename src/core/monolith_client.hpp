@@ -16,6 +16,8 @@
 #include <memory>
 #include <string>
 
+#include <koinos/broadcast/broadcast.pb.h>
+
 #include "transaction_work_budget.hpp"
 
 namespace koinos::protocol { class transaction; }
@@ -37,6 +39,13 @@ public:
        retry_policy = retry_policy::none ) = 0;
 
   virtual void broadcast( const std::string& topic, const std::string& payload ) = 0;
+
+  // Preserve the serialized topic for other clients while allowing the native
+  // in-process client to dispatch an existing protobuf without copying it.
+  virtual void broadcast_block_accepted( const broadcast::block_accepted& event )
+  {
+    broadcast( "koinos.block.accept", event.SerializeAsString() );
+  }
 
   // Native-only admission hook. Existing/reference clients keep legacy behavior.
   virtual std::unique_ptr< TransactionWorkReservation >

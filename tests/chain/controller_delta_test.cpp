@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <memory>
@@ -693,7 +694,7 @@ void test_transaction_work_lifetime_and_receipt_parity()
   request.set_broadcast( false );
   const auto expected = legacy.submit_transaction( request );
   const auto root = controller.get_head_info().head_state_merkle_root();
-  mempool::mempool pool( state_db::fork_resolution_algorithm::fifo, { 1, 0 } );
+  mempool::mempool pool( state_db::fork_resolution_algorithm::fifo, { 1, 0 }, 64 * 1024 * 1024 );
   MempoolAdapter adapter( pool );
   EventBus bus;
   unsigned admission_calls = 0, notifications = 0;
@@ -706,7 +707,7 @@ void test_transaction_work_lifetime_and_receipt_parity()
       ++admission_calls;
       if( refuse_admission ) throw std::runtime_error( "synthetic insertion refusal" );
       adapter.add_transaction_accepted( accepted );
-    }, TransactionWorkLimits{ 1, request.transaction().ByteSizeLong() } );
+    }, TransactionWorkLimits{ 1, request.transaction().ByteSizeLong() }, pool.memory_budget() );
   bus.on_transaction_accepted.connect( [&]( const broadcast::transaction_accepted& ) {
     assert( client->transaction_work_snapshot().jobs == 1 && pool.pending_transaction_count() == 1 );
     ++notifications;
@@ -719,18 +720,73 @@ void test_transaction_work_lifetime_and_receipt_parity()
   assert( controller.submit_transaction( request ).SerializeAsString() == expected.SerializeAsString() );
   assert( !client->transaction_work_snapshot().jobs && !admission_calls );
   assert( controller.get_head_info().head_state_merkle_root() == root );
+  const auto memory_before_receipts = pool.get_aggregate_memory_usage().accounted_bytes;
+  {
+    std::vector< rpc::chain::submit_transaction_response > held_receipts;
+    for( unsigned n = 0; n < 32; ++n )
+      held_receipts.push_back( controller.submit_transaction( request ) );
+    assert( pool.get_aggregate_memory_usage().accounted_bytes > memory_before_receipts + 1024 );
+    assert( !client->transaction_work_snapshot().jobs );
+    for( const auto& response: held_receipts ) assert( response.SerializeAsString() == expected.SerializeAsString() );
+  }
+  assert( pool.get_aggregate_memory_usage().accounted_bytes == memory_before_receipts );
+
 
   request.set_broadcast( true );
+  struct Preparation
+  {
+    mempool::mempool* pool;
+    const rpc::chain::submit_transaction_response* expected;
+    unsigned* admission_calls;
+    unsigned prior_admissions = 0, calls = 0;
+    enum { capacity, allocation, succeed } mode = capacity;
+    std::string encoded;
+    OwnedMemoryBudget::Lease transport_workspace;
+  } preparation{ &pool, &expected, &admission_calls };
+  const TransactionResponsePreparer prepare{
+    &preparation, []( void* context, const rpc::chain::submit_transaction_response& response ) {
+      auto& p = *static_cast< Preparation* >( context );
+      ++p.calls;
+      assert( *p.admission_calls == p.prior_admissions && !p.pool->pending_transaction_count() );
+      assert( response.SerializeAsString() == p.expected->SerializeAsString() );
+      if( p.mode == Preparation::capacity ) throw LocalCapacityExceeded( LocalCapacityReason::mempool_memory );
+      if( p.mode == Preparation::allocation ) throw std::bad_alloc();
+      p.encoded = response.SerializeAsString();
+      p.transport_workspace = p.pool->memory_budget().reserve( 4096 );
+    }
+  };
+  // Both response preparation failures precede actual native mempool insertion.
+  // The signed transaction is retryable and the anonymous execution root stays
+  // unchanged. The following existing admission/notification checks still run.
+  local = false;
+  try { controller.submit_transaction( request, prepare ); }
+  catch( const LocalCapacityExceeded& ) { local = true; }
+  assert( local && preparation.calls == 1 && !admission_calls && !notifications );
+  assert( !pool.pending_transaction_count() && !client->transaction_work_snapshot().jobs );
+  preparation.mode = Preparation::allocation;
+  bool preparation_allocation_failed = false;
+  try { controller.submit_transaction( request, prepare ); }
+  catch( const std::bad_alloc& ) { preparation_allocation_failed = true; }
+  assert( preparation_allocation_failed && preparation.calls == 2 && !admission_calls && !notifications );
+  assert( !pool.pending_transaction_count() && controller.get_head_info().head_state_merkle_root() == root );
+  preparation.mode = Preparation::succeed;
   bool failed = false;
-  try { controller.submit_transaction( request ); } catch( const std::exception& ) { failed = true; }
+  try { controller.submit_transaction( request, prepare ); } catch( const std::exception& ) { failed = true; }
   assert( failed && admission_calls == 1 && !notifications && !pool.pending_transaction_count() );
   assert( !client->transaction_work_snapshot().jobs && !client->transaction_work_snapshot().wire_bytes );
   refuse_admission = false;
-  const auto accepted = controller.submit_transaction( request );
+  preparation.prior_admissions = admission_calls;
+  const auto accepted = controller.submit_transaction( request, prepare );
   assert( accepted.SerializeAsString() == expected.SerializeAsString() );
   assert( admission_calls == 2 && notifications == 1 && pool.pending_transaction_count() == 1 );
   assert( pool.get_pending_record_usage().owners == 1 );
   assert( client->transaction_notification_failures() == 1 && !client->transaction_work_snapshot().jobs );
+  assert( preparation.calls == 4 && preparation.encoded == expected.SerializeAsString() );
+  const auto retained_output = pool.get_aggregate_memory_usage().accounted_bytes;
+  preparation.transport_workspace.reset();
+  std::string().swap( preparation.encoded );
+  assert( pool.get_aggregate_memory_usage().accounted_bytes <= retained_output - 4096 );
+  assert( pool.pending_transaction_count() == 1 );
   // Duplicate/nonce refusal releases credit without a second insertion/event.
   failed = false;
   try { controller.submit_transaction( request ); } catch( const std::exception& ) { failed = true; }
@@ -770,6 +826,8 @@ void test_transaction_work_lifetime_and_receipt_parity()
 
   // Saturating transaction work must not gate canonical replay/full fallback.
   auto hold = client->reserve_transaction_work( request.transaction() );
+  const auto memory_before_block = pool.get_aggregate_memory_usage();
+  auto all_memory = pool.memory_budget().reserve( memory_before_block.limit_bytes - memory_before_block.accounted_bytes );
   chain::controller reference; open_controller( reference );
   const auto now = std::chrono::duration_cast< std::chrono::milliseconds >(
     std::chrono::system_clock::now().time_since_epoch() ).count();
@@ -777,11 +835,16 @@ void test_transaction_work_lifetime_and_receipt_parity()
   rpc::chain::submit_block_request block_request; *block_request.mutable_block() = block;
   const auto correct = reference.submit_block( block_request, 2 ).receipt();
   auto wrong = make_receipt( block, make_delta_entry() );
-  assert( controller.apply_block_delta_checked( block, wrong, correct.state_merkle_root(), 2 ) );
+  {
+    OwnedMemoryBudget::Scope synchronous_callback( pool.memory_budget(), false );
+    assert( controller.apply_block_delta_checked( block, wrong, correct.state_merkle_root(), 2 ) );
+  }
   assert( controller.get_head_info().head_state_merkle_root() == correct.state_merkle_root() );
   assert( controller.get_head_info().head_topology().height() == 1 && client->transaction_work_snapshot().jobs == 1 );
   assert( pool.get_pending_record_usage().owners == 1 );
+  all_memory.reset();
   hold.reset(); assert( !client->transaction_work_snapshot().jobs );
+  assert( pool.get_aggregate_memory_usage().peak_accounted_bytes > 0 );
 }
 
 // A controlled backend failure exercises transaction dispatch/classification,
@@ -789,14 +852,18 @@ void test_transaction_work_lifetime_and_receipt_parity()
 class AllocationFailureBackend : public vm_manager::vm_backend
 {
 public:
-  bool fail = true;
+  bool fail = true, capacity = false;
   unsigned calls = 0;
   std::string backend_name() override { return "allocation-test"; }
   void initialize() override {}
   void run( vm_manager::abstract_host_api&, const std::string&, const std::string& ) override
   {
     ++calls;
-    if( fail ) throw std::bad_alloc();
+    if( fail )
+    {
+      if( capacity ) throw node::LocalCapacityExceeded( node::LocalCapacityReason::mempool_memory );
+      throw std::bad_alloc();
+    }
   }
 };
 
@@ -833,10 +900,12 @@ void test_vm_allocation_failure_is_not_a_transaction_reversion()
     tx.clear_signatures();
     tx.add_signatures( util::converter::as< std::string >(
       block_signing_key().sign_compact( util::converter::to< crypto::multihash >( tx.id() ) ) ) );
+    for( bool quota : { false, true } )
     for( const auto intent : { chain::intent::transaction_application,
                               chain::intent::block_application, chain::intent::block_proposal } )
     {
       auto backend = std::make_shared< AllocationFailureBackend >();
+      backend->capacity = quota;
       chain::execution_context ctx( backend, intent );
       ctx.set_state_node( root->create_anonymous_node(), root );
       ctx.push_frame( { .call_privilege = chain::privilege::kernel_mode } );
@@ -845,7 +914,9 @@ void test_vm_allocation_failure_is_not_a_transaction_reversion()
       ctx.resource_meter().set_resource_limit_data( chain::system_call::get_resource_limits( ctx ) );
       bool local = false;
       try { chain::system_call::apply_transaction( ctx, tx ); }
-      catch( const std::bad_alloc& ) { local = true; }
+      catch( const node::LocalCapacityExceeded& e )
+      { local = quota && std::strcmp( e.reason_code(), "mempool_memory_capacity" ) == 0; }
+      catch( const std::bad_alloc& ) { local = !quota; }
       assert( local && backend->calls == 1 && pending_root_string( root ) == before );
       if( intent == chain::intent::transaction_application )
         assert( std::get< protocol::transaction_receipt >( ctx.receipt() ).id().empty() );

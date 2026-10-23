@@ -7,6 +7,7 @@
 #include <koinos/vm_manager/fizzy/fizzy_vm_backend.hpp>
 #include <koinos/vm_manager/fizzy/exceptions.hpp>
 #include <koinos/util/conversion.hpp>
+#include "core/owned_memory_budget.hpp"
 
 #include <array>
 #include <cstring>
@@ -270,6 +271,70 @@ void actual_vm()
     require(retry.calls == 1 && retry.count, "bounds rejection prevented clean retry");
   }
 }
+
+class CapacityHost final : public vm::abstract_host_api
+{
+public:
+  std::string retained;
+  unsigned calls = 0;
+  int64_t ticks = 1000000;
+  node::OwnedMemoryBudget* refusal_budget = nullptr;
+  int32_t invoke_thunk(uint32_t, char*, uint32_t, const char*, uint32_t, uint32_t* written) override
+  {
+    ++calls;
+    if (refusal_budget)
+    {
+      const auto usage = refusal_budget->snapshot();
+      auto occupied = refusal_budget->reserve(usage.limit_bytes - usage.accounted_bytes);
+      retained.assign(8192, 'r');
+    }
+    else retained.assign(8192, 'r');
+    const uint32_t zero = 0;
+    std::memcpy(written, &zero, sizeof(zero));
+    return chain::success;
+  }
+  int32_t invoke_system_call(uint32_t id, char* out, uint32_t size, const char* args,
+                            uint32_t n, uint32_t* written) override
+  { return invoke_thunk(id, out, size, args, n, written); }
+  int64_t get_meter_ticks() const override { return ticks; }
+  void use_meter_ticks(uint64_t n) override { ticks -= n; }
+};
+
+void actual_vm_local_capacity()
+{
+  for (bool syscall : {false, true})
+  {
+    fv::fizzy_vm_backend backend;
+    const auto code = callback(syscall, 17);
+    CapacityHost warm; backend.run(warm, code, "");
+    node::OwnedMemoryBudget memory(1 << 20);
+    const auto before = memory.snapshot().accounted_bytes;
+    CapacityHost refused; refused.refusal_budget = &memory;
+    bool local_refusal = false;
+    {
+      node::OwnedMemoryBudget::Scope scope(memory);
+      try { backend.run(refused, code, ""); }
+      catch (const node::LocalCapacityExceeded& e)
+      { local_refusal = std::strcmp(e.reason_code(), "mempool_memory_capacity") == 0; }
+    }
+    require(local_refusal && refused.calls == 1 && refused.retained.empty(),
+            "real VM swallowed, reverted or terminated on native callback capacity refusal");
+    CapacityHost retry;
+    {
+      node::OwnedMemoryBudget::Scope scope(memory);
+      backend.run(retry, code, "");
+    }
+    require(retry.calls == 1 && retry.retained.size() == 8192 &&
+            memory.snapshot().accounted_bytes > before + 8192,
+            "real VM retry lost native callback ownership or failed to restore allocation capture");
+    std::string released; released.swap(retry.retained);
+    require(memory.snapshot().accounted_bytes > before + 8192,
+            "moving VM callback output returned its credits before physical deletion");
+    std::string().swap(released);
+    require(memory.snapshot().accounted_bytes == before,
+            "real VM callback output did not return its credits on final deletion");
+  }
+}
 } // namespace
 int main(int argc, char** argv)
 {
@@ -279,7 +344,7 @@ int main(int argc, char** argv)
     if (mode == "all" || mode == "thunk") direct_thunks();
     if (mode == "all" || mode == "host") native_hosts();
     if (mode == "system") native_hosts(true);
-    if (mode == "all" || mode == "vm") actual_vm();
+    if (mode == "all" || mode == "vm") { actual_vm(); actual_vm_local_capacity(); }
     require(mode == "all" || mode == "thunk" || mode == "host" || mode == "system" || mode == "vm", "unknown test case");
     return 0;
   }

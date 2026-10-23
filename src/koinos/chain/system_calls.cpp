@@ -3,6 +3,7 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include "core/local_capacity.hpp"
 
 #include <boost/locale/utf.hpp>
 
@@ -501,6 +502,12 @@ THUNK_DEFINE( void, apply_transaction, ( (const protocol::transaction&)trx ) )
     {
       throw;
     }
+    catch( const node::LocalCapacityExceeded& )
+    {
+      // Application-local admission must never assert or become a consensus
+      // failure/reversion, including native work invoked through the VM.
+      throw;
+    }
     catch( const std::bad_alloc& )
     {
       // Local resource exhaustion must abort the attempt, not assert or become
@@ -560,6 +567,10 @@ THUNK_DEFINE( void, apply_transaction, ( (const protocol::transaction&)trx ) )
       receipt.set_reverted( true );
       thunk::_log( context, "transaction reverted: " + e.get_message() );
       reverted_exception_ptr = std::current_exception();
+    }
+    catch( const node::LocalCapacityExceeded& )
+    {
+      throw;
     }
     catch( const std::bad_alloc& )
     {

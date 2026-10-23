@@ -25,6 +25,11 @@ using transaction_id_type = std::string;
 using account_type        = std::string;
 using nonce_type          = uint64_t;
 using block_height_type   = uint64_t;
+// Native callers retain the vector allocation and its conservative decoded
+// protobuf envelope together. Copying the vector reserves a separate owner;
+// aliases of immutable serialized records remain a separate shared allocation.
+using pending_transaction_vector = std::vector< pending_transaction,
+  node::OwnedMemoryBudget::Allocator< pending_transaction > >;
 
 KOINOS_DECLARE_EXCEPTION( pending_transaction_insertion_failure );
 KOINOS_DECLARE_EXCEPTION( pending_transaction_exceeds_resources );
@@ -50,7 +55,7 @@ private:
 
 public:
   mempool( state_db::fork_resolution_algorithm algo = state_db::fork_resolution_algorithm::fifo,
-           pending_record_limits record_limits = {} );
+           pending_record_limits record_limits = {}, uint64_t aggregate_max_accounted_bytes = 0 );
   virtual ~mempool();
 
   bool check_pending_account_resources( const account_type& payer,
@@ -77,6 +82,10 @@ public:
   retained_memory_usage get_retained_memory_usage() const;
   // O(1) live immutable record credits, not a retained-fork scan or heap/RSS.
   pending_record_snapshot get_pending_record_usage() const;
+  node::OwnedMemorySnapshot get_aggregate_memory_usage() const;
+  // Shared native policy domain; callers may reserve transaction workspace in
+  // the same aggregate. Copying the facade does not copy or reset credits.
+  node::OwnedMemoryBudget memory_budget() const noexcept;
 
   uint64_t add_pending_transaction( const pending_transaction& pending_trx,
                                     std::chrono::system_clock::time_point time,
@@ -84,10 +93,10 @@ public:
 
   bool has_pending_transaction( const transaction_id_type& id, std::optional< crypto::multihash > block_id = {} ) const;
 
-  std::vector< pending_transaction > get_pending_transactions( uint64_t limit = constants::max_request_limit,
+  pending_transaction_vector get_pending_transactions( uint64_t limit = constants::max_request_limit,
                                                                std::optional< crypto::multihash > block_id = {} );
 
-  std::vector< pending_transaction > get_pending_transactions( const std::vector< transaction_id_type >& ids,
+  pending_transaction_vector get_pending_transactions( const std::vector< transaction_id_type >& ids,
                                                                std::optional< crypto::multihash > block_id = {} );
 
   uint64_t get_reserved_account_rc( const account_type& account ) const;

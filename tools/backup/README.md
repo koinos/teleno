@@ -167,7 +167,8 @@ No full historical, Linux/container or 40 GB claim follows from these fixtures.
 This local-only Python 3.9+ driver selects a verified repository-local,
 test-enabled CMake tree and the matching native node/test helper. It creates a
 new owned ignored directory, never accepts a live basedir or external snapshot,
-never contacts public peers, and never deletes retained evidence.
+never contacts public peers, and retains its source and diagnostic records.
+By default it also retains every generated destination case.
 
 ```bash
 python3 tools/backup/validate_single_copy_restore.py --build-dir build --repetitions 5
@@ -187,6 +188,16 @@ DB inode on activation, checked read-only CF/genesis consistency and equal
 verification reports. The final pair adds two clean observer restarts and
 direct SIGKILL/recovery, with networking, production and optional writers disabled.
 It processes no successor blocks and is not differential historical validation.
+
+`--retire-completed-pairs` bounds disposable destination retention to the current
+pair. Only after both modes pass their original checks, the driver records each
+case's file hashes, allocation and owned directory identity, then retires those
+newly generated synthetic trees. Source, command logs, measurements and immutable
+retirement manifests remain. Failed or unverified pairs are kept. The final
+pair still performs all restart/recovery checks before retirement. CTest uses
+this option; it does not reduce the warm-up or five measured pairs. Retirement
+CPU, I/O and wall time are reported separately from native phase measurements.
+The Python runtime must support fd-based symlink-safe `shutil.rmtree`.
 
 Records contain argv, exit, stdout/stderr, wall time, exact child peak RSS via
 wait4 (Darwin bytes/Linux KiB normalized), Python-driver peak RSS, per-case
@@ -216,8 +227,9 @@ Exit 0 means SYNTHETIC_PASS only. Exit 2 means BLOCKED or CAPACITY_REJECTED; rea
 summary.json and retained command logs. A minimum-space preflight can pass while
 the recommended reserve cannot: stage must then refuse without a payload.
 Capacity and whole-server qualification flags remain false in all modes.
-No automatic cleanup, source download, 24-hour workload or Linux VM provisioning
-is performed. See [SC5 evidence](../../docs/validation/single-copy-restore-sc5-capacity.md)
+Without the explicit retirement option, no generated case cleanup occurs.
+No source download, 24-hour workload or Linux VM provisioning is performed.
+See [SC5 evidence](../../docs/validation/single-copy-restore-sc5-capacity.md)
 for actual executed checks and exact missing prerequisites.
 
 ## LR0 full-history resource baseline

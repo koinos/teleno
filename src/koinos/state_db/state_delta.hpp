@@ -31,7 +31,7 @@ private:
   std::shared_ptr< state_delta > _parent;
 
   std::shared_ptr< backend_type > _backend;
-  std::unordered_set< key_type > _removed_objects;
+  backends::map::removed_key_set _removed_objects;
 
   state_node_id _id;
   uint64_t _revision = 0;
@@ -68,9 +68,9 @@ public:
       std::shared_ptr< state_delta > child, parent;
       backends::map::map_backend* source;
       backends::map::map_backend* target;
-      std::unordered_set< key_type > removed;
+      backends::map::removed_key_set removed;
     };
-    std::vector< transfer > _transfers;
+    std::vector< transfer, node::OwnedMemoryBudget::Allocator< transfer > > _transfers;
     bool _applied = false;
     prepared_change_batch() = default;
     friend class state_delta;
@@ -80,12 +80,15 @@ public:
     prepared_change_batch& operator=( const prepared_change_batch& ) = delete;
     prepared_change_batch( prepared_change_batch&& ) = default;
     prepared_change_batch& operator=( prepared_change_batch&& ) = default;
-    // Fixed default allocators/hash/comparison only. Does not allocate,
+    // Verified matching allocators and fixed hash/comparison. Does not allocate,
     // perform persistence, or invalidate any general cached root semantics.
     void apply() noexcept;
   };
   static prepared_change_batch prepare_all_changes( const std::vector< std::shared_ptr< state_delta > >& children );
   void commit();
+  // Internal database publication: caller has verified the replacement has
+  // this node's current parent ID and excludes all readers and writers.
+  void replace_parent_after_commit( const std::shared_ptr< state_delta >& parent ) noexcept { _parent = parent; }
 
   void clear();
 

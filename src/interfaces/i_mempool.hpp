@@ -1,6 +1,7 @@
 #pragma once
 
 #include <koinos/rpc/mempool/mempool_rpc.pb.h>
+#include "core/owned_memory_budget.hpp"
 
 namespace koinos::node {
 
@@ -12,6 +13,10 @@ class IMempool
 {
 public:
   virtual ~IMempool() = default;
+
+  // Native consumers retain the same domain while preparing candidate copies
+  // or a service result. Transport queues/body ownership is a separate policy.
+  virtual OwnedMemoryBudget memory_budget() const noexcept { return {}; }
 
   virtual rpc::mempool::get_pending_transactions_response
   get_pending_transactions( const rpc::mempool::get_pending_transactions_request& ) = 0;

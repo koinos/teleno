@@ -1,3 +1,4 @@
+#include "core/owned_allocation.hpp"
 #include <koinos/state_db/backends/rocksdb/object_cache.hpp>
 #include <koinos/vm_manager/fizzy/module_cache.hpp>
 #include <atomic>
@@ -17,14 +18,14 @@ static std::atomic<size_t> allocations{0};
 static std::atomic<bool> counting{false};
 void* operator new(std::size_t size) {
   if (counting) ++allocations;
-  if (auto p = std::malloc(size ? size : 1)) return p;
+  if (auto p = koinos::node::owned_allocation::allocate(size ? size : 1)) return p;
   throw std::bad_alloc();
 }
-void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p) noexcept { koinos::node::owned_allocation::deallocate(p); }
 void* operator new[](std::size_t n) { return ::operator new(n); }
 void operator delete[](void* p) noexcept { ::operator delete(p); }
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { koinos::node::owned_allocation::deallocate(p); }
+void operator delete[](void* p, std::size_t) noexcept { koinos::node::owned_allocation::deallocate(p); }
 using Cache = koinos::state_db::backends::rocksdb::object_cache;
 using Modules = koinos::vm_manager::fizzy::module_cache;
 void check(bool value) { if (!value) throw std::runtime_error("cache invariant failed"); }

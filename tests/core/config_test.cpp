@@ -120,16 +120,18 @@ int main()
   }
   {
     NodeConfig defaults;
-    assert( !defaults.mempool_pending_record_max_owners && !defaults.mempool_pending_record_max_capacity_bytes );
-    auto path = write_config( "mempool:\n  pending-record-max-owners: 2\n  pending-record-max-capacity-bytes: 1048576\n" );
+    assert( !defaults.mempool_pending_record_max_owners && !defaults.mempool_pending_record_max_capacity_bytes &&
+            !defaults.mempool_aggregate_max_accounted_bytes );
+    auto path = write_config( "mempool:\n  pending-record-max-owners: 2\n  pending-record-max-capacity-bytes: 1048576\n  aggregate-max-accounted-bytes: 67108864\n" );
     const auto cfg = load_config( path );
     assert( cfg.mempool_pending_record_max_owners == 2 && cfg.mempool_pending_record_max_capacity_bytes == 1048576 );
+    assert( cfg.mempool_aggregate_max_accounted_bytes == 67108864 );
     std::filesystem::remove( path );
     path = write_config( "mempool:\n  pending-record-max-owners: 0\n  pending-record-max-capacity-bytes: 1\n" );
     const auto independent = load_config( path );
     assert( !independent.mempool_pending_record_max_owners && independent.mempool_pending_record_max_capacity_bytes == 1 );
     std::filesystem::remove( path );
-    for( const auto& key : { "pending-record-max-owners", "pending-record-max-capacity-bytes" } )
+    for( const auto& key : { "pending-record-max-owners", "pending-record-max-capacity-bytes", "aggregate-max-accounted-bytes" } )
       for( const auto& value : { "-1", "-0", "1.5", "true", "[]", "null", "18446744073709551616", "abc" } )
       {
         path = write_config( std::string( "mempool:\n  " ) + key + ": " + value + "\n" );

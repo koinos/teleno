@@ -1,5 +1,6 @@
 #pragma once
 #include "core/local_capacity.hpp"
+#include "core/owned_memory_budget.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -71,10 +72,22 @@ class pending_record_budget
     std::unique_ptr< lease > credit;
     const std::string value;
   };
-public:
-  explicit pending_record_budget( pending_record_limits limits = {} )
+  struct aggregate_stored
   {
-    if( limits.max_owners || limits.max_capacity_bytes ) _state = std::make_shared< state >( limits );
+    aggregate_stored( node::OwnedMemoryBudget::Lease memory, std::unique_ptr< lease > credit, std::string bytes )
+      : memory( std::move( memory ) ), record( std::move( credit ), std::move( bytes ) ) {}
+    node::OwnedMemoryBudget::Lease memory;
+    const stored record;
+  };
+public:
+  explicit pending_record_budget( pending_record_limits limits = {}, node::OwnedMemoryBudget memory = {} )
+    : _memory( std::move( memory ) )
+  {
+    if( limits.max_owners || limits.max_capacity_bytes )
+    {
+      node::OwnedMemoryBudget::Scope scope( _memory );
+      _state = node::make_owned_shared< state >( limits );
+    }
   }
   pending_record_budget( const pending_record_budget& ) = delete;
   pending_record_budget& operator=( const pending_record_budget& ) = delete;
@@ -82,9 +95,21 @@ public:
   template< typename Encode >
   std::shared_ptr< const std::string > encode( uint64_t wire_size, Encode&& encode )
   {
+    node::OwnedMemoryBudget::Scope memory_scope( _memory );
+    auto memory = _memory.enabled() ? _memory.reserve( node::OwnedMemoryBudget::checked_add(
+      node::OwnedMemoryBudget::string_reservation( wire_size ), sizeof( lease ) + 128 ) ) : node::OwnedMemoryBudget::Lease{};
     auto credit = reserve( wire_size );
     auto bytes = encode();
     if( bytes.size() != wire_size ) throw std::logic_error( "pending record encoding size mismatch" );
+    if( _memory.enabled() && bytes.capacity() + 1 > node::OwnedMemoryBudget::string_reservation( wire_size ) )
+      throw std::logic_error( "pending record encoder exceeded reserved native string workspace" );
+    if( _memory.enabled() )
+    {
+      if( credit ) credit->grow( bytes.capacity() );
+      auto owner = node::make_owned_shared< const aggregate_stored >(
+        std::move( memory ), std::move( credit ), std::move( bytes ) );
+      return { owner, &owner->record.value };
+    }
     if( !_state ) return std::make_shared< const std::string >( std::move( bytes ) );
     credit->grow( bytes.capacity() );
     auto owner = std::make_shared< const stored >( std::move( credit ), std::move( bytes ) );
@@ -113,6 +138,7 @@ private:
     return credit;
   }
   std::shared_ptr< state > _state;
+  node::OwnedMemoryBudget _memory;
 };
 
 } // namespace koinos::mempool

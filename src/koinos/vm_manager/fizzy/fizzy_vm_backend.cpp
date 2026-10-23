@@ -5,6 +5,7 @@
 
 #include <koinos/vm_manager/fizzy/exceptions.hpp>
 #include <koinos/vm_manager/fizzy/fizzy_vm_backend.hpp>
+#include "core/owned_memory_budget.hpp"
 
 #include <exception>
 #include <iostream>
@@ -13,6 +14,16 @@
 #include <string>
 
 namespace koinos::vm_manager::fizzy {
+
+template< typename Operation >
+auto vm_allocation_domain( Operation&& operation )
+{
+  // Parsed modules, instances, VM linear memory and C execution contexts are
+  // V1 consumers. Keep M1 quota exceptions out of the noexcept C API. Native
+  // callbacks below restore capture for execution state/receipt/output growth.
+  node::OwnedMemoryBudget::AllocationBypass vm_allocations;
+  return operation();
+}
 
 namespace constants {
 constexpr uint32_t fizzy_max_call_depth = 251;
@@ -62,7 +73,7 @@ std::string fizzy_vm_backend::backend_name()
 
 void fizzy_vm_backend::initialize() {}
 
-std::string fizzy_error_code_name( FizzyErrorCode code ) noexcept
+std::string fizzy_error_code_name( FizzyErrorCode code )
 {
   switch( code )
   {
@@ -123,7 +134,9 @@ module_ptr parse_bytecode( const char* bytecode_data, size_t bytecode_size )
   KOINOS_ASSERT( bytecode_data != nullptr,
                  fizzy_returned_null_exception,
                  "fizzy_instance was unexpectedly null pointer" );
-  auto ptr = fizzy_parse( reinterpret_cast< const uint8_t* >( bytecode_data ), bytecode_size, &fizzy_err );
+  auto ptr = vm_allocation_domain( [&] {
+    return fizzy_parse( reinterpret_cast< const uint8_t* >( bytecode_data ), bytecode_size, &fizzy_err );
+  } );
 
   if( ptr == nullptr )
   {
@@ -202,7 +215,7 @@ void fizzy_runner::instantiate_module()
   uint32_t memory_pages_limit = 512; // Number of 64k pages allowed to allocate
 
   KOINOS_ASSERT( _instance == nullptr, runner_state_exception, "_instance was unexpectedly non-null" );
-  _instance = fizzy_resolve_instantiate( _module->get(),
+  _instance = vm_allocation_domain( [&] { return fizzy_resolve_instantiate( _module->get(),
                                          host_funcs,
                                          num_host_funcs,
                                          nullptr,
@@ -210,7 +223,7 @@ void fizzy_runner::instantiate_module()
                                          nullptr,
                                          0,
                                          memory_pages_limit,
-                                         &fizzy_err );
+                                         &fizzy_err ); } );
   if( _instance == nullptr )
   {
     if( fizzy_err.code == FizzyErrorMemoryAllocationFailed )
@@ -226,6 +239,7 @@ void fizzy_runner::instantiate_module()
 FizzyExecutionResult fizzy_runner::_invoke_thunk( const FizzyValue* args,
                                                   FizzyExecutionContext* fizzy_context ) noexcept
 {
+  node::OwnedMemoryBudget::AllocationCapture native_allocations;
   FizzyExecutionResult result;
   result.has_value = false;
   result.value.i64 = 0;
@@ -276,6 +290,7 @@ FizzyExecutionResult fizzy_runner::_invoke_thunk( const FizzyValue* args,
 FizzyExecutionResult fizzy_runner::_invoke_system_call( const FizzyValue* args,
                                                         FizzyExecutionContext* fizzy_context ) noexcept
 {
+  node::OwnedMemoryBudget::AllocationCapture native_allocations;
   FizzyExecutionResult result;
   result.has_value = false;
   result.value.i64 = 0;
@@ -327,7 +342,9 @@ void fizzy_runner::call_start()
 {
   KOINOS_ASSERT( _fizzy_context == nullptr, runner_state_exception, "_fizzy_context was unexpectedly non-null" );
   _previous_ticks = _hapi.get_meter_ticks();
-  _fizzy_context  = fizzy_create_metered_execution_context( constants::fizzy_max_call_depth, _previous_ticks );
+  _fizzy_context = vm_allocation_domain( [&] {
+    return fizzy_create_metered_execution_context( constants::fizzy_max_call_depth, _previous_ticks );
+  } );
   // The pinned context constructor returns null only when allocation fails.
   // Do not charge/accept a reverted transaction for a machine-local failure.
   if( _fizzy_context == nullptr )
@@ -337,7 +354,9 @@ void fizzy_runner::call_start()
   bool success            = fizzy_find_exported_function_index( _module->get(), "_start", &start_func_idx );
   KOINOS_ASSERT( success, module_start_exception, "module does not have _start function" );
 
-  FizzyExecutionResult result = fizzy_execute( _instance, start_func_idx, nullptr, _fizzy_context );
+  FizzyExecutionResult result = vm_allocation_domain( [&] {
+    return fizzy_execute( _instance, start_func_idx, nullptr, _fizzy_context );
+  } );
 
   int64_t* ticks = fizzy_get_execution_context_ticks( _fizzy_context );
   KOINOS_ASSERT( ticks != nullptr,

@@ -1,5 +1,49 @@
 # Teleno Conversation Memory
 
+## Pool production moved to legacy after native heap-corruption abort (2026-10-22)
+
+The operator explicitly approves the existing mainnet pool's signing-key
+rotation to the selected legacy host's existing primary key and requests actual
+production verification. One registration transaction is signed by the existing
+pool owner, simulated without broadcast, then broadcast once. It is canonical
+at height **40,429,208**, becomes irreversible and clears its H+20 activation
+boundary before the dedicated legacy producer starts at **16:22:13 UTC**.
+The owner and pool terms are reverified unchanged; there is no burn, transfer,
+new pool, operational key generation or private-key copy. Both original legacy
+producer instances and their shared runtime configuration remain unchanged.
+
+The pinned existing legacy image is staged as a separate Compose deployment
+with read-only existing key/config mounts, a missing-key startup guard and
+`unless-stopped` restart policy. Its image tag is v1.3.1; the observed native
+banner separately reports `v1.3.0 (12cc060)`. Do not conflate those identities.
+The first new producer block **40,429,295**, logged at **16:23:25.962039 UTC**,
+matches local and independent mainnet canonical IDs and the selected pool
+signer. At the **16:26:48 UTC** audit, reference LIB is **40,429,296**. Five
+blocks are logged by that checkpoint; only the separately checked block is
+claimed irreversible. All readiness/identity checks pass with zero new-producer
+errors or restarts. This short cutover observation is not long-duration or
+nonempty-block workload qualification.
+
+The retired native binary remains exactly
+`0bd4c3666a93a3b43d7c4c7e72776d9d935eec1a33cdeec22572ac71022d9447`.
+Its original process aborts on **2026-10-21 at 16:18 UTC**, with `SIGABRT` and
+`corrupted double-linked list`. Apport retains no core dump, so there is no
+crash stack and no established corrupting call site. Crash evidence and the
+database remain preserved; no native repair, build, deployment or restart is
+performed by this cutover. The retired signer remains inactive, with restart
+and boot activation disabled; its former key is no longer the pool's registered
+key. Do not reactivate it from the older commissioning instructions.
+
+Private approved scope, transaction/receipt/finality, exact public-key and
+runtime bindings, validated Compose document and operating instructions are
+under `/Volumes/My Passport/fogata-legacy-cutover-preflight-20261022-72ji4m_r/`.
+Crash investigation evidence is under
+`/Volumes/My Passport/teleno-fogata-crash-debug-20261022-8xu4xhlu/`.
+The canonical cutover result is `CUTOVER-RESULT.md` in the former directory;
+it does not authorize restoring the old registration automatically. The native
+handoff report is annotated with the later failure. Issue 9 and M1/LR2 gates
+remain open; this action is separate from isolated M1 qualification.
+
 ## Native alpha published; issue 9 remains open (2026-10-19)
 
 The operator authorizes publishing all accumulated native changes. Native

@@ -1,5 +1,6 @@
 #pragma once
 #include "local_capacity.hpp"
+#include "owned_memory_budget.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -29,6 +30,7 @@ class TransactionWorkReservation
 {
 public:
   virtual ~TransactionWorkReservation() = default;
+  virtual OwnedMemoryBudget memory_budget() const noexcept { return {}; }
 };
 
 // Bounds only simultaneous submit_transaction jobs and their serialized input
@@ -59,9 +61,13 @@ class TransactionWorkBudget
   };
 
 public:
-  explicit TransactionWorkBudget( TransactionWorkLimits limits = {} )
+  explicit TransactionWorkBudget( TransactionWorkLimits limits = {}, OwnedMemoryBudget memory = {} )
   {
-    if( limits.max_jobs || limits.max_wire_bytes ) _state = std::make_shared< State >( limits );
+    if( limits.max_jobs || limits.max_wire_bytes )
+    {
+      OwnedMemoryBudget::Scope scope( memory );
+      _state = make_owned_shared< State >( limits );
+    }
   }
   TransactionWorkBudget( const TransactionWorkBudget& ) = delete;
   TransactionWorkBudget& operator=( const TransactionWorkBudget& ) = delete;

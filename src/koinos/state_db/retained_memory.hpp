@@ -1,6 +1,7 @@
 #pragma once
 
 #include <koinos/state_db/state_db_types.hpp>
+#include "core/owned_memory_budget.hpp"
 
 #include <limits>
 #include <unordered_set>
@@ -9,7 +10,9 @@ namespace koinos::state_db::detail {
 
 // Short-lived scan workspace. It retains pointer identities, not value owners,
 // and must not outlive the caller's exclusion of all backend mutations. Scan
-// allocations/failures are outside the reported retained inventory.
+// allocations/failures are outside the reported retained inventory. When an
+// owned domain is active, its physical identity-set requests are separately
+// charged for the scan's lifetime; they are not retained application payload.
 class retained_memory_accumulator
 {
 public:
@@ -49,8 +52,10 @@ public:
   }
 
 private:
-  std::unordered_set< const void* > _backends;
-  std::unordered_set< const object_value* > _values;
+  template< typename T > using identity_set = std::unordered_set< T, std::hash< T >,
+    std::equal_to< T >, node::OwnedMemoryBudget::Allocator< T > >;
+  identity_set< const void* > _backends;
+  identity_set< const object_value* > _values;
 };
 
 } // namespace koinos::state_db::detail

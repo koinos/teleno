@@ -82,6 +82,18 @@ Check:
 - Logs show connection attempts, connected peers, or peer errors.
 - `chain.get_head_info` height changes over repeated samples.
 
+## Native Process Aborts With Heap-Corruption Output
+
+Preserve the failed service status, binary identity, configuration identity and
+original logs before attempting a restart. An allocator message such as
+`corrupted double-linked list` identifies where corruption was detected, not
+the instruction that damaged memory. Keep the chain database, configuration
+and producer keys unchanged while investigating in a separate observer state
+with production disabled. Do not treat an isolated component pass as clearance
+to restart a producer. The [Fogata investigation](validation/fogata-producer-heap-corruption-2026-10-21.md)
+records a reproduced GossipSub publication race, an unqualified source
+correction and the remaining evidence gates for the 2026-10-21 abort.
+
 ## Backup Dry Run Fails
 
 ### Storage Or Source Refusal In LR1 Native Development

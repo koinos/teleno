@@ -1,3 +1,4 @@
+#include "core/owned_allocation.hpp"
 #include <koinos/vm_manager/fizzy/fizzy_vm_backend.hpp>
 #include <koinos/vm_manager/fizzy/exceptions.hpp>
 #include <algorithm>
@@ -27,12 +28,12 @@ static thread_local size_t live=0, live_bytes=0, peak_bytes=0, requested=0, allo
 void* operator new(size_t n) {
   if(track)++allocation_calls;
   if(fail_at>=0 && fail_at--==0){fail_at=-1;fired=true;throw std::bad_alloc();}
-  auto p=std::malloc(n?n:1);if(!p)throw std::bad_alloc();
+  auto p=koinos::node::owned_allocation::allocate(n?n:1);if(!p)throw std::bad_alloc();
   if(track){bool stored=false;for(auto& slot:tracked)if(!slot.ptr){slot={p,n};stored=true;break;}
     if(!stored)std::abort();++live;live_bytes+=n;requested+=n;peak_bytes=std::max(peak_bytes,live_bytes);}
   return p;
 }
-void operator delete(void* p)noexcept{if(p&&live)for(auto& slot:tracked)if(slot.ptr==p){--live;live_bytes-=slot.bytes;slot={};break;}std::free(p);}
+void operator delete(void* p)noexcept{if(p&&live)for(auto& slot:tracked)if(slot.ptr==p){--live;live_bytes-=slot.bytes;slot={};break;}koinos::node::owned_allocation::deallocate(p);}
 void* operator new[](size_t n){return ::operator new(n);}
 void operator delete[](void* p)noexcept{::operator delete(p);}
 void operator delete(void* p,size_t)noexcept{::operator delete(p);}

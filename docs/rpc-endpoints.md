@@ -59,6 +59,32 @@ body still borrowed by a write or undo admitted service work. This selects no
 output-size limit or Linux profile and adds no endpoint/configuration setting;
 service/JSON/serialization and aggregate output admission remain open.
 
+The current M1 development repair also empties owned request/response JSON trees
+without allocating during cleanup. A reproduced allocation failure after
+transaction acceptance previously aborted in a `noexcept` JSON destructor.
+The scoped OVH regression now closes the failed response, preserves the
+accepted call and allows a later successful call. A disconnected response does
+not imply that transaction acceptance was rolled back. This repair adds no RPC
+method, changes no successful envelope/encoding and is not yet a qualified
+whole-node release. See the [JSON cleanup evidence](validation/low-resource-lr2-m1-json-cleanup.md).
+
+The unreleased M1 HTTP refusal repair uses a separate 64-MiB shared gate for
+conservative response-workspace permits when ordinary admission is full.
+Actual response allocations stay attributed to M1 until their last owner
+releases them; gate permits are policy credits, not a second physical-memory
+measurement. Original IDs and local retryable error fields are preserved.
+If that gate is full, the connection closes without executing refused work.
+Earlier accepted batch work remains accepted even if no complete response can
+be delivered. This development path still requires final Linux qualification;
+it is not a GUI setting or a selected whole-node memory profile.
+
+The same development work preserves resource exceptions during base58 input
+normalization: a capacity or allocation refusal must not be treated as an
+alternative encoding and deliver changed native address bytes. Normal format
+fallback and successful encodings remain unchanged. JSON dispatch also avoids
+redundant encoded-input copies. Its scoped Linux checks and paired process
+results do not establish whole-node resource limits.
+
 [R1-B](validation/low-resource-lr2-rpc-batch.md) serializes one batch result at a
 time into the complete retained HTTP body, without keeping all earlier result
 trees or copying returned trees into success envelopes. Response bytes/order

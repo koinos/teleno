@@ -1,3 +1,4 @@
+#include "core/owned_allocation.hpp"
 #include <koinos/state_db/state_db.hpp>
 #include <koinos/state_db/state_delta.hpp>
 
@@ -13,11 +14,11 @@ static thread_local bool fired = false;
 void* operator new(std::size_t n) {
   if (count_allocations) ++allocations;
   if (fail_at >= 0 && fail_at-- == 0) { fail_at = -1; fired = true; throw std::bad_alloc(); }
-  if (auto p = std::malloc(n ? n : 1)) return p;
+  if (auto p = koinos::node::owned_allocation::allocate(n ? n : 1)) return p;
   throw std::bad_alloc();
 }
 void* operator new[](std::size_t n) { return ::operator new(n); }
-void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p) noexcept { koinos::node::owned_allocation::deallocate(p); }
 void operator delete[](void* p) noexcept { ::operator delete(p); }
 void operator delete(void* p, std::size_t) noexcept { ::operator delete(p); }
 void operator delete[](void* p, std::size_t) noexcept { ::operator delete(p); }
@@ -29,7 +30,7 @@ void test_no_allocation_transfer() {
   target.put("replaced", "old");
   source.put("replaced", std::string(4096, 'r')); source.put("inserted", std::string(4096, 'i'));
   auto owner = source.get("inserted"), replacement = source.get("replaced");
-  std::unordered_set<std::string> removed{"inserted", "unchanged-tombstone"};
+  koinos::state_db::backends::map::removed_key_set removed{"inserted", "unchanged-tombstone"};
   allocations = 0; count_allocations = true;
   target.merge_writes_from(source, removed);
   count_allocations = false;
@@ -201,8 +202,45 @@ void test_change_wrapper_reset() {
   state_db::anonymous_state_node::commit_all_changes({}); db.close(lock);
 }
 
+void test_prepared_workspace_owner() {
+  using namespace koinos::node;
+  OwnedMemoryBudget memory(1 << 20);
+  std::shared_ptr<Delta> source;
+  {
+    OwnedMemoryBudget::Scope scope(memory);
+    source=change_fixture();
+  }
+  const auto before=entries(source->parent()), changes=entries(source);
+  const auto usage=memory.snapshot();
+  auto occupied=memory.reserve(usage.limit_bytes-usage.accounted_bytes);
+  bool refused=false;
+  try { auto batch=Delta::prepare_all_changes({source}); }
+  catch(const LocalCapacityExceeded& e) { refused=std::string(e.reason_code())=="mempool_memory_capacity"; }
+  require(refused && entries(source->parent())==before && entries(source)==changes,
+          "prepared workspace refused after mutating its inputs");
+  occupied.reset();
+  const auto retained=memory.snapshot().accounted_bytes;
+  {
+    // No ambient TLS scope: infer the domain from the retained child, and keep
+    // the preparation vector/buckets alive with the returned batch.
+    auto batch=Delta::prepare_all_changes({source});
+    require(memory.snapshot().accounted_bytes>retained, "prepared vector escaped its owned domain");
+    std::weak_ptr<Delta> parent=source->parent(); source.reset();
+    require(memory.snapshot().accounted_bytes>memory.snapshot().bootstrap_accounted_bytes,
+            "prepared input credit returned before its final owner");
+    allocations=0; count_allocations=true; fail_at=0;
+    batch.apply();
+    fail_at=-1; count_allocations=false;
+    require(allocations==0 && !parent.expired() && *parent.lock()->find("inserted")=="value",
+            "owned prepared publication allocated or lost its retained inputs");
+  }
+  require(memory.snapshot().accounted_bytes==memory.snapshot().bootstrap_accounted_bytes,
+          "prepared last owner leaked aggregate credits");
+}
+
 int main() {
   try { test_no_allocation_transfer(); test_batch_validation_and_reset(); test_nonmap_parent_rejected_before_writes();
-    test_prepared_removal_publication(); test_change_preparation_failures(); test_change_wrapper_reset(); }
+    test_prepared_removal_publication(); test_change_preparation_failures(); test_change_wrapper_reset();
+    test_prepared_workspace_owner(); }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

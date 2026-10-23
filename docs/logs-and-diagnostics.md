@@ -280,6 +280,29 @@ metadata/workspace and other consumers are not included. Do not add these
 capacities to RSS or mistake them for whole-node memory. See
 [M1-G scope](validation/low-resource-lr2-pending-records.md).
 
+The aggregate policy reports `mempool_memory_enabled`, `accounted_bytes`,
+`bootstrap_accounted_bytes`,
+`allocator_requested_bytes`, `supplementary_reserved_bytes`, both corresponding
+peaks, `limit_bytes`, cumulative `refusals`, `protected_allocations` and
+`over_admission_limit` (all prefixed `mempool_memory_`). Disabled zero values
+mean untracked. Allocator requests include ownership headers; supplementary
+values are reservation headroom, not measured heap. Bootstrap is a subset of
+supplementary reservations for the live counter/mutex/control block. The current
+repair extends lifetime attribution to ordinary C++ read workspace and escaped
+protobuf/serialized/native execution outputs. Counters share one domain with
+native transaction work. Direct dependency malloc/realloc, allocator arenas,
+stacks and VM allocations remain separate; final Linux qualification is pending.
+Canonical/recovery consumption and the current development repair's fixed
+gRPC startup/minimum-refusal controls can exceed the
+standalone admission threshold; the over-limit flag and protected-allocation
+count must remain visible. The latter does not admit native work at overload
+or bound common SDK queues. See the pending
+[gRPC control qualification](implementation/issue-9-m1-grpc-control-ownership.md).
+Do not add record capacities or wire bytes to this
+total, or equate it with RSS. See
+[active repair coverage](validation/low-resource-lr2-m1-repair.md) and
+[preserved first-attempt exclusions](validation/low-resource-lr2-aggregate-memory.md).
+
 ## Backup Diagnostics
 
 Native development M1-F prepares fork-head mempool expiry/removal before any

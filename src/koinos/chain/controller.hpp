@@ -3,6 +3,7 @@
 
 #include <koinos/chain/constants.hpp>
 #include "core/monolith_client.hpp"
+#include "core/transaction_response_preparer.hpp"
 #include <koinos/protocol/protocol.pb.h>
 #include <koinos/rpc/chain/chain_rpc.pb.h>
 #include <koinos/state_db/state_db_types.hpp>
@@ -65,6 +66,8 @@ public:
                  uint64_t index_to                         = 0,
                  std::chrono::system_clock::time_point now = std::chrono::system_clock::now() );
   rpc::chain::submit_transaction_response submit_transaction( const rpc::chain::submit_transaction_request& );
+  rpc::chain::submit_transaction_response
+  submit_transaction( const rpc::chain::submit_transaction_request&, node::TransactionResponsePreparer );
   rpc::chain::get_head_info_response get_head_info( const rpc::chain::get_head_info_request& = {} );
   rpc::chain::get_chain_id_response get_chain_id( const rpc::chain::get_chain_id_request& = {} );
   rpc::chain::get_fork_heads_response get_fork_heads( const rpc::chain::get_fork_heads_request& = {} );

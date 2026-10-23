@@ -1,3 +1,4 @@
+#include "core/owned_allocation.hpp"
 // Isolated TCP/Noise/Yamux peers on loopback; no seeds, DHT or public network.
 #include "p2p/libp2p_transport.hpp"
 #include "p2p/gorpc_codec.hpp"
@@ -29,7 +30,7 @@ void* operator new( std::size_t size )
   if( fail_after == 0 ) { fail_after = -1; throw std::bad_alloc(); }
   if( fail_after > 0 ) --fail_after;
   if( size > std::numeric_limits<size_t>::max() - sizeof(Header) ) throw std::bad_alloc();
-  auto p = static_cast<Header*>( std::malloc( sizeof(Header) + (size ? size : 1) ) );
+  auto p = static_cast<Header*>( koinos::node::owned_allocation::allocate( sizeof(Header) + (size ? size : 1) ) );
   if( !p ) throw std::bad_alloc();p->size = size;p->counted = tracking;
   if( tracking )
   {
@@ -43,7 +44,7 @@ void* operator new[](std::size_t n) { return ::operator new(n); }
 void operator delete(void* p) noexcept
 {
   if( !p ) return;auto h = static_cast<dial_test_alloc::Header*>(p) - 1;
-  if( h->counted ) dial_test_alloc::live.fetch_sub(h->size);std::free(h);
+  if( h->counted ) dial_test_alloc::live.fetch_sub(h->size);koinos::node::owned_allocation::deallocate(h);
 }
 void operator delete[](void* p) noexcept { ::operator delete(p); }
 void operator delete(void* p,std::size_t) noexcept { ::operator delete(p); }

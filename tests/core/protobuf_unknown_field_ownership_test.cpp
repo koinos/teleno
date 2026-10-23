@@ -1,10 +1,15 @@
+#include "core/owned_allocation.hpp"
 #include <google/protobuf/unknown_field_set.h>
 #include <google/protobuf/any.pb.h>
 #include <google/protobuf/arena.h>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream.h>
 
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <new>
 #include <string>
 
@@ -22,7 +27,7 @@ void* operator new(std::size_t n) {
     injected = true;
     throw std::bad_alloc();
   }
-  if (auto* p = std::malloc(n ? n : 1)) {
+  if (auto* p = koinos::node::owned_allocation::allocate(n ? n : 1)) {
     ++live_allocations;
     return p;
   }
@@ -31,7 +36,7 @@ void* operator new(std::size_t n) {
 void* operator new[](std::size_t n) { return ::operator new(n); }
 void operator delete(void* p) noexcept {
   if (p) --live_allocations;
-  std::free(p);
+  koinos::node::owned_allocation::deallocate(p);
 }
 void operator delete[](void* p) noexcept { ::operator delete(p); }
 void operator delete(void* p, std::size_t) noexcept { ::operator delete(p); }
@@ -39,6 +44,48 @@ void operator delete[](void* p, std::size_t) noexcept { ::operator delete(p); }
 
 namespace {
 using google::protobuf::UnknownFieldSet;
+
+class BufferFailureStream final : public google::protobuf::io::ZeroCopyOutputStream {
+public:
+  std::array<char,8192> storage{};
+  unsigned calls=0, fail_next=0, backups_after_failure=0;
+  bool failed=false;
+  int used=0;
+  bool Next(void** data,int* size) override {
+    if(++calls==fail_next) {failed=true;throw std::bad_alloc();}
+    if(used+32>static_cast<int>(storage.size())) return false;
+    *data=storage.data()+used;*size=32;used+=32;return true;
+  }
+  void BackUp(int count) override {
+    backups_after_failure+=failed;used-=count;
+  }
+  google::protobuf::int64 ByteCount() const override {return used;}
+};
+
+bool output_buffer_failure_and_retry() {
+  std::array<char,4096> input{};
+  for(unsigned i=0;i<input.size();++i) input[i]=static_cast<char>(i%251);
+  const auto before=live_allocations.load();
+  for(unsigned ordinal=1;ordinal<=8;++ordinal) {
+    BufferFailureStream sink;sink.fail_next=ordinal;
+    bool caught=false;
+    try {
+      google::protobuf::io::CodedOutputStream output(&sink,false);
+      output.WriteRaw(input.data(),input.size());
+    } catch(const std::bad_alloc&) {caught=true;}
+    if(!caught || !sink.failed || sink.calls!=ordinal || sink.backups_after_failure)
+      return false;
+    BufferFailureStream retry;
+    {
+      google::protobuf::io::CodedOutputStream output(&retry,false);
+      output.WriteRaw(input.data(),input.size());
+    }
+    if(retry.used!=static_cast<int>(input.size()) ||
+       std::memcmp(retry.storage.data(),input.data(),input.size())!=0 ||
+       live_allocations.load()!=before) return false;
+  }
+  return true;
+}
 
 bool fault_case(bool group, unsigned prefix, unsigned ordinal) {
   const auto before = live_allocations.load();
@@ -126,6 +173,7 @@ bool arena_string_copy_failure(unsigned ordinal, bool& refused_payload) {
 } // namespace
 
 int main() {
+  if(!output_buffer_failure_and_retry()) return 6;
   unsigned cases = 0;
   for (bool group : {false, true}) {
     for (unsigned prefix : {0U, 8U}) {

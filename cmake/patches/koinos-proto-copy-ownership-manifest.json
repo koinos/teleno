@@ -1,0 +1,332 @@
+{
+  "include/google/api/http.pb.h": {
+    "after": "63f5cd1b2676ef626c38a63fceb9ff3e9469b035bdc2903cbca03a2333eede14",
+    "before": "93df913e59be2f9d492310ae469eab71a18691779f86f9418181ba041d710baf",
+    "constructors": 0,
+    "oneof_messages": 1
+  },
+  "include/koinos/account_history/account_history.pb.h": {
+    "after": "d8cf6a086e8a4e3222472d563a40baf9c4de5a7dff7e3026f36f1026effac0c9",
+    "before": "6c79b66dcf076729759757dbae3499971c5734fe8b8e9958b378a54f7766bc8c",
+    "constructors": 0,
+    "oneof_messages": 2
+  },
+  "include/koinos/chain/chain.pb.h": {
+    "after": "a23f0a67debfb1abfc330977ff7702a0e6eed7d3fdfd3a318ee5ecc962593139",
+    "before": "3c81994afbe3be104583305dae9caa1d98492db2ce23355344118a4fa31f7a82",
+    "constructors": 0,
+    "oneof_messages": 1
+  },
+  "include/koinos/chain/value.pb.h": {
+    "after": "5fc6d5a92d254d41b326fb16fdfc36fbf4e0670c8e5dafd69214f52105514502",
+    "before": "37c301189549769c85d474ee601c26bb876c9b9503c3453ce26cd57a35444108",
+    "constructors": 0,
+    "oneof_messages": 1
+  },
+  "include/koinos/protocol/protocol.pb.h": {
+    "after": "bfa5d3cbf4a06e7dd18c685851ab260608a7ebef06227c8cc4fe8e9dead10c52",
+    "before": "af6e038bc6b02c6248284a5762efb4a213c95c4b0af06824e3839e7029288613",
+    "constructors": 0,
+    "oneof_messages": 5
+  },
+  "include/koinos/rpc/account_history/account_history_rpc.pb.h": {
+    "after": "70db5472760109325ac418e3b9af84eb4e87e7519fd26ec395a50251b3e06c1a",
+    "before": "6f1f3d8819fcdcc9e44cabf452d5a24d8afc3c2bae72f988405cc0295d7af2c1",
+    "constructors": 0,
+    "oneof_messages": 7
+  },
+  "include/koinos/rpc/block_store/block_store_rpc.pb.h": {
+    "after": "b4c99b7c5e63a310ec53ea6745afdd56e25da7745be063f103545ace679ffc2d",
+    "before": "59e9fc527ba85a6e7f6599d4f2ebbaa6fa24db801ea13392aa7a5c77198ff07c",
+    "constructors": 0,
+    "oneof_messages": 11
+  },
+  "include/koinos/rpc/chain/chain_rpc.pb.h": {
+    "after": "076e72e4ac72a72ccf4d846b47132da59fdb39b63dd5d20545702f0ad7d082b9",
+    "before": "1252e0222a4c798cc659fe8c73d7bb24fb237dac9f7f287c38e5898bdbb89c92",
+    "constructors": 0,
+    "oneof_messages": 25
+  },
+  "include/koinos/rpc/contract_meta_store/contract_meta_store_rpc.pb.h": {
+    "after": "d9e2220be6995e66fa9784f3a6beba6767a9a27a79a2ac129c47db698e3c7b0c",
+    "before": "5d45bf3ee69960f15a9c1140fad8db9b2959d6b2c8a0a9e7b497eaa6d7be793c",
+    "constructors": 0,
+    "oneof_messages": 5
+  },
+  "include/koinos/rpc/koindx_tracker/koindx_tracker_rpc.pb.h": {
+    "after": "8ea1c00b7516e63ed5e5c3a73cfd48507aca833f99f91c84bcc8eb8ef100c61d",
+    "before": "1de719f8ba33415351ebbdbe8dda3bb0e5a19de9d7ac42071d7a856991a7c540",
+    "constructors": 0,
+    "oneof_messages": 9
+  },
+  "include/koinos/rpc/mempool/mempool_rpc.pb.h": {
+    "after": "442eb67f2299711c55a127b2944e04e27e0150c5e2cac49142c716c55977e464",
+    "before": "670a56aef2aab20578cf5f58c024268a64ddc77c691cc51eaf52ad17c0c99d78",
+    "constructors": 0,
+    "oneof_messages": 17
+  },
+  "include/koinos/rpc/p2p/p2p_rpc.pb.h": {
+    "after": "05a7df8b454babeaf8123d4219a5e56eb23f61059c81e48106dd0273d4b36791",
+    "before": "2e5997446b7b76e9b2a93f21fcdae25bb1737bec1f3b3acac34e96a0ad9a85f4",
+    "constructors": 0,
+    "oneof_messages": 5
+  },
+  "include/koinos/rpc/transaction_store/transaction_store_rpc.pb.h": {
+    "after": "2b662cda5b04d277a0bf77e554e45e532b936a07a96a393e4ceba2bd8f5c5103",
+    "before": "8614de813a27adc31c98a605a201e784f9a8d61cfdb0be5d4e26c373ba49c3d4",
+    "constructors": 0,
+    "oneof_messages": 5
+  },
+  "src/google/api/http.pb.cc": {
+    "after": "647cfdce08cdc18bb19a12f06c22b8c3b5139dc1843b0a1657faecd0200fcd9d",
+    "before": "bf8890e469ef0e6171c7e3aabfb669874b35511da3b8b6088e96ea07ef6680e9",
+    "constructors": 3,
+    "oneof_messages": 0
+  },
+  "src/google/api/httpbody.pb.cc": {
+    "after": "82e8b366ef2a82eb4c17f79cc03a7b476c59c6af1e0804d89f10666ca2094bc2",
+    "before": "2c58e5b400cbe0bf2f0e2c028f95fee5619c55047248dfaf60c05cdbfef72296",
+    "constructors": 1,
+    "oneof_messages": 0
+  },
+  "src/google/api/resource.pb.cc": {
+    "after": "00554f3e45e0fb40ccc23d4e304c6f625192e9cfacf35a6312392a11dea3a9cf",
+    "before": "27bcfb2c1edc9cf1f9e0fd7b53c016e27e11eddeb50b5f8022e9915974282ea2",
+    "constructors": 2,
+    "oneof_messages": 0
+  },
+  "src/google/protobuf/any.pb.cc": {
+    "after": "08129d8a50902cdcd42848c0128e6ffef74bc93618ca5032c0a3cdf81843ce0b",
+    "before": "ff94b22e00aacaa0ede3befa08a3d72d69b8259454b6f32664f08696ba406b76",
+    "constructors": 1,
+    "oneof_messages": 0
+  },
+  "src/google/protobuf/descriptor.pb.cc": {
+    "after": "ee2a5853c08e72b92f9fc846ce3b9b39f13f93f64f4b020ef9b797234aca675b",
+    "before": "4a2dab7fcdd9f112a0dc9cfe7b17122683b64b635ba75455cf62e6d5629275db",
+    "constructors": 27,
+    "oneof_messages": 0
+  },
+  "src/koinos/account_history/account_history.pb.cc": {
+    "after": "dd6e498dbeb73f13de582110d38d89a6af3ad1ec934017564f54b3f27dd15786",
+    "before": "102813de1a7c4963347471dc0616665b36cce852a9d3716dce899c44f32e71a4",
+    "constructors": 5,
+    "oneof_messages": 0
+  },
+  "src/koinos/block_store/block_store.pb.cc": {
+    "after": "3345070dbb1756a6070165c07ccce6954a3f91dd15e908f4c31c028f847dd19e",
+    "before": "9268e12f6b1e17ababb819769f0ee2bca8c79c56bd57dbd5a577eca0f390d146",
+    "constructors": 2,
+    "oneof_messages": 0
+  },
+  "src/koinos/broadcast/broadcast.pb.cc": {
+    "after": "af66085ea1046b33ba5511ffb83bb2de4cc840c040ea8f9d533119925a40332b",
+    "before": "d298906697455ea8cc5b100c8a08d4c5e3120bc5629193b659c4cb18aea49c07",
+    "constructors": 8,
+    "oneof_messages": 0
+  },
+  "src/koinos/chain/authority.pb.cc": {
+    "after": "621bfbd98c74e1b48e58abbbb4848fc2d72e26954b874df1464f7a5352921ce0",
+    "before": "1392d188dc2d984b5ad582afaee58c135845ceb701ed40eb20e0c1850fc3f78f",
+    "constructors": 3,
+    "oneof_messages": 0
+  },
+  "src/koinos/chain/chain.pb.cc": {
+    "after": "56a723e0fee9229da32e6c69320bb92835cd7b5fe941db6c3789dc1debea5c56",
+    "before": "f4c354fde32a72bdac27b21a2a7ee9a353db6accafa1b3c56134c41327be0ed3",
+    "constructors": 14,
+    "oneof_messages": 0
+  },
+  "src/koinos/chain/error.pb.cc": {
+    "after": "47336669080990232a7bdb47cf5f2055c2d3774f3e74b8734ebab7097d77edd2",
+    "before": "3373d995fb01bdf19d6497dd60a2bea0ff2eb68e47028df64ef4512681a1a530",
+    "constructors": 1,
+    "oneof_messages": 0
+  },
+  "src/koinos/chain/events.pb.cc": {
+    "after": "be78a03388a4e387df34e801952bad392a34caf8ba28d6dc1db88d77ed084228",
+    "before": "fb9f00937afe0163bbf564732e8756b60b223a65f01001fa7098b38663b813fe",
+    "constructors": 2,
+    "oneof_messages": 0
+  },
+  "src/koinos/chain/system_calls.pb.cc": {
+    "after": "905bed45c6b99ff649cae6df788576be5601f3fff2ccb41a4d087a7404629c26",
+    "before": "12981152b488f288e69140e47f16ebfbfd491f86b6da27847a175e9eef79033f",
+    "constructors": 95,
+    "oneof_messages": 0
+  },
+  "src/koinos/chain/value.pb.cc": {
+    "after": "de2b04b58a86ec0a43d04d6822daa4753b239f271e805ae5b13f44bb1596971f",
+    "before": "03178d0ef16546807c65ac02ca43538e0af6a0f4d0564a7cd579382cca1bd824",
+    "constructors": 3,
+    "oneof_messages": 0
+  },
+  "src/koinos/common.pb.cc": {
+    "after": "9bf13459148d31d91cb80eb31e3c414557c54d86e4dbacea0f61ddc4476f51e6",
+    "before": "f58e3e061dc215e05d060ec6de97a4831a665ceaf305b091d3b5146fb5b0ca2e",
+    "constructors": 1,
+    "oneof_messages": 0
+  },
+  "src/koinos/contract_meta_store/contract_meta_store.pb.cc": {
+    "after": "a063ec814a814b194397a0ee4caafe486b337cae0934b18ab49dfba4886b0d38",
+    "before": "72128875a0949526944eb6dd8052263e5efa2b90a3f655ced0a339defe3ceb55",
+    "constructors": 1,
+    "oneof_messages": 0
+  },
+  "src/koinos/contracts/claim/claim.pb.cc": {
+    "after": "ea6dbfa64319018d590e62bbd64a0b42a8e884df316b5ff58a71a3aed97ffecc",
+    "before": "b921fcc564f8904491e6b33f3d649084c8785a0b30fdcd88d75a8bad920f9b41",
+    "constructors": 8,
+    "oneof_messages": 0
+  },
+  "src/koinos/contracts/governance/governance.pb.cc": {
+    "after": "8f766ffc3a8bbfff7623fb0f11a14c1a50ba20339a7a1d090235add6cbd85b23",
+    "before": "4349d515a90c827cb6d73a06c0ffdbdb1f2e426656950a87321e5a6cc9c33a67",
+    "constructors": 12,
+    "oneof_messages": 0
+  },
+  "src/koinos/contracts/koin/koin.pb.cc": {
+    "after": "ce630f17aa4fbde00cdb46fb41c6c5f0a5bc7a5f85cc9623bf3eec0d8e2ca653",
+    "before": "a66c70333c04fec2f1b833c8a37deed5d651709d14b1ee2a470e472ca2bc6dfe",
+    "constructors": 1,
+    "oneof_messages": 0
+  },
+  "src/koinos/contracts/name_service/name_service.pb.cc": {
+    "after": "11624cfcb876a508dc743b134c98ba0629f59203ae1a39e2691aa12467ee2fab",
+    "before": "8191c5c4b8d85608f62bd9cd1f662f13ae5d1031646f099d814de6ab6af02dbd",
+    "constructors": 9,
+    "oneof_messages": 0
+  },
+  "src/koinos/contracts/pob/pob.pb.cc": {
+    "after": "4b361a7764f8a96498a6f9debad4ed70e12e944882f9fa4add118b26c355d571",
+    "before": "6e7bdf468dafee80fb285dc80c05dfc08c5e04f2cb47eeb9374bfea93049c09d",
+    "constructors": 18,
+    "oneof_messages": 0
+  },
+  "src/koinos/contracts/pow/pow.pb.cc": {
+    "after": "2ff69c55b078ec32d197dd0edf9d12fe2fa5e50745bf0baf9fcf7733c0664a6a",
+    "before": "ba5ce87d4c1e32200f2585e05850df65df29869dc52b7f43bee3d2da8358cdee",
+    "constructors": 4,
+    "oneof_messages": 0
+  },
+  "src/koinos/contracts/resources/resources.pb.cc": {
+    "after": "af490ca9caa3f356ea98a8692d95be8158c893e24e5488176ba6d32a8ebe27b0",
+    "before": "e2e1ef73b3908a2a92ac8f497fd5142314517e9c5a5b4e6ea8d6af33c85f448a",
+    "constructors": 12,
+    "oneof_messages": 0
+  },
+  "src/koinos/contracts/token/token.pb.cc": {
+    "after": "df9676f84607754ce463254567442743040f0a125dfd690b89611f30d3e33911",
+    "before": "eca70dc0ddcab69cb63899cf41de773dc9c422dd87e6b95131e726da3c644a38",
+    "constructors": 20,
+    "oneof_messages": 0
+  },
+  "src/koinos/contracts/vhp/vhp.pb.cc": {
+    "after": "f7d52f6ae81100781b1fcacf4bb78a2b012bd0fe111501216b55d3cfd8fe50c7",
+    "before": "f4532118f853818d24557f85dc3d1796b4ef18bc4741ff838f0a413c062b2fd6",
+    "constructors": 4,
+    "oneof_messages": 0
+  },
+  "src/koinos/koindx_tracker/koindx_tracker.pb.cc": {
+    "after": "4ebb2efa1fb30e11b5eaf96cc22d589b120d44b5345a90c5c1295505f5c78013",
+    "before": "69071d8f2a69d8f270a15f146259b8923a94c8e52c53a2f78001b97dc173ae6a",
+    "constructors": 4,
+    "oneof_messages": 0
+  },
+  "src/koinos/mempool/mempool.pb.cc": {
+    "after": "8c9e4200fe9f6047bd65885567fd8b1e78b3dc37023e6c0d96eb820e013a2779",
+    "before": "a6daea05a68a9f2b80d1370278accdc9dcf72730ec870853bf9e2c3ca8986ae3",
+    "constructors": 4,
+    "oneof_messages": 0
+  },
+  "src/koinos/protocol/protocol.pb.cc": {
+    "after": "ba281b1d51a1f12c291f32274a81c369f883dc32566ba1b84c37a6685057352f",
+    "before": "b42f2ca5e51a533066bc14ffd38d6133f7c2dc366ea135e503bf1d4c1c788de0",
+    "constructors": 16,
+    "oneof_messages": 0
+  },
+  "src/koinos/rpc/account_history/account_history_rpc.pb.cc": {
+    "after": "e902f65bd14506ab1685bce43483c5b193f072dc0cbc1733ebd6ce30f0fd1fb2",
+    "before": "3ba7bb3627d21480454cc26c82f020048cee0f2937a5b0444b9ecb0eef4f17aa",
+    "constructors": 5,
+    "oneof_messages": 0
+  },
+  "src/koinos/rpc/block_store/block_store_rpc.pb.cc": {
+    "after": "bc6d886535c55fe30b6934aa1bef8db3a06faa2f04501bc755521b7fb8e6cbd5",
+    "before": "e71cbec0c2c618e4e1085415b9a64c43f5137c3150b54b88866f0f5f6ce0d409",
+    "constructors": 10,
+    "oneof_messages": 0
+  },
+  "src/koinos/rpc/chain/chain_rpc.pb.cc": {
+    "after": "1b44ccc23bd71109e87000908010d405d572f754e04a8bdfc659bd4d0ad3389b",
+    "before": "30f3758cbc3996a186aa7c0b9f757df728a46719aa21ee456f23733500ba578d",
+    "constructors": 24,
+    "oneof_messages": 0
+  },
+  "src/koinos/rpc/contract_meta_store/contract_meta_store_rpc.pb.cc": {
+    "after": "a07ff9288d05f787a8408a232f505df4643fed5e3960d06e1bcac2fa1fc268ce",
+    "before": "f88170e683aa1a375441661690d40b236eb870933f13aa8c4af511cafdded7e2",
+    "constructors": 4,
+    "oneof_messages": 0
+  },
+  "src/koinos/rpc/koindx_tracker/koindx_tracker_rpc.pb.cc": {
+    "after": "72a8c7f611fb5ec14961d0ffbd8155cfcc5c51597816d87dc6379b5ff3815e4c",
+    "before": "1afa9fdaec46d40ded4e7984a051adad584485192570af15d79116b7f05fc6be",
+    "constructors": 11,
+    "oneof_messages": 0
+  },
+  "src/koinos/rpc/mempool/mempool_rpc.pb.cc": {
+    "after": "217a82a891f177be0b92332e8a034bf7d0781e40235f12c4559e1be632be39ed",
+    "before": "bfd1eabc9efad22d0a725c63c7d1067ac15a0d294648b950dc19e8196bfdc6d4",
+    "constructors": 16,
+    "oneof_messages": 0
+  },
+  "src/koinos/rpc/p2p/p2p_rpc.pb.cc": {
+    "after": "7afed5fe3cdbdae6940512a700174344d364d67987826807f9fa018e70bfdf0f",
+    "before": "8e465a0f2f0c339f44bd94a338f7beac23c38089841fa578807e8616068a3dc8",
+    "constructors": 4,
+    "oneof_messages": 0
+  },
+  "src/koinos/rpc/rpc.pb.cc": {
+    "after": "743576e72528a4dd43ecb529672896b86749975f447fd42496e1d05b9e325dd0",
+    "before": "9c80026956f89dc9bd9b437ac66537e4a5bf5b459a567b5415590e8b199f77f3",
+    "constructors": 2,
+    "oneof_messages": 0
+  },
+  "src/koinos/rpc/transaction_store/transaction_store_rpc.pb.cc": {
+    "after": "684a51a3d13582d8424651282b51b16bcf2cf14a8f1334227ffec5df6ace2778",
+    "before": "085e5160b5e9fadc815df37584486c161d9bc246a7dfe2582e754af216ee3ffc",
+    "constructors": 4,
+    "oneof_messages": 0
+  },
+  "src/koinos/standards/kcs1.pb.cc": {
+    "after": "d917521299e27cd096a2af02f74244086fab8a2c8ab121b93a67921d32f81846",
+    "before": "40811f7139f5b6b81ad9d4525485cd449efff20bb1ec38aae898ecf44652c63c",
+    "constructors": 19,
+    "oneof_messages": 0
+  },
+  "src/koinos/standards/kcs2.pb.cc": {
+    "after": "91cce1e3b738848df4bf873043364a154686b075158f1b56b324d8bfb04f7a1c",
+    "before": "0ad0452f7fd77f91bc18f09683c4b08a0c6d36de1c532d1ea31eb45e37765686",
+    "constructors": 42,
+    "oneof_messages": 0
+  },
+  "src/koinos/standards/kcs3.pb.cc": {
+    "after": "95e4e5a4da37240c9198133a78bec1ca190d2b6d6337a0ee60e435fbe7319277",
+    "before": "e638e21e27b7d5c3f48dc7247ef31064c33fe7cc335102ab1b01ae8dfc663415",
+    "constructors": 29,
+    "oneof_messages": 0
+  },
+  "src/koinos/standards/kcs4.pb.cc": {
+    "after": "7657b741673b5629ef3e6baf7fa77b6c6515417ce7b25fdc161e3ae93c0a7555",
+    "before": "cff5d71878c539d2dc221473e995a18c54ccda2d111cd93358e52e339091d458",
+    "constructors": 29,
+    "oneof_messages": 0
+  },
+  "src/koinos/transaction_store/transaction_store.pb.cc": {
+    "after": "c0b24f0c968cb998185ae9e6aa14f194f4451c03bd01088ab1b007441d40ef7e",
+    "before": "6bbb1af60089e489b65521c725c206acc89b54374450588e3bc4aec89fb2c717",
+    "constructors": 1,
+    "oneof_messages": 0
+  }
+}

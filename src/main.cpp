@@ -635,6 +635,13 @@ public:
     return _ctrl.submit_transaction( req );
   }
 
+  rpc::chain::submit_transaction_response
+  submit_transaction_with_prepared_response( const rpc::chain::submit_transaction_request& req,
+                                              node::TransactionResponsePreparer prepare ) override
+  {
+    return _ctrl.submit_transaction( req, prepare );
+  }
+
   rpc::chain::get_head_info_response
   get_head_info( const rpc::chain::get_head_info_request& req ) override
   {
@@ -1493,7 +1500,8 @@ int main( int argc, char** argv )
 
     // ── Mempool ──
     koinos::mempool::mempool mempool_impl( koinos::state_db::fork_resolution_algorithm::fifo,
-      { cfg.mempool_pending_record_max_owners, cfg.mempool_pending_record_max_capacity_bytes } );
+      { cfg.mempool_pending_record_max_owners, cfg.mempool_pending_record_max_capacity_bytes },
+      cfg.mempool_aggregate_max_accounted_bytes );
     node::MempoolAdapter mempool_adapter( mempool_impl );
 
     // ── Phase 2: RocksDB + Block Store ──
@@ -2159,7 +2167,8 @@ int main( int argc, char** argv )
       };
     auto monolith_client = std::make_shared< node::MonolithRpcClient >(
       &block_store_impl, &mempool_adapter, &event_bus, std::move( transaction_admission ),
-      node::TransactionWorkLimits{ cfg.transaction_work_max_jobs, cfg.transaction_work_max_wire_bytes } );
+      node::TransactionWorkLimits{ cfg.transaction_work_max_jobs, cfg.transaction_work_max_wire_bytes },
+      mempool_impl.memory_budget() );
     controller.set_client( monolith_client );
 
     // Indexer will run after registry.start_all() — see below
@@ -2386,6 +2395,7 @@ int main( int argc, char** argv )
         const auto rss_mb = static_cast< double >( rss_bytes ) / ( 1024.0 * 1024.0 );
         const auto transaction_work = monolith_client->transaction_work_snapshot();
         const auto pending_record = mempool_impl.get_pending_record_usage();
+        const auto mempool_memory = mempool_impl.get_aggregate_memory_usage();
         const auto vm_cache = controller.vm_cache_memory();
 
         LOG( info ) << "[metrics] head_height=" << head.head_topology().height()
@@ -2406,6 +2416,24 @@ int main( int argc, char** argv )
                     << " pending_record_refusals=" << pending_record.refusals
                     << " pending_record_max_owners=" << pending_record.limits.max_owners
                     << " pending_record_max_capacity_bytes=" << pending_record.limits.max_capacity_bytes
+                    << " mempool_memory_enabled=" << mempool_memory.enabled
+                    << " mempool_memory_accounted_bytes=" << mempool_memory.accounted_bytes
+                    << " mempool_memory_bootstrap_accounted_bytes=" << mempool_memory.bootstrap_accounted_bytes
+                    << " mempool_memory_allocator_requested_bytes=" << mempool_memory.allocator_requested_bytes
+                    << " mempool_memory_supplementary_reserved_bytes="
+                    << mempool_memory.accounted_bytes - mempool_memory.allocator_requested_bytes
+                    << " mempool_memory_peak_accounted_bytes=" << mempool_memory.peak_accounted_bytes
+                    << " mempool_memory_peak_allocator_requested_bytes=" << mempool_memory.peak_allocator_requested_bytes
+                    << " mempool_memory_over_admission_limit="
+                    << ( mempool_memory.enabled && mempool_memory.accounted_bytes > mempool_memory.limit_bytes )
+                    << " mempool_memory_limit_bytes=" << mempool_memory.limit_bytes
+                    << " mempool_memory_refusals=" << mempool_memory.refusals
+                    << " mempool_memory_protected_allocations=" << mempool_memory.protected_allocations
+                    << " mempool_refusal_memory_limit_bytes=" << mempool_memory.refusal_limit_bytes
+                    << " mempool_refusal_memory_accounted_bytes=" << mempool_memory.refusal_accounted_bytes
+                    << " mempool_refusal_memory_peak_bytes=" << mempool_memory.peak_refusal_accounted_bytes
+                    << " mempool_refusal_memory_refusals=" << mempool_memory.refusal_capacity_refusals
+                    << " mempool_refusal_transport_cancellations=" << mempool_memory.refusal_transport_cancellations
                     << " transaction_notification_failures=" << monolith_client->transaction_notification_failures()
                     << " transaction_work_enabled=" << transaction_work.enabled
                     << " transaction_work_jobs=" << transaction_work.jobs

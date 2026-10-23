@@ -254,3 +254,17 @@ measured, but representative Mac/40 GB, Linux and whole-server profiles are
 blocked/unverified. No historical/differential consensus, sustained operation,
 power-loss or complete repository-scoped Definition of Done is proven.
 SC6 and external release actions were not started.
+
+
+## M1 qualification fixture retention amendment — 2026-10-21
+
+The isolated OVH M1 C14 normal suite retains this experiment's original five
+pairs, but the retained synthetic destination trees exceed the separate strict
+whole-server budget. That run remains a failed resource result. Proposed
+`--retire-completed-pairs` bounds disposable case retention after both modes
+verify, preserving all source/logs/measurements and immutable file hashes.
+The original default retains all cases. Final restart/recovery checks still run
+before retirement. This does not retire an operator database or qualify a
+40-GB production restore. Revision 2 passes 15 OVH helper checks; the full
+native experiment and later compatibility revision remain pending. See the
+[current M1 evidence](low-resource-lr2-m1-json-cleanup.md#completed-c14-normal-reconciliation-and-unfrozen-fixture-repair).

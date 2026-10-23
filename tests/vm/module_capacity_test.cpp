@@ -1,3 +1,4 @@
+#include "core/owned_allocation.hpp"
 #include <koinos/vm_manager/fizzy/fizzy_vm_backend.hpp>
 #include <koinos/chain/controller.hpp>
 #include <fizzy/module.hpp>
@@ -18,10 +19,10 @@ thread_local unsigned calls = 0;
 void* operator new(std::size_t bytes) {
   if(counting) ++calls;
   if(fail_at>=0 && fail_at--==0) { fail_at=-1; throw std::bad_alloc(); }
-  if(auto p=std::malloc(bytes?bytes:1)) return p;
+  if(auto p=koinos::node::owned_allocation::allocate(bytes?bytes:1)) return p;
   throw std::bad_alloc();
 }
-void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p) noexcept { koinos::node::owned_allocation::deallocate(p); }
 void* operator new[](std::size_t n) {return ::operator new(n);}
 void operator delete[](void* p) noexcept {::operator delete(p);}
 void operator delete(void* p,std::size_t) noexcept {::operator delete(p);}

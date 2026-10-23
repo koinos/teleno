@@ -19,10 +19,12 @@ class MempoolAdapter final : public IMempool
 {
 public:
   explicit MempoolAdapter( koinos::mempool::mempool& impl ) : _impl( impl ) {}
+  OwnedMemoryBudget memory_budget() const noexcept override { return _impl.memory_budget(); }
 
   rpc::mempool::get_pending_transactions_response
   get_pending_transactions( const rpc::mempool::get_pending_transactions_request& req ) override
   {
+    OwnedMemoryBudget::Scope response_memory_scope( _impl.memory_budget() );
     rpc::mempool::get_pending_transactions_response resp;
 
     auto limit = req.limit() > 0 ? req.limit() : koinos::mempool::constants::max_request_limit;
@@ -42,6 +44,7 @@ public:
   check_pending_account_resources(
     const rpc::mempool::check_pending_account_resources_request& req ) override
   {
+    OwnedMemoryBudget::Scope response_memory_scope( _impl.memory_budget() );
     rpc::mempool::check_pending_account_resources_response resp;
 
     std::optional< koinos::crypto::multihash > block_id;
@@ -61,6 +64,7 @@ public:
   rpc::mempool::check_account_nonce_response
   check_account_nonce( const rpc::mempool::check_account_nonce_request& req ) override
   {
+    OwnedMemoryBudget::Scope response_memory_scope( _impl.memory_budget() );
     rpc::mempool::check_account_nonce_response resp;
 
     std::optional< koinos::crypto::multihash > block_id;
@@ -74,6 +78,7 @@ public:
   rpc::mempool::get_pending_nonce_response
   get_pending_nonce( const rpc::mempool::get_pending_nonce_request& req ) override
   {
+    OwnedMemoryBudget::Scope response_memory_scope( _impl.memory_budget() );
     rpc::mempool::get_pending_nonce_response resp;
 
     std::optional< koinos::crypto::multihash > block_id;
@@ -87,6 +92,7 @@ public:
   rpc::mempool::get_pending_transaction_count_response
   get_pending_transaction_count( const rpc::mempool::get_pending_transaction_count_request& req ) override
   {
+    OwnedMemoryBudget::Scope response_memory_scope( _impl.memory_budget() );
     rpc::mempool::get_pending_transaction_count_response resp;
 
     std::optional< koinos::crypto::multihash > block_id;
@@ -100,6 +106,7 @@ public:
   rpc::mempool::get_reserved_account_rc_response
   get_reserved_account_rc( const rpc::mempool::get_reserved_account_rc_request& req ) override
   {
+    OwnedMemoryBudget::Scope response_memory_scope( _impl.memory_budget() );
     rpc::mempool::get_reserved_account_rc_response resp;
     resp.set_rc( _impl.get_reserved_account_rc( req.account() ) );
     return resp;
@@ -109,6 +116,11 @@ public:
     const broadcast::transaction_accepted& accepted,
     std::chrono::system_clock::time_point accepted_at = std::chrono::system_clock::now() )
   {
+    const auto memory = _impl.memory_budget();
+    OwnedMemoryBudget::Scope memory_scope( memory, false );
+    auto input_workspace = memory.enabled() ? memory.reserve( OwnedMemoryBudget::native_message_workspace(
+      OwnedMemoryBudget::protobuf_space_used( accepted ) ) )
+      : OwnedMemoryBudget::Lease{};
     koinos::mempool::pending_transaction pending;
     *pending.mutable_transaction() = accepted.transaction();
     pending.set_disk_storage_used( accepted.receipt().disk_storage_used() );

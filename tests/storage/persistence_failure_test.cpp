@@ -2,6 +2,7 @@
 #include "block_store/block_store.hpp"
 #include <koinos/state_db/backends/rocksdb/rocksdb_backend.hpp>
 #include <koinos/state_db/state_delta.hpp>
+#include <koinos/state_db/state_db.hpp>
 #include "fault_db.hpp"
 #include "../artifact_root.hpp"
 #include <filesystem>
@@ -61,6 +62,46 @@ void failed_commit()
   root.reset(); child.reset(); b.reset();
   Backend reopened; f.open(reopened); check(!reopened.get("new"));
   check(*reopened.get("original")=="value"); reopened.close();
+}
+void failed_indexed_commit()
+{
+  using namespace koinos;
+  Fixture f;
+  const state_db::object_space space;
+  const std::string key = "indexed-key", value = "accepted-pending-value";
+  const auto child_id = crypto::hash( crypto::multicodec::sha2_256, uint64_t( 700 ) );
+  crypto::multihash old_root;
+  {
+    auto backend = std::make_shared< Backend >(); f.open( *backend );
+    state_db::database database; auto lock = database.get_unique_lock();
+    database.open( backend, []( auto ) {}, state_db::fifo_comparator, lock );
+    old_root = database.get_root( lock )->id();
+    auto child = database.create_writable_node( old_root, child_id, {}, lock );
+    child->put_object( space, key, &value ); database.finalize_node( child_id, lock );
+    f.faults.fail_write = true;
+    rejects( [&] { database.commit_node( child_id, lock ); } );
+    if( database.get_root( lock )->id() != old_root )
+      throw std::runtime_error( "failed indexed commit changed root before durable success" );
+    check( database.get_node( child_id, lock ) && database.get_head( lock )->id() == child_id );
+    check( *child->get_object( space, key ) == value );
+    // The persistent backend remains explicitly failed after an uncertain
+    // write. Preserved indexes must not turn that failure into silent success.
+    rejects( [&] { backend->get( "uncached-root-key" ); } );
+    f.faults.fail_write = false;
+    rejects( [&] { database.close( lock ); } );
+    backend->close();
+  }
+  {
+    auto backend = std::make_shared< Backend >(); f.open( *backend );
+    state_db::database database; auto lock = database.get_unique_lock();
+    database.open( backend, []( auto ) {}, state_db::fifo_comparator, lock );
+    check( database.get_root( lock )->id() == old_root && !database.get_root( lock )->get_object( space, key ) );
+    auto retry = database.create_writable_node( old_root, child_id, {}, lock );
+    retry->put_object( space, key, &value ); database.finalize_node( child_id, lock );
+    database.commit_node( child_id, lock );
+    check( database.get_root( lock )->id() == child_id && *database.get_root( lock )->get_object( space, key ) == value );
+    database.close( lock ); backend->close();
+  }
 }
 koinos::rpc::block_store::add_block_request request(const std::string& id,uint64_t height=1,const std::string& previous="genesis")
 {
@@ -155,8 +196,8 @@ int main(int argc,char** argv)
 #endif
   check(argc==1);
   int failures=0;
-  for(auto test: {state_read,state_flush,failed_commit,block_atomic,corrupt_topology,cache_clear,initialization_failure,interrupted_block})
+  for(auto test: {state_read,state_flush,failed_commit,failed_indexed_commit,block_atomic,corrupt_topology,cache_clear,initialization_failure,interrupted_block})
     try { test(); } catch(const std::exception& e) { ++failures; std::cerr << e.what() << '\n'; }
-  std::cout << "LR1 persistence groups: " << (8-failures) << "/8\n";
+  std::cout << "Persistence groups: " << (9-failures) << "/9\n";
   return failures ? 1 : 0;
 }

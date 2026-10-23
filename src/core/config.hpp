@@ -171,6 +171,7 @@ struct NodeConfig
   uint64_t mempool_transaction_expiration = 120;
   uint64_t mempool_pending_record_max_owners = 0;
   uint64_t mempool_pending_record_max_capacity_bytes = 0;
+  uint64_t mempool_aggregate_max_accounted_bytes = 0;
 
   // ── RocksDB ──
   uint64_t rocksdb_block_cache_mb                 = 256;

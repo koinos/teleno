@@ -77,6 +77,8 @@ mempool::pending_transaction make_pending_transaction( const std::string& id,
 class FakeMempool final : public IMempool
 {
 public:
+  OwnedMemoryBudget memory_budget() const noexcept override { return memory; }
+  OwnedMemoryBudget memory;
   rpc::mempool::get_pending_transactions_response
   get_pending_transactions( const rpc::mempool::get_pending_transactions_request& req ) override
   {
@@ -364,6 +366,37 @@ void test_federated_block_assembly_and_acceptance()
   assert( block.transactions_size() == 2 );
 }
 
+void test_candidate_copy_ownership_and_capacity_retry()
+{
+  FakeChain chain;
+  FakeMempool mempool;
+  mempool.memory = OwnedMemoryBudget( 16 * 1024 * 1024 );
+  auto pending = make_pending_transaction( "owned", 100, 100, 100 );
+  pending.mutable_transaction()->add_signatures( std::string( 8192, 's' ) );
+  mempool.pending_transactions.push_back( pending );
+  ProducerConfig config; config.algorithm = "federated";
+  BlockProducer producer( chain, mempool, test_private_key(), config );
+  const auto before = mempool.memory.snapshot().accounted_bytes;
+  auto occupied = mempool.memory.reserve( mempool.memory.snapshot().limit_bytes - before );
+  bool refused = false;
+  try { (void)producer.produce_once(); }
+  catch( const LocalCapacityExceeded& e )
+  { refused = std::string( e.reason_code() ) == "mempool_memory_capacity"; }
+  assert( refused && chain.proposed_blocks.empty() && mempool.pending_transactions.size() == 1 );
+  occupied.reset();
+  {
+    const auto result = producer.produce_once();
+    assert( result.status == ProductionResult::Status::produced && result.transaction_count == 1 );
+  }
+  assert( chain.proposed_blocks.size() == 1 );
+  assert( chain.proposed_blocks.front().transactions( 0 ).SerializeAsString() == pending.transaction().SerializeAsString() );
+  assert( mempool.memory.snapshot().accounted_bytes > before + 8192 );
+  // The fake chain deliberately retains the actual producer request copy.
+  // Releasing both its protobuf fields and vector capacity returns the credit.
+  std::vector< protocol::block >().swap( chain.proposed_blocks );
+  assert( mempool.memory.snapshot().accounted_bytes == before );
+}
+
 void test_failed_transactions_are_pruned_and_retried()
 {
   FakeChain chain;
@@ -638,6 +671,7 @@ int main()
 {
   test_missing_private_key_is_generated();
   test_federated_block_assembly_and_acceptance();
+  test_candidate_copy_ownership_and_capacity_retry();
   test_failed_transactions_are_pruned_and_retried();
   test_pob_candidate_refreshes_when_head_advances();
   test_real_mempool_head_publication_handoff();

@@ -1,3 +1,4 @@
+#include "core/owned_allocation.hpp"
 #include "p2p/error_handler.hpp"
 #include <atomic>
 #include <chrono>
@@ -18,14 +19,14 @@ void* operator new( std::size_t size )
 {
   if( allocation_failure == 0 ) { allocation_failure = -1; throw std::bad_alloc(); }
   if( allocation_failure > 0 ) --allocation_failure;
-  if( auto result = std::malloc( size ? size : 1 ) ) return result;
+  if( auto result = koinos::node::owned_allocation::allocate( size ? size : 1 ) ) return result;
   throw std::bad_alloc();
 }
 void* operator new[]( std::size_t size ) { return ::operator new( size ); }
-void operator delete( void* pointer ) noexcept { std::free( pointer ); }
-void operator delete[]( void* pointer ) noexcept { std::free( pointer ); }
-void operator delete( void* pointer, std::size_t ) noexcept { std::free( pointer ); }
-void operator delete[]( void* pointer, std::size_t ) noexcept { std::free( pointer ); }
+void operator delete( void* pointer ) noexcept { koinos::node::owned_allocation::deallocate( pointer ); }
+void operator delete[]( void* pointer ) noexcept { koinos::node::owned_allocation::deallocate( pointer ); }
+void operator delete( void* pointer, std::size_t ) noexcept { koinos::node::owned_allocation::deallocate( pointer ); }
+void operator delete[]( void* pointer, std::size_t ) noexcept { koinos::node::owned_allocation::deallocate( pointer ); }
 
 using namespace koinos::node::p2p;
 namespace {

@@ -8,34 +8,78 @@
  
  #include <google/protobuf/stubs/logging.h>
  #include <google/protobuf/stubs/common.h>
-@@ -160,9 +161,10 @@
+@@ -71,8 +72,7 @@
+   if (other_field_count > 0) {
+     fields_.reserve(fields_.size() + other_field_count);
+     for (int i = 0; i < other_field_count; i++) {
+-      fields_.push_back((other.fields_)[i]);
+-      fields_.back().DeepCopy((other.fields_)[i]);
++      AddField((other.fields_)[i]);
+     }
+   }
+ }
+@@ -82,8 +82,7 @@
+   if (other_field_count > 0) {
+     fields_.reserve(fields_.size() + other_field_count);
+     for (int i = 0; i < other_field_count; i++) {
+-      fields_.push_back((other.fields_)[i]);
+-      fields_.back().DeepCopy((other.fields_)[i]);
++      AddField((other.fields_)[i]);
+     }
+   }
+ }
+@@ -160,9 +159,10 @@
    UnknownField field;
    field.number_ = number;
    field.SetType(UnknownField::TYPE_LENGTH_DELIMITED);
 -  field.data_.length_delimited_.string_value = new std::string;
--  fields_.push_back(field);
--  return field.data_.length_delimited_.string_value;
 +  std::unique_ptr<std::string> value(new std::string);
 +  field.data_.length_delimited_.string_value = value.get();
-+  fields_.push_back(field);
+   fields_.push_back(field);
+-  return field.data_.length_delimited_.string_value;
 +  return value.release();
  }
  
  
-@@ -170,9 +172,10 @@
+@@ -170,14 +170,21 @@
    UnknownField field;
    field.number_ = number;
    field.SetType(UnknownField::TYPE_GROUP);
 -  field.data_.group_ = new UnknownFieldSet;
--  fields_.push_back(field);
--  return field.data_.group_;
 +  std::unique_ptr<UnknownFieldSet> value(new UnknownFieldSet);
 +  field.data_.group_ = value.get();
-+  fields_.push_back(field);
+   fields_.push_back(field);
+-  return field.data_.group_;
 +  return value.release();
  }
  
  void UnknownFieldSet::AddField(const UnknownField& field) {
+-  fields_.push_back(field);
+-  fields_.back().DeepCopy(field);
++  UnknownField copy = field;
++  copy.DeepCopy(field);
++  try {
++    fields_.push_back(copy);
++  } catch (...) {
++    copy.Delete();
++    throw;
++  }
+ }
+ 
+ void UnknownFieldSet::DeleteSubrange(int start, int num) {
+@@ -258,9 +265,9 @@
+           new std::string(*data_.length_delimited_.string_value);
+       break;
+     case UnknownField::TYPE_GROUP: {
+-      UnknownFieldSet* group = new UnknownFieldSet();
+-      group->InternalMergeFrom(*data_.group_);
+-      data_.group_ = group;
++      std::unique_ptr<UnknownFieldSet> group(new UnknownFieldSet());
++      group->InternalMergeFrom(*other.data_.group_);
++      data_.group_ = group.release();
+       break;
+     }
+     default:
 --- a/src/google/protobuf/arenastring.cc
 +++ b/src/google/protobuf/arenastring.cc
 @@ -47,6 +47,26 @@
@@ -92,3 +136,141 @@
      delete value;
      tagged_ptr_.Set(new_value);
  #endif
+--- a/src/google/protobuf/repeated_field.h
++++ b/src/google/protobuf/repeated_field.h
+@@ -658,7 +658,12 @@
+   static inline typename TypeHandler::Type* copy(
+       typename TypeHandler::Type* value) {
+     auto* new_value = TypeHandler::NewFromPrototype(value, nullptr);
+-    TypeHandler::Merge(*value, new_value);
++    try {
++      TypeHandler::Merge(*value, new_value);
++    } catch (...) {
++      TypeHandler::Delete(new_value, nullptr);
++      throw;
++    }
+     return new_value;
+   }
+ 
+@@ -1789,10 +1794,13 @@
+   if (rep_ != NULL && current_size_ < rep_->allocated_size) {
+     return cast<TypeHandler>(rep_->elements[current_size_++]);
+   }
++  // Grow before creating an unowned element. No allocation follows New.
++  InternalExtend(1);
+   typename TypeHandler::Type* result =
+       TypeHandler::NewFromPrototype(prototype, arena_);
+-  return reinterpret_cast<typename TypeHandler::Type*>(
+-      AddOutOfLineHelper(result));
++  rep_->elements[current_size_++] = result;
++  ++rep_->allocated_size;
++  return result;
+ }
+ 
+ template <typename TypeHandler,
+@@ -1805,10 +1813,10 @@
+   if (!rep_ || rep_->allocated_size == total_size_) {
+     Reserve(total_size_ + 1);
+   }
+-  ++rep_->allocated_size;
+   typename TypeHandler::Type* result =
+       TypeHandler::New(arena_, std::move(value));
+   rep_->elements[current_size_++] = result;
++  ++rep_->allocated_size;
+ }
+ 
+ template <typename TypeHandler>
+@@ -1875,6 +1883,9 @@
+       typename TypeHandler::Type* new_elem =
+           TypeHandler::NewFromPrototype(elem_prototype, arena);
+       our_elems[i] = new_elem;
++      // Destruction must see every completed allocation if a later New or
++      // Merge throws. current_size_ is still published by the outer operation.
++      rep_->allocated_size = current_size_ + i + 1;
+     }
+   }
+   // Main loop that does the actual merging
+@@ -2146,12 +2157,14 @@
+ template <typename Element>
+ inline RepeatedPtrField<Element>::RepeatedPtrField(
+     const RepeatedPtrField& other)
+-    : RepeatedPtrFieldBase() {
++    : RepeatedPtrField() {
++  // A delegating constructor destroys its completed target if Merge throws.
+   MergeFrom(other);
+ }
+ 
+ template <typename Element>
+ template <typename Iter, typename>
+-inline RepeatedPtrField<Element>::RepeatedPtrField(Iter begin, Iter end) {
++inline RepeatedPtrField<Element>::RepeatedPtrField(Iter begin, Iter end)
++    : RepeatedPtrField() {
+   Add(begin, end);
+ }
+--- a/src/google/protobuf/util/internal/type_info.cc
++++ b/src/google/protobuf/util/internal/type_info.cc
+@@ -75,6 +75,7 @@
+         type_resolver_->ResolveMessageType(string_type_url, type.get());
+     StatusOrType result =
+-        status.ok() ? StatusOrType(type.release()) : StatusOrType(status);
+-    cached_types_[string_type_url] = result;
++        status.ok() ? StatusOrType(type.get()) : StatusOrType(status);
++    cached_types_.emplace(string_type_url, result);
++    if (status.ok()) type.release();
+     return result;
+   }
+@@ -102,6 +103,7 @@
+         type_resolver_->ResolveEnumType(string_type_url, enum_type.get());
+     StatusOrEnum result =
+-        status.ok() ? StatusOrEnum(enum_type.release()) : StatusOrEnum(status);
+-    cached_enums_[string_type_url] = result;
++        status.ok() ? StatusOrEnum(enum_type.get()) : StatusOrEnum(status);
++    cached_enums_.emplace(string_type_url, result);
++    if (status.ok()) enum_type.release();
+     return result.ok() ? result.value() : NULL;
+   }
+--- a/src/google/protobuf/io/coded_stream.cc
++++ b/src/google/protobuf/io/coded_stream.cc
+@@ -795,5 +795,14 @@
+     do {
+       void* data;
+-      if (PROTOBUF_PREDICT_FALSE(!stream_->Next(&data, &size))) {
++      bool next;
++      try {
++        next = stream_->Next(&data, &size);
++      } catch (...) {
++        // The caller still owns its previous cursor. A failed buffer growth
++        // must prevent destructor Trim from using it with our advanced state.
++        Error();
++        throw;
++      }
++      if (PROTOBUF_PREDICT_FALSE(!next)) {
+         // Stream has an error, we use the patch buffer to continue to be
+         // able to write.
+--- a/src/google/protobuf/util/internal/proto_writer.cc
++++ b/src/google/protobuf/util/internal/proto_writer.cc
+@@ -60,8 +60,8 @@
+                          const google::protobuf::Type& type,
+                          strings::ByteSink* output, ErrorListener* listener)
+     : master_type_(type),
+-      typeinfo_(TypeInfo::NewTypeInfo(type_resolver)),
+-      own_typeinfo_(true),
++      typeinfo_(nullptr),
++      own_typeinfo_(false),
+       done_(false),
+       ignore_unknown_fields_(false),
+       ignore_unknown_enum_values_(false),
+@@ -76,7 +76,12 @@
+       stream_(new CodedOutputStream(&adapter_)),
+       listener_(listener),
+       invalid_depth_(0),
+-      tracker_(new ObjectLocationTracker()) {}
++      tracker_(new ObjectLocationTracker()) {
++  // No later initializer can strand this owned TypeInfo on allocation failure.
++  // The other owned members have completed their RAII initialization first.
++  typeinfo_ = TypeInfo::NewTypeInfo(type_resolver);
++  own_typeinfo_ = true;
++}
+ 
+ ProtoWriter::ProtoWriter(const TypeInfo* typeinfo,
+                          const google::protobuf::Type& type,

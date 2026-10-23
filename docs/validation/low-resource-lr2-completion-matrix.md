@@ -1,5 +1,608 @@
 # LR2 completion matrix and execution log
 
+## Current M1 R15 Linux qualification — 2026-10-23
+
+**M1 complete for exact R15.** Source archive
+`3be9aa55f128f649d851ec87ca9dfa3574736eec0bdec9e4e9ebaecbae47995f`
+and Linux node `e825f1951a583590e9173c57be79626635dbb110f750d1258eb34efffa31eef4`
+pass 104/104 normal checks, both CLI checks, 63/63 focused ASan/UBSan and
+61/61 default-TSan unique cases with working controls. Eight owner groups,
+including bounded refusal controls, pass final review. Five equivalent pairs
+per measured workload and exact-source 100-block/12,800-test-transaction
+create/reopen pass. The exact full-history OVH observer completes 3,600
+error-free mixed-read cycles, 31 independent comparisons, clean restart and
+owned-process interruption/recovery. Observer peak RSS is 419,278,848 B;
+controlled peak is 705,712,128 B. Host memory, no-swap/OOM and strict disk
+plus full-reserve gates pass. See the [R15 report](low-resource-lr2-m1-r15.md).
+Issue 9, LR2 and separate R1/P2/V1/S1/D1/Q1/H1 gates remain open. Older failures,
+closed counters and unrelated P2P work are preserved. The Hetzner producer is
+untouched; no commit, push, release or app integration is performed.
+
+## R13 Linux qualification — historical checkpoint, 2026-10-22
+
+Frozen R13 source archive SHA-256
+`839e77930e20600cb6fdf143a4bf259448ad076c426f5ff4e14b1f0ab368c684`
+and exact Linux node SHA-256
+`c3205142024a1911244c69bfd2d3a9708f67b2fd53b5f96d3bd6f3c8bf5f5710`
+pass **101/101** normal OVH checks, both CLI checks, **61/61** focused
+ASan/UBSan and **59/59** default-TSan unique cases with working clean and
+known-fault controls. The original TSan cleanup CTest timeout and separate
+unchanged-binary completion remain visible. Five R12/R13 paired block-event
+samples show that R13 removes 1,536 allocation requests per 256 events; the
+small RSS difference is inconclusive. The isolated exact-source native
+workload passes 100 blocks, 12,800 locally signed test transactions, and
+same-state reopen with matching block ID, state root and archive digest.
+Its highest sampled process HWM is 720,809,984 B; minimum strict disk margin
+after the 8-GiB reserve is 498,278,400 B. The exact R13 full-history OVH
+observer passes its one-hour mixed-read window: 3,599 successful cycles,
+31 independent comparisons and zero errors. Its clean same-database reopen
+and owned-process interruption/recovery pass with four observer starts, zero
+producer starts and no node left running. Maximum observer kernel/sampled HWM
+is 369,373,184 B; minimum host `MemAvailable` is 2,960,805,888 B and minimum
+strict margin after the reserve is 548,851,712 B. Runtime evidence is
+externally verified and reconciled in private
+`evidence/r13-runtime-reconciliation-v2.json`; the first sample-only margin
+report is preserved and superseded. Final aggregate-owner review,
+representative policy and whole-node physical attribution remain pending.
+**M1 remains open.** See the
+[R13 validation record](low-resource-lr2-m1-json-cleanup.md#r13-avoid-redundant-native-block-notification-copies).
+
+The continuing unfrozen refusal follow-up reproduces protected-control growth
+with exact final release, then bounds it with separate lifetime-owned credits.
+Six small normal, the same six scoped ASan/UBSan cases with three controls,
+and eight small default-TSan cases/controls pass on OVH. A new real-server
+exhaustion test first fails in pinned gRPC's unbound factory-time call; a
+single-member SDK call-binding correction subsequently passes four normal,
+four scoped ASan/UBSan server cases and three controls. Thirteen SDK source/archive/configuration
+recipe checks pass, and the repository module builds and links its Release
+component after preserving header-inventory and Debug-selection failures.
+Expanded fallback-fault checks pass eleven normal/ASan/control invocations,
+and six real-gRPC default-TSan cases pass with the instrumented SDK and working
+clean/known-race callback controls. A new frozen whole-source build and its
+full normal/sanitizer, paired-policy and runtime gates remain open. R13's node
+results do not qualify this new implementation. See the
+[refusal follow-up](../implementation/issue-9-m1-grpc-control-ownership.md#aggregate-refusal-follow-up--2026-10-22).
+
+Frozen R15's complete normal Linux build passes: source archive
+`3be9aa55f128f649d851ec87ca9dfa3574736eec0bdec9e4e9ebaecbae47995f`,
+71 ELFs, 168 identified linked libraries and exact node SHA-256
+`e825f1951a583590e9173c57be79626635dbb110f750d1258eb34efffa31eef4`.
+At that build checkpoint its native, sanitizer and runtime qualification was
+pending; the current R15 section above supersedes that status. R14's source-assembly CMake
+failure is retained; unrelated workspace P2P changes remain untouched.
+
+## R10/R12 Linux observer qualification — historical checkpoints
+
+The later frozen R12 source passes **101/101 registered normal tests** and
+both native version/help checks on OVH with the exact node SHA-256
+`31dac5e65fada62b800506cef76d4f9d21cbbd6aed6d87b67e8576e20cd50c5a`.
+Its full normal ELF set is externally hash verified. Focused final-source
+ASan/UBSan passes 61/61 OVH invocations with working controls. Its default
+TSan matrix reconciles 59/59 unique passes, preserving an original 120-second
+CTest timeout and separately verified 600-second unchanged-test completion.
+A separate 100-block/12,800-transaction controlled-chain workload passes
+creation and same-database reopen on OVH with local deterministic test
+signatures, no network adapter and a 734,810,112-B creation peak RSS. The
+exact-node full-history mainnet observer has caught up and begun its
+one-hour mixed-read window. Clean restart, interrupted-test recovery,
+whole-node qualification and complete aggregate ownership remain pending;
+**M1 remains open**. See the
+[R12 validation record](low-resource-lr2-m1-json-cleanup.md).
+
+R10 preserves R9's source archive SHA-256
+`8f7f9e37190be31cc6b540c3f3ed775e8bb01b612cd8446ade56c152d4418e02`
+and links the verified Zstd-enabled RocksDB closure. Node SHA-256 is
+`00c6f3c4a87d7ff01ae58eda41a3ed4713c80f1bdb19b7aa8ad52617bd0f9f6f`.
+OVH passes **101/101 unique normal tests** and native `--version`/`--help`.
+The complete build tree and every ELF are externally hash verified. Preserve
+the earlier recipe-stage and CLI-expectation failures as separate results.
+The least strict whole-server disk margin during a passing case was
+154,886,144 bytes, with the recovery reserve included. Same-source R9 focused
+ASan/UBSan passes 61/61; TSan has 59 unique passes in 60 invocations, with its
+original timeout and separate successful diagnostic retained. These sanitizer
+results use an earlier RocksDB closure and do not qualify exact R10.
+
+R10 caught up to the public mainnet head as an isolated observer and matched
+the common irreversible block ID. Its first mixed-read window stopped after
+three public-reference timeouts, preserving 1,261 correct local cycles and 30
+successful independent comparisons. A separate one-hour continuation passed
+3,573 local cycles, with zero local errors and 15 independent canonical
+agreements; 15 reference calls were unavailable. The first run stopped cleanly
+with peak sampled RSS 627,982,336 B and a 495,771,648 B minimum strict disk
+margin including reserve. The same database reopened and advanced 92 blocks
+from the first reopened proof, passed three further independent checks and
+stopped cleanly. Peak sampled reopen RSS was 109,805,568 B. Exact R10 focused
+ASan/UBSan passes **61/61** OVH invocations with working clean/known-fault
+controls and hash-verified exact-closure binaries. Minimum strict disk margin
+is 1,131,679,744 B and minimum `MemAvailable` is 2,872,823,808 B across its
+sampled cases. The corrected exact-source, Zstd-RocksDB, instrumented-gRPC
+TSan closure passes **59/59** focused OVH invocations with working controls and
+the unchanged cleanup test under its recorded 600-second allowance. Its
+minimum sampled strict margin is 1,139,589,120 B after reserve and minimum
+`MemAvailable` is 3,189,100,544 B. The original 120-second timeout and
+uninstrumented-gRPC race report remain preserved. Both observer runs and all
+test units are now stopped. Complete M1 ownership/admission, paired physical
+memory savings and representative whole-node qualification remain pending;
+**M1 remains open**. See the
+[observer work record](../implementation/issue-9-m1-mainnet-observer.md) and
+[validation report](low-resource-lr2-m1-json-cleanup.md).
+
+## M1 JSON-cleanup continuation — started 2026-10-21
+
+The [new development continuation](low-resource-lr2-m1-json-cleanup.md) starts
+at **03:33:59.573386 UTC** with **no overall deadline**, owned evidence at
+`/Volumes/My Passport/teleno-m1-json-cleanup-20261021-lygqon1e/` and separately
+tracked C13/C14 candidate labels; neither is frozen. It addresses C11's
+post-acceptance allocation failure in `noexcept` JSON cleanup using a fixed
+parent stack, in-place unary collapse and allocation-free deep fallback.
+All **14/14 scoped normal OVH development invocations** meet their expected
+result, including a clean/default-destructor fault control, saturated-budget
+cleanup, exact final credit release, post-acceptance HTTP failure recovery,
+concurrent output, complete success/error encoding and refusal/retry. The
+post-acceptance single/mixed calls remain accepted and later calls succeed.
+A relocated-header build refusal and harness-only correction are preserved.
+The components use identified C11 headers and retained C9 linked libraries;
+they do not qualify a complete C13 node. Initial static sanitizer binding/link
+failures are preserved. Corrective dynamic-runtime ASan/UBSan passes 15/15
+scoped invocations. TSan has 13 uninterrupted passes and one interrupted
+cold-reflection capacity test; its raw wrapper-zero result is explicitly
+superseded by a failure reconciliation. A standalone control reproduces the
+TSan once-exception limitation, while a normal regression separately proves
+request-quota capture of lazy global metadata. The proposed metadata correction
+and deep-cleanup CPU correction are compiling, not qualified. The first 30
+paired cleanup processes confirm zero helper allocation requests but expose a
+17.4x median CPU cost for deep branches. Preserve this result and all failed
+build/control invocations. Execution remains OVH-only and the producer is
+untouched. The later R3 revision passes 16/16 normal, 17/17 ASan/UBSan and
+16/16 default TSan component invocations with explicit child-completion markers.
+A second 30-process paired comparison removes the original deep-comb CPU
+penalty while retaining zero helper cleanup allocations. Wide-fixture process
+peak-RSS median falls by 348,160 bytes; this is not whole-node evidence.
+A 510-setting guarded parse diagnostic releases its credits correctly, but
+an unguarded response-dump control terminates at full quota. Its guarded
+counterpart recovers. R4 then passes 16/16 normal, 17/17 ASan/UBSan and 16/16
+default TSan component invocations. A separate stock-dependency partial-copy
+sweep still terminates at quota 10,793 despite an outer guard. The proposed
+build-owned JSON destructor backport passes four direct copy/dump controls,
+nine normal/diagnostics/sanitizer destructor invocations and seven staging
+recipe tests on OVH. Its SDK/native integration is compiling; these scoped
+results do not qualify it. A real HTTP fixture separately measures 1,019,389
+additional attributed bytes at service entry for a 262,144-byte argument;
+earlier release of redundant encoded parameter trees is not yet qualified.
+The private collector cleanup-scope incident and uncertain prior file state
+are preserved separately from native results. No C13/C14 candidate is frozen.
+M1 remains open.
+
+Integrated R5 completes 18/19 normal invocations; its only failure is a gRPC
+large-status fixture using the client's default metadata limit. A diagnostic
+confirms status 8 and the peer metadata limit; a test-only enlarged client now
+has a separate default-limit rejection control. The real HTTP parameter fixture
+passes with a 281,499-byte service-entry delta against the earlier 1,019,389;
+this is not paired RSS evidence. A separate 14-fault baseline reproduces four
+wrong native payer inputs and two misclassified local refusals in base58
+normalization. R6 rethrows resource failures, preserves valid base64 fallback
+and passes 14/14 normal RPC invocations with zero mismatches/misclassification
+and exact final credits. Scoped ASan/UBSan and default TSan are underway.
+The [current source ownership review](low-resource-lr2-m1-json-cleanup.md#current-ownership-review-before-candidate-freeze)
+also identifies unaccounted gRPC output-state/interceptor/registry control
+allocations; these require assessment before completing M1. No C13/C14 source
+is frozen, and final whole-node gates remain unmet. R6 ASan/UBSan subsequently
+passes 17/17. Default TSan passes 15/16 with a prebuilt-core gRPC metadata/read
+signal. A pure-SDK control reproduces it without the Teleno server/allocator;
+the signal remains unresolved while a pinned instrumented SDK is built.
+Five paired input/large-receipt processes per side show 737,890 fewer live
+attributed bytes but a 462,848-byte higher median peak RSS, with overlapping
+CPU/wall ranges and zero filesystem blocks. This is a negative physical-memory
+result. R7 source avoids creating the extra parameter tree and byte-field
+string copy. Its later revision passes 13/13 normal, 16/16 scoped ASan/UBSan
+and 15/15 default TSan HTTP checks. Five new paired measurements show 548,864 B
+lower median process peak RSS, lower in every pair, with equal CPU/wall
+medians. This scoped result does not establish whole-node savings.
+
+Pinned instrumented gRPC passes clean/intended-race/unchanged-native controls
+(3/3). R8 startup/per-call control attribution passes 2/2 normal, 4/4 default
+TSan and 5/5 ABI-compatible ASan/UBSan invocations. Preserve the first 4/5
+ASan sequence: its public context layout mismatches the prebuilt runtime.
+The upstream GRPC_ASAN_SUPPRESSED compatibility mode restores that ABI while
+compiler instrumentation remains active. Earlier R6 gRPC ASan success is not
+valid gRPC qualification. Expanded simultaneous cancellation/stop and actual
+callback clean/fault controls pass 3/3 normal, 9/9 scoped ASan/UBSan and
+5/5 default TSan invocations. Final source, complete native suites and whole-node
+resource/restart evidence remain unmet. C13 source freezes at 2026-10-21T09:51:26.273826+00:00 after the expanded scoped checks.
+C14 remains unused. The complete final-source native build and OVH suite,
+sanitizers, profiles and whole-node/restart gates are pending.
+
+C13's complete normal build and actual version/help pass. Its normal suite
+reaches **41/90 functional passes**, then stops because retained generated test
+data/co-staged executables breach the strict disk budget by **11,403,264 B**.
+Verified external preservation and retirement restore the recorded disk margin;
+the full-history database is unchanged. The 21 focused ASan/UBSan binaries
+compile and are externally hash-verified, without sanitizer execution yet.
+Exact C13 status regressions independently fail full-quota refusal ownership,
+percent-encoding workspace, copy-failure handling and pre-boundary exception-text
+materialization. An unfrozen first repair passes three requirements and still
+fails the argument-copy case. A revised repair passes 7 normal, 13 scoped
+ASan/UBSan and 9 scoped default-TSan checks with working clean/fault controls.
+Its first ASan launch cannot find the runtime library; a separate phase with
+the same binaries and verified runtime passes. Final-source native/sanitizer
+and whole-node gates remain; C14 is not frozen.
+See the [C13 checkpoint and evidence](low-resource-lr2-m1-json-cleanup.md#c13-remains-unqualified-resource-guard-and-status-path-defects).
+Preserve every failed result. M1 remains open and the producer is untouched.
+
+The corrected **C14** snapshot freezes at **2026-10-21 12:14:23.846369 UTC**,
+archive `8400d631109f458c61c82ad12ae24aab2ce35f670c160450d595b0e2bb1b8869`,
+with 471 files. Its complete normal build is running without tests on the
+miner. The configured 94-entry suite retains every C13 entry; the first four
+registered source-recipe tests pass on OVH. Per-case binary staging, generated
+data preservation and disk/resource sampling replace C13's accumulating
+execution layout. No whole-history observer starts or producer operations
+occur. See the [current C14 checkpoint](low-resource-lr2-m1-json-cleanup.md#c14-frozen-for-full-qualification).
+
+C14's complete normal build subsequently succeeds with 71 externally verified
+ELF outputs and 167 linked-library identities. Exact node SHA-256:
+`71bc0b0773cbd108d4783b39eccf9d16289b9f1f5a7cf4e077d10fdf168d568d`.
+The interrupted caller's incomplete summary is reconciled against recorded
+exit zero, the successful unit journal and frozen-source verification, without
+rebuilding. A 21-case core phase uses 19 ELF files identical to the final
+outputs. The complete 94-entry normal suite/CLI remains pending, and the
+separate final-source ASan/UBSan build is running. No whole-node completion is
+claimed.
+
+C14 subsequently passes **49/94 normal entries and both native CLI checks**,
+then the SC5 synthetic restore experiment crosses the strict disk budget by
+26,140,672 B. Its interrupted result and all 647 generated entries are externally
+preserved before exact owned-copy retirement; the history database is unchanged.
+A separate continuation covers the 44 unexecuted cases without erasing that
+failure. The 22 final-source ASan/UBSan outputs are externally verified; final
+sanitizer execution and TSan compilation remain pending. **Complete normal
+qualification and M1 remain open.** See the [C14 storage failure](low-resource-lr2-m1-json-cleanup.md#c14-normal-suite-storage-failure-remains-open).
+
+The distinct continuation completes all 44 scheduled cases. Exact JUnit/source
+reconciliation proves **93/94 normal passes and two CLI passes**; SC5 remains
+a failed resource gate. Among passing cases, minimum strict margin is
+228,212,736 B and minimum MemAvailable is 3,262,717,952 B; the complete evidence
+also retains the negative SC5 margin. Both 22-ELF sanitizer builds are verified;
+ASan/UBSan execution has started with working clean/fault controls. Unfrozen
+SC5 retirement revision 2 passes 15 helper unit tests; the full experiment and
+Python-compatibility revision remain pending. No final-node completion follows.
+
+## M1 execution-time amendment — 2026-10-21
+
+The operator removes overall execution-time limits for continuing M1 memory
+optimization, compilation and qualification. Continue until the applicable
+acceptance criteria are proved or a concrete blocker requires intervention.
+Do not use an eight-hour cutoff or inherited expired-run deadline to stop
+future work. The [current objective and execution controls](../implementation/issue-9-m1-aggregate-goal.md#execution-controls-and-completion--no-overall-time-limit)
+govern continuation. Source/candidate identities, meaningful diagnostics,
+non-time resource guards, exclusive OVH execution and the exclusion of the
+operational Hetzner producer remain. Closed runs below retain their original
+deadlines, failures and counters; their expiry is not a future work limit.
+
+## Current M1 purpose and terminal checkpoint — 2026-10-21
+
+The [clarified objective](../implementation/issue-9-m1-aggregate-goal.md#current-objective--clarified-by-the-operator-2026-10-21)
+is to optimize actual Teleno application memory: reduce unnecessary
+allocations, copies, workspace and retention, and qualify lifetime-owned
+aggregate mempool/transaction admission. Accounting counters alone are not
+physical savings. All executable M1 work remains OVH-only and excludes the
+operational Hetzner producer. This wording starts no new attempt.
+
+C11/C12 expired unqualified at its original **2026-10-21 00:26:31.428768 UTC**
+deadline. C11 froze at **2026-10-20 22:09:33.956325 UTC**, source archive
+`95b2914962e9127b18bbc88b4fe535cd69dcc96c3465d46cbca7554204e36bd3`.
+Its exact OVH component sequence passes **6/8** invocations. Concurrent
+successful HTTP output times out with the fixture's 256-MiB policy; an injected
+post-acceptance allocation failure aborts in `nlohmann::json`'s `noexcept`
+destruction. A single diagnostic-only OVH trace confirms that stack. C12
+expired unused; no whole-node C11 binary, complete normal/sanitizer suite,
+native CLI, paired comparison or final whole-node result is available.
+See the [terminal repair evidence](../implementation/issue-9-m1-receipt-output-repair.md#terminal-result).
+
+The separate C9 observer sequence stopped unqualified at **2026-10-20
+18:32:58.009720 UTC** after its additional 1-GiB early-stop margin was crossed.
+The final strict 40-decimal-GB margin, including the full 8-GiB recovery
+reserve, remained **998,899,712 bytes**. Readiness passed, but only about
+21.5 minutes of the requested mixed observation completed and no reopen ran.
+Kernel peak RSS was **421,789,696 bytes**; sampled minimum host MemAvailable
+was **2,960,740,352 bytes**, with no recorded OOM/swap. This is incomplete C9
+evidence, not qualification of C11. A read-only OVH check at reconciliation
+finds no native test observer or running attempt unit. M1 remains open.
+
+## M1 exclusive test host — operator amendment, 2026-10-20
+
+All future executable M1 tests run only on the new isolated OVH VPS:
+development regressions, failure injection, complete native/sanitizer suites
+and controls, controlled-chain fixtures, paired measurements and CLI checks.
+My Passport and the authorized builder may prepare/store artifacts and compile
+without running tests. Preserve prior builder/Mac results as historical
+evidence, not qualification for the new final candidate. Keep current C9 and
+C11/C12 deadlines/counters, physical limits and recovery reserve unchanged.
+Later OVH tests must not compete with the active frozen-C9 sequence; the
+operational Hetzner producer remains untouched. See the
+[active repair goal](../implementation/issue-9-m1-receipt-output-repair.md#exclusive-test-host--operator-amendment-2026-10-20).
+
+## Additional isolated VPS: frozen C9 qualification — 2026-10-20
+
+Status: **single-copy staging, offline validation/held activation and observer
+readiness pass; mixed observation stopped early, reopen not run; closed
+unqualified for M1**.
+The unchanged finite window is **15:19:53.510265–23:19:53.510265 UTC**,
+with no new source candidates/builds and at most two observer starts. The
+operational producer remains outside scope. Generated artifacts, controls
+and evidence are under
+`/Volumes/My Passport/teleno-m1-ovh-qualification-20261020-sgjo6v1a/`.
+
+The additional host has two x86_64 CPUs, 4,000,022,528 physical RAM bytes,
+Ubuntu 26.04/ext4 and no swap. Its 40-GiB physical device does not enlarge the
+40,000,000,000-byte acceptance budget. Source verification matches all 287
+checked C9 runtime/build/script/test files; the executable remains SHA-256
+`bea7856f367d008e6ab43a1b9ecb016cab1623197e60dd928b936150347d0aa8`.
+Version/help and startup/metadata preflight pass. A harness-only preflight
+argument refusal is preserved separately. The complete selected input is
+383 files / 24,114,178,822 bytes, with unchanged manifest/inventory pins.
+
+Guarded native staging started at **15:56:41 UTC** and completed at
+**16:22:44 UTC**: 383 files / 24,114,178,822 transferred payload bytes,
+64,057,344-byte kernel peak RSS and 2,382,008,320-byte minimum sampled strict
+disk margin, including the recovery reserve. Offline validation/held activation
+started at **16:22:46 UTC** and passed at **16:46:18 UTC**, checking 46,458,363
+records, nine column families and 917,316 state objects. Its kernel peak RSS
+is 64,163,840 bytes; minimum sampled strict disk margin is 2,380,722,176 bytes
+including reserve. Structural validation does not prove historical execution.
+Observer start one began at **16:46:22 UTC**. Readiness passes at **18:11:27
+UTC** with independent canonical head ID/root agreement at height 40,375,538,
+LIB 40,375,478 and zero height lag. The irreversible block ID agrees; the
+reference omits its receipt state root. The full one-hour mixed read-only
+observation began at that time and stopped at 18:32:57 UTC under the extra
+1-GiB disk guard; the full hour and reopen were not completed.
+A reviewed finite
+coordinator gates offline validation, held activation, observer catch-up,
+one-hour read-only mixed observation and a single clean reopen on successful
+prior results. It cannot restart failed production or touch the existing
+producer. Physical/runtime gates and complete M1 ownership/admission are
+pending; download-process memory is not node-runtime evidence. See the
+[qualification plan and explicit remaining conditions](../implementation/issue-9-m1-isolated-vps-qualification.md).
+
+A separate, one-build header-only Linux diagnostic against unchanged C9 headers
+reproduces raw-request metric overcount: 69 actual bytes are reported as 100,
+and a 512-byte over-aligned request as 783. The disabled control and final
+credit release pass. It consumes no node candidate build and makes no native
+source change. See the [coverage audit and diagnostic identities](low-resource-lr2-m1-isolated-vps.md).
+
+The same unchanged-C9 linked libraries also reproduce a chain-receipt output
+gap: single/mixed HTTP bodies retain 4,538,368 / 4,546,560 capacity bytes while
+their M1 counter is back to 240 bytes. The owned mempool-output control passes.
+This synthetic interface test has no controller, ledger, keys or external
+network; it is missing attribution rather than an observed leak.
+
+## C11/C12 receipt-output repair — started 2026-10-20
+
+The separate finite [repair run](../implementation/issue-9-m1-receipt-output-repair.md)
+starts at **16:26:31.428768 UTC**, ends no later than
+**2026-10-21 00:26:31.428768 UTC**, and permits at most two frozen candidates,
+C11/C12. C11 later froze and failed component qualification as recorded above;
+C12 expired unused. The old unused C10 remains unused; no closed
+attempt or simultaneous C9-VPS limit is reset. Generated data and durable
+control are under
+`/Volumes/My Passport/teleno-m1-receipt-output-repair-20261020-zxyqrmy1/`.
+
+Development moves obsolete raw-wrapper/alignment policy out of the actual
+request counter and into supplementary reservation, preserving total admission
+bytes. The new Linux regression fails against unchanged C9 and passes against
+the development correction, including final-owner and concurrency checks.
+Full candidate qualification and the receipt-output repair remain pending.
+No operational producer, deployment, funds or signing action occurs.
+
+Development now adds an explicit synchronous native receipt-preparation
+callback before accepted-work publication. The opt-in HTTP path prepares its
+complete response before acceptance and retains single/mixed output credits
+through write completion. New regressions cover receipt lifetimes, cancellation,
+capacity/refusal/retry, byte-encoding preservation and canonical RPC isolation.
+At this historical development snapshot the code was not yet executed or
+qualified. The build-only HTTP component
+now passes after preserving and correcting relocated-include harness failures;
+both objects use the pinned C9 generated/dependency paths. Control/development
+ELF SHA-256 values are respectively
+`ae5d5391da75edb0fe615ffe7e4856243762b650a6775f382883989601d74bf7` /
+`8e5fd7857a1c54b820a16b02bd25722adafd81f5c18502f3e119620c7436a214`.
+A later post-acceptance allocation-failure fixture is not part of that snapshot.
+The unchanged-C9 gRPC serialization diagnostic also builds (ELF SHA-256
+`5df30ba8539b7a2c61a7a5b4459bdcd927f866e9ce7e1078e836b92d3ffbcb4f`).
+No tests run on the builder. All future execution remains OVH-only and separate
+from C9's resource observation. Later exact C11 component results are recorded
+above; final qualification and full M1 evidence remain unproved.
+
+A separate bounded error-boundary diagnostic compiles once and links against
+both the unchanged-C9 and development HTTP implementations, without executing
+on the builder. It will check single/mixed HTTP error bodies and native gRPC
+error status using synthetic data. At most five OVH executions follow closure
+of the original six-component queue and C9 observation. Its controls retain
+the original C11/C12 deadline and all earlier build/candidate counters. No
+error-output defect or repair is claimed before inspecting those results.
+
+## M1 C9/C10 shorter-predecessor read follow-up — 2026-10-20
+
+Status: **one frozen candidate C9 passes its scoped native qualification;
+the finite attempt closed unqualified for M1 at 11:11:04 UTC**. The separate attempt starts at
+**08:00:37.080251 UTC**, has an unchanged **16:00:37.080251 UTC** deadline and
+allows at most C9/C10. Its evidence and control are under
+`/Volumes/My Passport/teleno-m1-nonce-read-20261020-l2q4z85b/`.
+Frozen C8 reproduces two Linux ASan heap-buffer-overflow reads in nonce/count
+lookup when a shorter predecessor key precedes a longer queried account. C9
+checks the key length before prefix comparison and adds a regression for both
+reads, normal results, accepted transactions and credit release. Its source
+archive SHA-256 is
+`40c28493e7ff0c2985d85f2ce1a278c47e209e5e23d16af1bbe2641070eab9d5`;
+the normal node binary SHA-256 is
+`bea7856f367d008e6ab43a1b9ecb016cab1623197e60dd928b936150347d0aa8`.
+The full Linux suite passes 74/74; focused ASan/UBSan and TSan each pass 22/22,
+their separate cleanup checks and working detector controls. A controlled
+768-MiB-policy 100-block/12,800-transaction production/reopen passes with
+zero refusals, matching block ID/root/archive and 816,521,216-byte peak RSS.
+The first two-job **build-only** OOM is preserved; the same frozen source
+builds with one job under a 4-GiB build cgroup. Five paired C8/C9 controlled
+samples and all ten reopens pass. Median elapsed is 333.25/315.29 seconds,
+CPU 447.62/446.03 seconds, peak RSS 826,904,576/825,638,912 bytes and M1
+peak accounting identical at 564,639,994 bytes. Paired elapsed differences
+range from +119.98 to -85.48 seconds; no code-caused saving or slowdown is
+claimed. C10 was unused. Sanitizer exclusions, exact identities and remaining M1 gates are
+in the [C9 report](low-resource-lr2-m1-nonce-read.md). No reference VPS or
+producer operation is part of this attempt.
+
+## M1 C7/C8 follow-up — 2026-10-20
+
+Status: **C7/C8 finite attempt closed unqualified at 07:58:20 UTC with both
+slots consumed. C7 fails focused TSan. C8 passes 73/73 normal Linux, 21/21
+focused ASan/UBSan and 21/21 focused TSan entries plus both cleanup checks,
+but five paired controlled samples show unresolved CPU/latency slowdown.
+M1 remains open**.
+The separately persisted run starts at **03:52:11.516774 UTC**, has a fixed
+**11:52:11.516774 UTC** deadline and at most two frozen candidates. Owned
+generated data and control are under
+`/Volumes/My Passport/teleno-m1-output-gap-20261020-rF9mPYUo/`. The exact C6
+source archive is the starting input. The first diagnostic reproduced a mempool
+JSON-RPC response whose HTTP body outlived its M1 attribution. C7 froze at
+04:17:59 UTC with source archive SHA-256
+`808ae567ad42864ac0f85b46cb4ff7bb93f212537e649d90070541f2706bbb7b`.
+Its corrected complete normal run passes 73/73 with node binary SHA-256
+`ee933b8897f7cf6661256d36322c0aa61f54191b0e6ac1e1b2e683dde0ffa8c0`.
+The initial parallel build OOM and 71/73 harness-path run remain preserved;
+neither consumed C8. See the [C7 output report](low-resource-lr2-m1-output-ownership.md).
+The ASan/UBSan clean/known-fault controls and separate cleanup check pass; its
+exact build archive is verified on My Passport before remote cleanup. C7's
+TSan controls work, but session-lifecycle and mempool-output roundtrip tests
+report a session executor lifetime race. The TSan result and exact build archive
+are preserved. C8 changes only the JSON-RPC session source relative to C7;
+its frozen archive SHA-256 is
+`16e1d33d1ef197b19ceb636e3283baaadfa1b659585f21916eb691a5b52c42ea`.
+Two pre-freeze full lifecycle TSan runs pass. Frozen C8 also passes its
+normal/sanitizer suites and an isolated 768-MiB-policy profile with 12,800
+signed local transactions, zero aggregate refusals and matching root/archive
+after reopening. The profile's one-sample 362.66-second creation time versus
+C6's 192.15 seconds is not an attributed regression by itself. The completed
+five-pair comparison has C6/C8 median creation times of 188.59/298.31 seconds,
+CPU times of 309.87/445.53 seconds and producer p95 of 1.171/1.714 seconds.
+Median peak RSS is nearly unchanged at about 820 million bytes (782 MiB),
+and M1 peak accounting is identical. The slowdown is observed but not causally
+assigned because the
+builder had variable cohost load and each run generated different block IDs.
+Broader M1 ownership, policy and VPS evidence remain open. See the
+[output ownership report](low-resource-lr2-m1-output-ownership.md).
+No reference VPS or producer operation is part of this attempt. Preserve the
+closed C5/C6 evidence below.
+
+## M1 C5/C6 follow-up — 2026-10-20
+
+Status: **C5/C6 closed unqualified; M1 remains open**. The operator authorized necessary further
+M1 attempts. This distinct eight-hour run started at **00:35:55.857720 UTC**
+and ends at **08:35:55.857720 UTC**, with at most two frozen candidates C5/C6.
+Control, source-start manifest and generated data are under
+`/Volumes/My Passport/teleno-m1-followup-a5711dmt/`. The 449-file C4 source
+manifest matches the current worktree for all runtime/build/test files; eight
+documentation files changed later. Preserve C1–C4 evidence and deadlines.
+Frozen C5 passes 68/68 normal, 16/16 scoped ASan/UBSan and 15/15 scoped
+default TSan after a recorded generated-test timeout adjustment. It is
+unqualified: its 256-MiB controlled workload refuses admission after 43 blocks,
+and the same 768-MiB workload stops at block 62 on its 900-second time limit.
+Three stack samples reach the linear allocation-owner delete lookup. Five
+alternating C5/C6 development pairs of that path show median 2.256 → 0.014
+seconds for 200,000 uncharged deletes while 100,000 charged owners remain,
+with about 1 MiB higher RSS for C6's larger static table. This is a component
+benchmark, not a whole-node saving claim.
+
+C6 freezes only that owner-table runtime change from C5 and passes 68/68 normal
+Linux entries with unchanged source/binary hashes. Two isolated custom-chain
+100-block/12,800-transaction runs, including one at a 768-MiB aggregate limit,
+pass nonempty mempool admission, block/receipt continuity and exact clean
+reopen/replay; peak RSS is 818,077,696 and 808,235,008 bytes respectively,
+with zero child swap and zero aggregate refusals. These are on the separate
+16-GiB Linux builder under a 2-vCPU/2.5-GB/no-swap child limit, not the actual
+4-decimal-GB reference VPS. C6 scoped default TSan passes 15/15 main entries
+plus separately bounded cleanup with working controls. Focused ASan/UBSan
+passes 15/15 main entries and separate cleanup with working controls. The
+finite run closed at 03:50:42 UTC with both source slots consumed; its exact
+C6 ASan archive was verified before removing the owned remote build. Complete
+M1 attribution, target-host physical margins and integrated
+whole-node behavior remain unproved. See the
+[C5/C6 report](low-resource-lr2-m1-repair.md). No live VPS producer operation
+is authorized here.
+
+## Authorized M1 repair allowance — 2026-10-19
+
+Status: **finite C3/C4 attempt closed unqualified; M1 remains unmet**. The operator
+authorized a separate finite allowance from **14:16:04 to 22:16:04 UTC**, with
+at most two additional frozen candidates, C3/C4. Both slots are consumed and
+work stopped within the unchanged deadline. The first attempt below stays closed and
+unqualified. Its counters, evidence and deadlines are unchanged.
+
+The new attempt reproduced the inherited 1,008-byte/28-allocation query-copy
+leak and a generated oneof allocation-failure destruction crash. C3 failed its
+normal suite (44/68); a pinned RocksDB `malloc_usable_size` crash traced to
+the C3 accounting prefix. C4 repairs that interoperability fault and isolates
+process-global protobuf reflection initialization from local admission quotas.
+Its frozen 449-file source archive is identified in the
+[repair report](low-resource-lr2-m1-repair.md), and the exact C4 normal Linux
+suite passes **68/68** with version/help and unchanged source/binary hashes.
+Frozen C4 also passes 15/15 focused Linux ASan/UBSan entries, a separately
+bounded cleanup entry and working clean/UAF/UB detector controls. Its inherited
+decoded-query fault sweep no longer leaks under this instrumentation. Default
+TSan passes 14/15 plus cleanup, with a lock-order-inversion warning in the
+aggregate mixed-fork test; a separate race-only detector run passes 15/15 plus
+cleanup with working clean/known-race controls. The default warning is retained.
+Five baseline/C4 pairs per scenario show lower cumulative `new` requests but
+approximately 1.1 MB higher RSS in both small synthetic workloads, with slower
+ordinary admission. A representative Linux M1 profile and complete-node
+qualification remain missing. No VPS operation was performed.
+
+Owned generated data:
+`/Volumes/My Passport/teleno-m1-repair-20261019-n2bhladg/`.
+See the [amended goal](../implementation/issue-9-m1-aggregate-goal.md) and the
+requested [legacy applicability register](../implementation/legacy-applicability-of-teleno-findings.md).
+Legacy service failures remain unproved; source similarity is not a reproduced
+legacy defect.
+
+The formerly leaking aggregate ASan/UBSan entry passes in the separately
+identified dependency-repair development stage (288.093 seconds). This precedes
+the later allocation/oneof integration and is not final qualification. See the
+[repair-stage identities and remaining gates](low-resource-lr2-m1-repair.md).
+
+## Finite M1 aggregate-memory implementation — 2026-10-19
+
+Status: **finite attempt unqualified; M1 and LR2 NOT complete**. Fixed UTC interval:
+08:30:38–16:30:38, at most two frozen candidates. The first Linux reproduction
+shows retained tombstones after record-owner credits reach zero. Owned budget,
+block/LIB preparation and shared native transaction-work changes are implemented.
+C2, the second and final candidate, is frozen at 11:33:04 UTC with runtime/build/
+config manifest `144e579e5d703ace10e4db403d9c56a34ee0d51a3b3046b0ff16920fb73f79d8`.
+Its eight development entries pass; the frozen Linux build, version/help and
+all 66 normal entries subsequently pass. C2's instrumented aggregate entry
+fails LeakSanitizer: 1,008 bytes in 28 allocations during decoded-query failure
+injection. Eleven of twelve focused entries pass, including the separately
+bounded 145.883-second cleanup. Clean/UAF/UB controls work. Scoped TSan passes
+12/12 with working clean/race controls; it does not clear the ASan leak failure.
+Two synthetic workloads each have five pairs against a freshly compiled exact
+starting checkpoint. They measure accounting overhead, not RAM savings.
+Development component passes do not qualify the final implementation. Other
+nonce/RC/count read workspace, escaped RPC/execution output ownership and representative Linux profile selection
+remain explicit gaps. See the [finite goal](../implementation/issue-9-m1-aggregate-goal.md)
+and [ownership/evidence report](low-resource-lr2-aggregate-memory.md). No live VPS
+operation is authorized by this run; D1/P2/R1/V1/S1/Q1/H1 remain open where their
+required final evidence is missing.
+
+A normal C2 adapter probe retains 256 protobuf responses (2,123,520 serialized
+bytes) after the native vector releases its reservation. Current reservations
+remain 50,618 bytes. This directly proves the escaped-output gap; it is neither
+a heap/RSS total nor a successful M1 lifetime bound.
+
+The same query-fault leak is independently reproduced against the freshly built
+starting checkpoint, with a clean-query control. It is inherited protobuf
+exception-safety behavior; it still fails C2 qualification. No third runtime
+candidate is allowed in this finite run.
+
+The final planned native check finishes at 13:06:47 UTC, within the original
+deadline. Both candidate slots are consumed. Source implementation stops with
+the listed M1 failures and omissions; this is not successful goal/M1 completion.
+
 ## Native alpha publication checkpoint — 2026-10-19
 
 Native [1.3.0-alpha.1](https://github.com/koinos/teleno/releases/tag/teleno-node-v1.3.0-alpha.1) is published from `2380fcb545ed056a548adbcd5e1cffcefe61ecc0`. All 64 normal Linux
@@ -639,7 +1242,7 @@ No live-server or VM-creation authorization follows from this preference.
 
 | ID / owner | Current accounting / effective policy | Remaining implementation or experiment | Invariants and regression gate | Measurement / artifact / status |
 | --- | --- | --- | --- | --- |
-| M1 / native mempool + admission | Per-account count/RC, expiry; insertion before observers; failure-atomic fork admission/cleanup; indexed inventory; opt-in work jobs/wire and shared pending-record owner/capacity reservations through ancestor/caller lifetimes | Complete other metadata/staging/retained-fork accounting and capacity; encoding/emergency cleanup workspace; ingress/output/VM policies; block/LIB allocator gates | Allocation/readmission/nonce/root/tombstone/lifetime regressions; exact capacities/concurrent native admission, checked cleanup decoding and local-overload RPC/P2P, receipt parity; machine OOM/integrated races remain | [M1-A/B](low-resource-lr2-admission.md), [M1-C](low-resource-lr2-admission-atomicity.md), [M1-D](low-resource-lr2-retained-memory.md), [M1-E](low-resource-lr2-transaction-work.md), [M1-F](low-resource-lr2-cleanup-atomicity.md), [M1-G](low-resource-lr2-pending-records.md); string capacities/wire bytes are not heap/RSS totals; **record axis implemented, complete aggregate/whole-node bounds remain open** |
+| M1 / native mempool + transaction work | R15 shares lifetime-owned ordinary admission across records, retained forks/indexes/tombstones, nonce/RC/count reads, staging, native work/candidate and selected output owners. Proposed tested ordinary policy: 768 MiB; HTTP fallback: separate 64 MiB; gRPC refusal controls: separate 1 MiB. Instrumented canonical/recovery, fixed startup and internal inspection work remain counted with explicit exemption. | None for the scoped R15 M1 gate. Keep R1 ingress/other services, P2 SDK queues, V1 VM, S1 non-mempool state and wider D1/Q1/H1 work separate; these policies are not a universal heap/RSS ceiling. | 104/104 normal, 2 CLI, 63 focused ASan/UBSan and 61 default-TSan cases pass with controls. Eight owner groups have hash-verified regression references. Exact-source 100-block/12,800-transaction creation/reopen and 8,852 concurrent queries pass; peak RSS 705,712,128 B. The exact full-history observer passes 3,600 error-free mixed-read cycles, 31 independent comparisons, clean restart and interruption/recovery; peak 419,278,848 B, minimum target-adjusted host MemAvailable 2,921,375,744 B, strict disk margin after reserve 538,800,128 B. | Five equivalent pairs per measured workload preserve neutral/worse results; HTTP fixture median peak RSS falls by 7,917,568 B, without whole-node/single-edit attribution. [R15 report](low-resource-lr2-m1-r15.md), [final inventory](../implementation/issue-9-m1-owned-memory-inventory.md), [objective](../implementation/issue-9-m1-aggregate-goal.md); **M1 complete for exact R15** |
 | P1 / P2PNode sync workers | Now owns connected and retired generations; count limit 64 includes draining workers/current peers; bytes are not capped | Implemented join ownership, safe-boundary cancellation, bounded overlap, startup rollback and drained stop; real transport cancellation remains P2 | Baseline failure reproduced; local gated RPC/batch, 200-cycle churn, capacity/reconnect/zero/start-failure/stop tests pass; already-admitted application may finish | Five after-only process samples, high water 2/final 0; [report](low-resource-lr2-workers.md); **implemented and functionally verified; supported race/lifetime qualification pending** |
 | P2 / transport + peer bookkeeping | Accepted IDs; owned RPC/deadlines/local refusal; finite error/optional advice; explicit dial and projection lifetime credits; one-owned SDK addresses with shared limits and owned collection | Other SDK/protocol/key/DNS metadata, implicit work, aggregate decoded/output/control/caller ownership and complete lifecycle/watchdogs | Failure-atomic address/advice/index publication, protected roots, retained-slot/old-generation accounting, real RPC under bootstrap saturation, collector/restart/concurrent statistics and detector controls | [P2-G](low-resource-lr2-sdk-addresses.md), earlier checkpoints; current Mac/Linux 60/60, paired mechanisms, twelve fixtures per separate sanitizer, fifteen baseline commands and runtime CLI/hash pass; **full P2 open** |
 | R1 / JSON-RPC | Owned sessions/deadlines, <=64 slots; body 1 MiB/header 8 KiB; completed body-capacity attribution/release; per-item batch serialization and moved results | Complete simultaneous service/JSON/protobuf/serialization/transport accounting and compatible output admission without truncation or false post-commit refusal | Full replies, pipeline/CORS/batch reuse, exact bytes/order and later dispatch after strict UTF-8 failure, slow readers/stop; supported races remain | [R1-A](low-resource-lr2-rpc-bodies.md), [R1-B](low-resource-lr2-rpc-batch.md); scoped retention/working-set reductions, not final-output cap or Linux node RSS; **local corrections verified, R1 open** |
@@ -1215,3 +1818,36 @@ Existing primary native `--version` and `--help` pass; identity remains
 pass. No native code, version, producer/configuration, source-trust, commit,
 push, release, deployment or restore activation change. Existing cleanup
 records are point-in-time evidence, not new LR2/Linux qualification.
+
+
+### C14 scoped sanitizer and further refusal checkpoint
+
+C14 has 54 unique successful scoped ASan/UBSan checks across 55 invocations,
+retaining the original cleanup timeout and separate unchanged-ELF diagnostic
+pass. Default TSan is running with working generic/SDK clean/race controls.
+SC5 revision 3 has 16 helper-unit passes, not a full native experiment.
+A large-ID HTTP overload diagnostic reproduces 524,420 untracked requested bytes
+in C14; its unfrozen bounded, borrowed-ID correction is not yet qualified.
+C14, M1 and final whole-node gates remain open. See the
+[continuation report](low-resource-lr2-m1-json-cleanup.md#reproduced-http-refusal-ownership-gap-and-unfrozen-repair).
+
+
+The later C14 checkpoint reconciles **52/52 default TSan invocations** with
+working generic and actual SDK controls; this does not close M1. The unfrozen
+HTTP refusal revision 1 passes individual ownership and fails mixed-batch
+handling with abort 134. A preserved terminate trace locates temporary JSON
+allocation inside the library's `noexcept` version comparison. Revision 2 borrows
+the existing version string and adds same-service retry after each fault;
+compilation is in progress and qualification remains open. Preserve SC5's
+failure and the consumed C13/C14 slots. See the [detailed report](low-resource-lr2-m1-json-cleanup.md).
+
+### R15 checkpoint: 2026-10-23
+
+R15 passes 104/104 registered normal checks, both native CLI checks,
+63/63 focused ASan/UBSan and 61/61 default-TSan cases on OVH. Paired
+measurements, controlled-chain create/reopen and exact-node full-history
+mixed-read/restart/interruption-recovery pass. Final owner review completes
+M1 for exact R15. The
+[R15 report](low-resource-lr2-m1-r15.md) records
+exact identities, the preserved normal restore early guard and TSan
+coordinator artifact-prefix failure. No Hetzner operation occurs.

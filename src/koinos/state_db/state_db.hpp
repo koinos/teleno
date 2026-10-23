@@ -1,6 +1,7 @@
 
 #pragma once
 #include <koinos/state_db/state_db_types.hpp>
+#include "core/owned_memory_budget.hpp"
 
 #include <koinos/protocol/protocol.pb.h>
 
@@ -9,6 +10,7 @@
 #include <any>
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <shared_mutex>
 #include <vector>
@@ -142,6 +144,7 @@ public:
 protected:
   virtual std::shared_ptr< abstract_state_node > shared_from_derived() = 0;
 
+  node::OwnedMemoryBudget::Lease _implementation_memory;
   std::unique_ptr< detail::state_node_impl > _impl;
 };
 
@@ -447,6 +450,13 @@ public:
    */
   void commit_node( const state_node_id& node_id, const unique_lock_ptr& lock );
 
+  // Internal mempool block publication. The callback may only introduce new
+  // nodes and change fork metadata; it must not mutate existing delta payloads,
+  // commit a root, close the DB or release the supplied unique lock. A map-only
+  // metadata snapshot rolls back without allocation if preparation throws.
+  void with_reversible_fork_update( const unique_lock_ptr& lock, const std::function< void() >& update );
+  bool contains_node( const state_node_id& id, const unique_lock_ptr& lock ) const;
+
   /**
    * Get and return the current "head" node.
    *
@@ -536,6 +546,7 @@ public:
   state_node_ptr get_root( const unique_lock_ptr& lock ) const;
 
 private:
+  node::OwnedMemoryBudget::Lease _implementation_memory;
   std::unique_ptr< detail::database_impl > impl;
 };
 

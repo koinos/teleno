@@ -124,7 +124,7 @@ Common sections:
 | --- | --- |
 | `global` | log level, fork algorithm, global jobs, RPC allow/deny lists. |
 | `chain` | verification, worker count, resource and pending transaction limits. |
-| `mempool` | native in-memory pending-record owner/capacity admission policy. |
+| `mempool` | native retained-record and aggregate admission policy. |
 | `p2p` | listen address, seeds, peer discovery, peer logging, checkpoints. |
 | `jsonrpc` | JSON-RPC listen address and worker count. |
 | `grpc` | gRPC listen address and worker count when enabled. |
@@ -202,7 +202,93 @@ above its initial wire-size reservation before growth is refused. Persistent
 backends copy through their existing write/batch path; no format/durability or
 history policy changes. Select any VPS values from representative Linux
 whole-node measurements, not Mac diagnostics. See [M1-G evidence](validation/low-resource-lr2-pending-records.md).
-Complete aggregate/cleanup-headroom and whole-node qualification remain open.
+That M1-G checkpoint covers record owners only. The R15 aggregate domain and
+its separately qualified profile are described below; wider issue-9 whole-node
+qualification remains separate.
+
+### Aggregate native memory admission (LR2 development)
+
+```yaml
+mempool:
+  aggregate-max-accounted-bytes: 0
+```
+
+Zero disables this additional accounting policy. A positive unsigned decimal
+value limits aggregate **policy reservations** for standalone native admission
+and concurrent transaction work. It covers owned records, map/index/tombstone
+allocations and declared string/staging workspace. It shares one domain across
+these consumers, including ancestor, immutable-value and native decoded-vector
+owners. Enabled policy-control states retain their own reservations; the shared
+counter/mutex has a fixed bootstrap allowance before its allocation. A positive
+limit must also fit startup metadata. The earlier
+job/wire and pending-record settings remain independent optional checks.
+
+Local exhaustion is retryable with reason `mempool_memory_capacity`; it does
+not invalidate a transaction, penalize a peer, discard accepted transactions
+or initiate an automatic retry. Canonical block/LIB processing and cleanup are
+exempt from the admission threshold so that a full local policy
+cannot prevent valid canonical processing or recovery. Those operations can
+exceed the threshold; this setting is **not a hard allocation or RSS ceiling**.
+
+The current R15 development snapshot attributes fixed startup controls,
+per-call output state, registry storage and interceptors. Ordinary control
+setup is admitted before native work. Fixed startup controls needed at restart
+are counted with protected quota exemption. Refusal state/map/interceptor
+owners and their 4-KiB status workspace share a separately bounded **1-MiB
+refusal allowance**, with credits retained through final deletion.
+
+Metrics expose live/peak/refused control bytes as `mempool_refusal_memory_*`
+and local cancellations as `mempool_refusal_transport_cancellations`. Once the
+allowance is full, later status preparation uses a code-only overload status;
+exhausted factory setup cancels before native work. The pinned, build-owned
+gRPC call-binding correction makes that early cancellation valid. The initial
+SDK-order failure and earlier quota-exempt fallback results remain historical
+evidence. These policies do not bound SDK request queues or imply an RSS cap.
+
+R15 passes all 104 normal native checks, both CLI checks, 63 focused
+ASan/UBSan and 61 default-TSan cases on isolated OVH. Paired component
+measurements, exact-source controlled-chain create/reopen and full-history
+observer mixed-read/restart/interruption-recovery pass. Final owner review
+completes M1 for this exact implementation. See the
+[R15 report](validation/low-resource-lr2-m1-r15.md) and
+[control ownership work](implementation/issue-9-m1-grpc-control-ownership.md).
+
+The R15 implementation combines attributed allocator requests with conservative
+supplementary workspace. Ordinary native M1 allocations reserve before
+allocation and retain credits through final deletion, including nonce/RC/count
+reads, decoded query copies, selected Protobuf/serialized outputs and native
+transaction execution/candidate buffers. A full ordinary policy may refuse a
+read locally. Query vectors grow for actual results; moving a message out of
+its vector does not release its retained field credits. Selected mempool and
+transaction HTTP bodies keep their owners through asynchronous write/cancel,
+including complete mixed batches and post-acceptance response cleanup.
+
+An opt-in profile tested on the two-vCPU, four-decimal-GB isolated Linux host is:
+
+```yaml
+mempool:
+  aggregate-max-accounted-bytes: 805306368 # 768 MiB; default remains 0
+```
+
+The exact controlled workload reaches 564,456,504 attributed bytes and
+705,712,128 B peak RSS with 12,800 test transactions and 60 retained reversible
+blocks. The exact full-history observer's peak is 419,278,848 B; clean restart
+and interrupted-test recovery pass with the complete disk reserve. These
+measurements support this setting for the recorded workloads. They do not
+select a universal production limit or replace the other optional record/work
+policies. No operational producer is changed by this qualification.
+
+Enabled M1 leases use a separate malloc-backed ownership table and preserve
+allocator-base pointers. The static table occupies about 1 MiB on 64-bit Linux;
+48-byte tracking nodes, supplementary reservations and libc overhead are
+separate measurements. Direct dependency malloc/realloc, process-global
+metadata, allocator arenas/stacks, RPC ingress/SDK queues, unrelated services,
+VM and non-mempool database domains retain their declared exclusions.
+Instrumented mempool canonical/recovery and internal inspection work is
+counted but quota-exempt. These adjacent consumers remain in the tested
+whole-node RSS; the admission setting is not a physical heap/RSS limit.
+The [R15 report](validation/low-resource-lr2-m1-r15.md) records CPU, I/O,
+latency, neutral/worse paired results and the open wider issue-9 requirements.
 
 ### JSON-RPC memory and lifecycle policy (LR2 development)
 

@@ -1,3 +1,4 @@
+#include "core/owned_allocation.hpp"
 #include "p2p/peer_advice_store.hpp"
 #include <cassert>
 #include <cstdlib>
@@ -6,9 +7,9 @@
 #include <vector>
 
 namespace { thread_local long fail_after=-1; }
-void* operator new(std::size_t n){if(fail_after==0){fail_after=-1;throw std::bad_alloc();}if(fail_after>0)--fail_after;if(auto p=std::malloc(n?n:1))return p;throw std::bad_alloc();}
+void* operator new(std::size_t n){if(fail_after==0){fail_after=-1;throw std::bad_alloc();}if(fail_after>0)--fail_after;if(auto p=koinos::node::owned_allocation::allocate(n?n:1))return p;throw std::bad_alloc();}
 void* operator new[](std::size_t n){return ::operator new(n);}
-void operator delete(void* p)noexcept{std::free(p);}
+void operator delete(void* p)noexcept{koinos::node::owned_allocation::deallocate(p);}
 void operator delete[](void* p)noexcept{::operator delete(p);}
 void operator delete(void* p,std::size_t)noexcept{::operator delete(p);}
 void operator delete[](void* p,std::size_t)noexcept{::operator delete(p);}

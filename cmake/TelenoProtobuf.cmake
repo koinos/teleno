@@ -40,12 +40,32 @@ FetchContent_Declare(${_content}
 FetchContent_MakeAvailable(${_content})
 FetchContent_GetProperties(${_content} SOURCE_DIR _source BINARY_DIR _binary)
 file(SHA256 "${_source}/src/google/protobuf/unknown_field_set.cc" _source_hash)
-if(NOT _source_hash STREQUAL "090f66ae063d27fe1ee03b5c34b6be903cf75c69ffa008336cc1ec32c8801d8a")
+if(NOT _source_hash STREQUAL "ad7ca08c6b2e32706e55cb0acc4e12611ef17703fba3a418e564653506ac1030")
   message(FATAL_ERROR "Protobuf ownership patch is absent or changed")
 endif()
 file(SHA256 "${_source}/src/google/protobuf/arenastring.cc" _source_hash)
 if(NOT _source_hash STREQUAL "08a52ed990b3707b65f39f342a8f0dfddfef25d9e2fe89b1af5b7be8c3faddc2")
   message(FATAL_ERROR "Protobuf arena string patch is absent or changed")
+endif()
+
+file(SHA256 "${_source}/src/google/protobuf/repeated_field.h" _source_hash)
+if(NOT _source_hash STREQUAL "004633591ac91eed57adf6ea139dfca59cbcec9ea98e7d7962ad3d978f869c20")
+  message(FATAL_ERROR "Protobuf repeated-field ownership patch is absent or changed")
+endif()
+
+file(SHA256 "${_source}/src/google/protobuf/util/internal/type_info.cc" _source_hash)
+if(NOT _source_hash STREQUAL "1b71c6fd10a861d91a60d667b3dc67e1e421c944b4d8fd263fbaffc571bbd8f9")
+  message(FATAL_ERROR "Protobuf JSON type-cache ownership patch is absent or changed")
+endif()
+
+file(SHA256 "${_source}/src/google/protobuf/io/coded_stream.cc" _source_hash)
+if(NOT _source_hash STREQUAL "6522a5409787995173ed75c7c3082aab427fcafafa7282ddffb338c1c0b1f710")
+  message(FATAL_ERROR "Protobuf output-buffer failure cleanup patch is absent or changed")
+endif()
+
+file(SHA256 "${_source}/src/google/protobuf/util/internal/proto_writer.cc" _source_hash)
+if(NOT _source_hash STREQUAL "9aa70909639ec766086c4045b3ba6bbd13bf0e4e4f46861ff012acdcee69611e")
+  message(FATAL_ERROR "Protobuf JSON writer constructor ownership patch is absent or changed")
 endif()
 
 # A mismatched header/runtime pair is not an acceptable fallback.
@@ -63,6 +83,14 @@ foreach(_header stubs/common.h unknown_field_set.h arena.h arenastring.h)
     message(FATAL_ERROR "Pinned protobuf public header does not match: ${_header}")
   endif()
 endforeach()
+file(SHA256 "${_teleno_protobuf_include}/google/protobuf/repeated_field.h" _installed)
+if(NOT _installed STREQUAL "f66762384d1c7d778e5c13ab1c33b25f161758241bb408acc61c3c377feb507f")
+  message(FATAL_ERROR "Pinned original protobuf repeated-field header does not match")
+endif()
+# All rebuilt consumers must use the corrected inline methods, including
+# generated messages. Existing installations remain immutable.
+set(CMAKE_CXX_FLAGS "-I${_source}/src ${CMAKE_CXX_FLAGS}")
+set(CMAKE_C_FLAGS "-I${_source}/src ${CMAKE_C_FLAGS}")
 unset(_teleno_protobuf_include CACHE)
 
 set(_args -DHUNTER_ENABLED=OFF -Dprotobuf_BUILD_TESTS=OFF

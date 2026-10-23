@@ -1,4 +1,13 @@
 # yaml-cpp Hunter target is "yaml-cpp", not "yaml-cpp::yaml-cpp"
+add_library(koinos_owned_allocation OBJECT core/owned_allocation.cpp)
+target_include_directories(koinos_owned_allocation PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+add_library(koinos_owned_allocation_link INTERFACE)
+target_sources(koinos_owned_allocation_link INTERFACE $<TARGET_OBJECTS:koinos_owned_allocation>)
+target_include_directories(koinos_owned_allocation_link INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+# Include the replacement object once in native executables. Weak replacement
+# symbols allow fault fixtures to wrap the same primitive without bypassing it.
+link_libraries(koinos_owned_allocation_link)
+
 if(TARGET yaml-cpp AND NOT TARGET yaml-cpp::yaml-cpp)
   add_library(yaml-cpp::yaml-cpp ALIAS yaml-cpp)
 endif()
@@ -16,6 +25,8 @@ add_library(koinos_node_core
   core/preflight.hpp
   core/event_bus.hpp
   core/transaction_work_budget.hpp
+  core/transaction_response_preparer.hpp
+  core/owned_memory_budget.hpp
   core/node_version.hpp
   core/restore_startup.cpp
   core/restore_startup.hpp
@@ -366,7 +377,8 @@ target_link_libraries(koinos_account_history_lib PUBLIC
 # ── gRPC server library (Phase 6) ──
 add_library(koinos_grpc_server_lib
   grpc_server/grpc_server.cpp
-  grpc_server/grpc_server.hpp)
+  grpc_server/grpc_server.hpp
+  grpc_server/mempool_output_state.hpp)
 
 target_include_directories(koinos_grpc_server_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
@@ -540,6 +552,17 @@ if(KOINOS_BUILD_TESTS)
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/scripts/protobuf_dependency_recipe_test.py
         ${CMAKE_COMMAND} ${TELENO_PROTOBUF_SOURCE_DIR})
     set_tests_properties(koinos_protobuf_dependency_recipe_test PROPERTIES TIMEOUT 90)
+    add_test(NAME koinos_generated_proto_ownership_recipe_test
+      COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/../tests/scripts/koinos_proto_ownership_recipe_test.py
+        ${TELENO_KOINOS_PROTO_SOURCE_DIR})
+    set_tests_properties(koinos_generated_proto_ownership_recipe_test PROPERTIES TIMEOUT 90)
+    add_test(NAME koinos_grpc_call_binding_recipe_test
+      COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/../tests/scripts/grpc_call_binding_recipe_test.py
+        ${TELENO_GRPC_CALL_BINDING_SOURCE_DIR} ${CMAKE_AR} ${CMAKE_RANLIB})
+    set_tests_properties(koinos_grpc_call_binding_recipe_test PROPERTIES TIMEOUT 90)
+    add_test(NAME koinos_nlohmann_cleanup_recipe_test
+      COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/../tests/scripts/nlohmann_cleanup_recipe_test.py
+        ${CMAKE_COMMAND} ${TELENO_NLOHMANN_JSON_INCLUDE_DIR})
     add_test(NAME teleno_preflight_cli_test
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cli/preflight_test.py $<TARGET_FILE:teleno_node>)
     set_tests_properties(teleno_preflight_cli_test PROPERTIES TIMEOUT 90)
@@ -570,6 +593,28 @@ if(KOINOS_BUILD_TESTS)
   target_link_libraries(koinos_transaction_work_budget_test PRIVATE koinos_node_core koinos_node_interfaces)
   add_test(NAME koinos_transaction_work_budget_test COMMAND koinos_transaction_work_budget_test)
   set_tests_properties(koinos_transaction_work_budget_test PROPERTIES TIMEOUT 30)
+
+  add_executable(koinos_owned_memory_budget_test ../tests/core/owned_memory_budget_test.cpp)
+  target_link_libraries(koinos_owned_memory_budget_test PRIVATE koinos_node_core)
+  add_test(NAME koinos_owned_memory_budget_test COMMAND koinos_owned_memory_budget_test)
+  set_tests_properties(koinos_owned_memory_budget_test PROPERTIES TIMEOUT 60)
+
+  add_executable(koinos_protobuf_metadata_budget_test ../tests/core/protobuf_metadata_budget_test.cpp)
+  target_link_libraries(koinos_protobuf_metadata_budget_test PRIVATE koinos_node_core Koinos::proto protobuf::libprotobuf)
+  add_test(NAME koinos_protobuf_metadata_budget_test COMMAND koinos_protobuf_metadata_budget_test)
+  add_test(NAME koinos_protobuf_metadata_concurrent_budget_test COMMAND koinos_protobuf_metadata_budget_test --concurrent)
+
+  add_executable(koinos_owned_allocation_test ../tests/core/owned_allocation_test.cpp)
+  target_link_libraries(koinos_owned_allocation_test PRIVATE Threads::Threads)
+  add_test(NAME koinos_owned_allocation_test COMMAND koinos_owned_allocation_test)
+  set_tests_properties(koinos_owned_allocation_test PROPERTIES TIMEOUT 60)
+
+  add_executable(koinos_mempool_aggregate_memory_test ../tests/mempool/aggregate_memory_test.cpp)
+  target_link_libraries(koinos_mempool_aggregate_memory_test PRIVATE mempool_lib)
+  add_test(NAME koinos_mempool_aggregate_memory_test COMMAND koinos_mempool_aggregate_memory_test)
+  set_tests_properties(koinos_mempool_aggregate_memory_test PROPERTIES TIMEOUT 600)
+  add_test(NAME koinos_mempool_shorter_predecessor_test COMMAND koinos_mempool_aggregate_memory_test --short-predecessor)
+  set_tests_properties(koinos_mempool_shorter_predecessor_test PROPERTIES TIMEOUT 30)
 
   add_executable(koinos_service_registry_test
     ../tests/core/service_registry_test.cpp)
@@ -799,7 +844,7 @@ if(KOINOS_BUILD_TESTS)
     set_tests_properties(teleno_fixture_paths_test PROPERTIES TIMEOUT 30)
     add_test(NAME teleno_single_copy_experiment_test
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/backup/validate_single_copy_restore.py
-        --build-dir ${CMAKE_BINARY_DIR} --repetitions 5)
+        --build-dir ${CMAKE_BINARY_DIR} --repetitions 5 --retire-completed-pairs)
     set_tests_properties(teleno_single_copy_experiment_test PROPERTIES TIMEOUT 240)
   endif()
 
@@ -921,6 +966,23 @@ if(KOINOS_BUILD_TESTS)
     koinos_account_history_lib)
 
   add_test(NAME koinos_grpc_server_test COMMAND koinos_grpc_server_test)
+  add_test(NAME koinos_grpc_control_ownership_test COMMAND koinos_grpc_server_test --m1-control-owners-owned)
+  add_test(NAME koinos_grpc_control_concurrency_test COMMAND koinos_grpc_server_test --m1-control-concurrency)
+  add_test(NAME koinos_grpc_refusal_control_capacity_test COMMAND koinos_grpc_server_test --m1-refusal-control-capacity)
+
+  add_executable(koinos_grpc_status_memory_test
+    ../tests/grpc/status_memory_test.cpp)
+  target_link_libraries(koinos_grpc_status_memory_test PRIVATE koinos_grpc_server_lib)
+  add_test(NAME koinos_grpc_status_refusal_memory_test
+    COMMAND koinos_grpc_status_memory_test refusal)
+  add_test(NAME koinos_grpc_status_encoding_memory_test
+    COMMAND koinos_grpc_status_memory_test encoding)
+  add_test(NAME koinos_grpc_status_copy_failure_test
+    COMMAND koinos_grpc_status_memory_test copy-failure)
+  add_test(NAME koinos_grpc_status_argument_failure_test
+    COMMAND koinos_grpc_status_memory_test argument-failure)
+  add_test(NAME koinos_grpc_status_bounded_refusal_test
+    COMMAND koinos_grpc_status_memory_test bounded-refusal)
 
   if(KOINOS_ENABLE_LIBP2P)
     add_executable(koinos_sdk_address_repository_test ../tests/p2p/sdk_address_repository_test.cpp)
@@ -1044,7 +1106,8 @@ target_link_libraries(koinos_transaction_store_lib PUBLIC
 # ── JSON-RPC server library (Phase 3: C++ port of Go jsonrpc) ──
 add_library(koinos_jsonrpc_lib
   jsonrpc/jsonrpc_server.cpp
-  jsonrpc/jsonrpc_server.hpp)
+  jsonrpc/jsonrpc_server.hpp
+  jsonrpc/json_cleanup.hpp)
 
 target_include_directories(
   koinos_jsonrpc_lib
@@ -1069,10 +1132,58 @@ target_link_libraries(
 # ── Main executable ──
 
 if(KOINOS_BUILD_TESTS)
+  add_executable(koinos_json_cleanup_test ../tests/jsonrpc/json_cleanup_test.cpp)
+  target_include_directories(koinos_json_cleanup_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(koinos_json_cleanup_test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME koinos_json_cleanup_test COMMAND koinos_json_cleanup_test)
+  add_executable(koinos_json_default_cleanup_test ../tests/jsonrpc/json_default_cleanup_test.cpp)
+  target_include_directories(koinos_json_default_cleanup_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(koinos_json_default_cleanup_test PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+  add_test(NAME koinos_json_default_cleanup_test COMMAND koinos_json_default_cleanup_test)
+  add_executable(koinos_json_cleanup_memory_profile ../tools/diagnostics/json_cleanup_memory_profile.cpp)
+  target_include_directories(koinos_json_cleanup_memory_profile PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(koinos_json_cleanup_memory_profile PRIVATE nlohmann_json::nlohmann_json)
   add_executable(koinos_jsonrpc_session_lifecycle_test ../tests/jsonrpc/session_lifecycle_test.cpp)
   target_link_libraries(koinos_jsonrpc_session_lifecycle_test PRIVATE koinos_jsonrpc_lib)
   add_test(NAME koinos_jsonrpc_session_lifecycle_test COMMAND koinos_jsonrpc_session_lifecycle_test)
   set_tests_properties(koinos_jsonrpc_session_lifecycle_test PROPERTIES TIMEOUT 30)
+  add_test(NAME koinos_jsonrpc_transaction_input_lifetime_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-transaction-input-lifetime)
+  add_test(NAME koinos_jsonrpc_transaction_normalization_refusal_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-transaction-normalization-refusal)
+  add_test(NAME koinos_jsonrpc_mempool_output_ownership_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-output-owned)
+  set_tests_properties(koinos_jsonrpc_mempool_output_ownership_test PROPERTIES TIMEOUT 30)
+  add_test(NAME koinos_jsonrpc_mempool_mixed_output_ownership_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-mixed-batch-owned)
+  set_tests_properties(koinos_jsonrpc_mempool_mixed_output_ownership_test PROPERTIES TIMEOUT 30)
+  add_test(NAME koinos_jsonrpc_mempool_mixed_capacity_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-mixed-batch-capacity)
+  set_tests_properties(koinos_jsonrpc_mempool_mixed_capacity_test PROPERTIES TIMEOUT 30)
+  add_test(NAME koinos_jsonrpc_mempool_output_roundtrip_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-output-roundtrip)
+  set_tests_properties(koinos_jsonrpc_mempool_output_roundtrip_test PROPERTIES TIMEOUT 30)
+  add_test(NAME koinos_jsonrpc_mempool_output_concurrent_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-output-concurrent)
+  set_tests_properties(koinos_jsonrpc_mempool_output_concurrent_test PROPERTIES TIMEOUT 30)
+  add_test(NAME koinos_jsonrpc_refusal_output_ownership_test COMMAND koinos_jsonrpc_session_lifecycle_test --http-refusal-owner-owned)
+  set_tests_properties(koinos_jsonrpc_refusal_output_ownership_test PROPERTIES TIMEOUT 30)
+  add_test(NAME koinos_jsonrpc_refusal_shapes_test COMMAND koinos_jsonrpc_session_lifecycle_test --http-refusal-shapes)
+  add_test(NAME koinos_jsonrpc_refusal_gate_test COMMAND koinos_jsonrpc_session_lifecycle_test --http-refusal-gate)
+  set_tests_properties(koinos_jsonrpc_refusal_shapes_test koinos_jsonrpc_refusal_gate_test PROPERTIES TIMEOUT 30)
+  add_test(NAME koinos_jsonrpc_refusal_fault_cleanup_test COMMAND koinos_jsonrpc_session_lifecycle_test --http-refusal-faults)
+  add_test(NAME koinos_jsonrpc_conversion_fault_cleanup_test COMMAND koinos_jsonrpc_session_lifecycle_test --generic-json-faults)
+  set_tests_properties(koinos_jsonrpc_conversion_fault_cleanup_test PROPERTIES TIMEOUT 600)
+  add_test(NAME koinos_jsonrpc_input_conversion_fault_cleanup_test COMMAND koinos_jsonrpc_session_lifecycle_test --generic-json-input-faults)
+  set_tests_properties(koinos_jsonrpc_input_conversion_fault_cleanup_test PROPERTIES TIMEOUT 600)
+  add_test(NAME koinos_jsonrpc_method_format_compatibility_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-method-format)
+  set_tests_properties(koinos_jsonrpc_refusal_fault_cleanup_test PROPERTIES TIMEOUT 120)
+  add_test(NAME koinos_jsonrpc_transaction_output_ownership_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-transaction-output-owned)
+  set_tests_properties(koinos_jsonrpc_transaction_output_ownership_test PROPERTIES TIMEOUT 45)
+  add_test(NAME koinos_jsonrpc_transaction_output_concurrent_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-transaction-output-concurrent)
+  set_tests_properties(koinos_jsonrpc_transaction_output_concurrent_test PROPERTIES TIMEOUT 30)
+  add_test(NAME koinos_jsonrpc_transaction_capacity_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-transaction-capacity)
+  add_test(NAME koinos_jsonrpc_transaction_error_output_ownership_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-transaction-error-output-owned)
+  set_tests_properties(koinos_jsonrpc_transaction_error_output_ownership_test PROPERTIES TIMEOUT 45)
+  add_test(NAME koinos_jsonrpc_transaction_error_capacity_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-transaction-error-capacity)
+  set_tests_properties(koinos_jsonrpc_transaction_capacity_test PROPERTIES TIMEOUT 30)
+  add_test(NAME koinos_jsonrpc_transaction_output_roundtrip_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-transaction-roundtrip)
+  set_tests_properties(koinos_jsonrpc_transaction_output_roundtrip_test PROPERTIES TIMEOUT 30)
+  add_test(NAME koinos_jsonrpc_transaction_post_acceptance_failure_test COMMAND koinos_jsonrpc_session_lifecycle_test --m1-transaction-post-acceptance-failure)
+  set_tests_properties(koinos_jsonrpc_transaction_post_acceptance_failure_test PROPERTIES TIMEOUT 30)
   add_executable(koinos_jsonrpc_batch_memory_test ../tests/jsonrpc/batch_memory_test.cpp)
   target_link_libraries(koinos_jsonrpc_batch_memory_test PRIVATE koinos_jsonrpc_lib)
   add_test(NAME koinos_jsonrpc_batch_memory_test COMMAND koinos_jsonrpc_batch_memory_test)

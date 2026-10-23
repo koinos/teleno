@@ -26,6 +26,10 @@ checks pass.
 - [Controlled Native Producer](validation/controlled-native-producer.md) -
   actual producer/controller/shared-storage construction and clean reopen on
   an isolated federated chain; PoB and full producer qualification remain open.
+- [Fogata Producer Heap-Corruption Investigation](validation/fogata-producer-heap-corruption-2026-10-21.md) -
+  preserved 2026-10-21 failure, reproducible GossipSub publication race and
+  isolated candidate checks; historical-crash attribution and final qualification
+  remain open.
 - [Retained WAL Disk Budget](validation/wal-retention-budget.md) -
   isolated repeated retention/recovery comparisons and the optional native
   flush trigger; complete disk and runtime qualification remain open.
@@ -122,6 +126,26 @@ checks pass.
   bounded retained payload and scoped measurements, including regressions.
 - [LR2 Completion Matrix](validation/low-resource-lr2-completion-matrix.md) -
   active goal, remaining admission/lifetime/resource gates and external data policy.
+- [M1 Aggregate-Memory Repair](validation/low-resource-lr2-m1-repair.md) -
+  finite C3/C4 source, test and measurement evidence with explicit remaining gates.
+- [M1 Shorter-Predecessor Read](validation/low-resource-lr2-m1-nonce-read.md) -
+  reproduced nonce/count read overflow, frozen C9 correction and scoped Linux
+  qualification; M1 and whole-node qualification remain open.
+- [M1 Isolated Physical-VPS Qualification](validation/low-resource-lr2-m1-isolated-vps.md) -
+  closed frozen-C9 full-backup/observer sequence, incomplete observation,
+  ownership coverage audit and metric reproduction; M1 remains open.
+- [M1 Memory-Optimization Objective](implementation/issue-9-m1-aggregate-goal.md) -
+  application allocation/retention optimization, bounded aggregate admission,
+  exclusive OVH tests, physical measurements and unchanged completion gates.
+- [M1 R15 Final-Candidate Qualification](validation/low-resource-lr2-m1-r15.md) -
+  completed scoped M1 gate, exact source/build identities, native/sanitizer
+  results, five pairs per measured workload and full-history observer/recovery.
+- [M1 JSON Cleanup](validation/low-resource-lr2-m1-json-cleanup.md) -
+  reproduced post-acceptance allocation abort, allocation-free cleanup and
+  14/14 scoped normal OVH development checks; final qualification remains open.
+- [Legacy Applicability of Teleno Findings](implementation/legacy-applicability-of-teleno-findings.md) -
+  source-supported cross-architecture hypotheses and bounded reproduction plans;
+  no legacy service failure is claimed without a matching test.
 - [LR2 Native Admission](validation/low-resource-lr2-admission.md) -
   refusal propagation, notification ordering and accurate pending diagnostics;
   global memory limits and Linux qualification remain open.

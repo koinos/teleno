@@ -356,6 +356,7 @@ protocol::block BlockProducer::next_block( const std::string& signer,
 
 void BlockProducer::fill_block( protocol::block& block )
 {
+  OwnedMemoryBudget::Scope candidate_memory_scope( _mempool.memory_budget() );
   rpc::mempool::get_pending_transactions_request pending_req;
   pending_req.set_limit( _config.max_inclusion_attempts );
   pending_req.set_block_id( block.header().previous() );
@@ -425,6 +426,7 @@ void BlockProducer::fill_block( protocol::block& block )
 
 void BlockProducer::set_merkle_roots( protocol::block& block ) const
 {
+  OwnedMemoryBudget::Scope candidate_memory_scope( _mempool.memory_budget() );
   std::vector< crypto::multihash > hashes;
   hashes.reserve( block.transactions().size() * 2 );
 
@@ -441,6 +443,7 @@ void BlockProducer::set_merkle_roots( protocol::block& block ) const
 
 bool BlockProducer::submit_block( protocol::block& block, ProductionResult& result )
 {
+  OwnedMemoryBudget::Scope candidate_memory_scope( _mempool.memory_budget() );
   rpc::chain::propose_block_request req;
   req.mutable_block()->CopyFrom( block );
 

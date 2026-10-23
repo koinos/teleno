@@ -1,3 +1,4 @@
+#include "core/owned_allocation.hpp"
 #include <koinos/mempool/mempool.hpp>
 #include <koinos/state_db/retained_memory.hpp>
 #include <koinos/state_db/state_delta.hpp>
@@ -29,11 +30,11 @@ void* operator new(std::size_t n) {
     ++allocations; requested_bytes += n;
     if (fail_at-- == 0) { fail_at = -1; fired = true; throw std::bad_alloc(); }
   }
-  if (auto p = std::malloc(n ? n : 1)) return p;
+  if (auto p = koinos::node::owned_allocation::allocate(n ? n : 1)) return p;
   throw std::bad_alloc();
 }
 void* operator new[](std::size_t n) { return ::operator new(n); }
-void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p) noexcept { koinos::node::owned_allocation::deallocate(p); }
 void operator delete[](void* p) noexcept { ::operator delete(p); }
 void operator delete(void* p, std::size_t) noexcept { ::operator delete(p); }
 void operator delete[](void* p, std::size_t) noexcept { ::operator delete(p); }
