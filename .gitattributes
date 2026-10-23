@@ -1,2 +1,3 @@
 # Unified-diff context lines contain a required leading space on empty lines.
 cmake/patches/*.patch whitespace=-blank-at-eol
+cmake/cpp-libp2p-listener-lifetime.patch whitespace=-blank-at-eol

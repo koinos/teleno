@@ -4,12 +4,61 @@ All notable changes to the Teleno node runtime are documented in this file.
 Release tags use the form `teleno-node-v<version>`; the version source of
 truth is the `VERSION` file at the repository root.
 
-## [1.3.0-dev.2] - Unreleased
+## [1.3.0] - 2026-10-23
 
-Development continues after native 1.3.0-alpha.2. See the
-[verified alpha.2 publication](docs/validation/alpha-1.3.0-alpha.2-publication.md)
-for exact source, binary, container and normal-test identities. Issue 9 and
-whole-node producer qualification remain open.
+This native release integrates the qualified M1 application-memory work and
+Fogata P2P lifetime corrections with the features previously published in
+1.3.0-alpha.1 and alpha.2. See the [detailed release notes](docs/releases/1.3.0.md).
+Issue 9 remains open beyond the scoped M1 result.
+
+### Application memory and local admission
+
+- Share one lifetime-owned admission domain across the native mempool and
+  concurrent transaction work. Track retained fork/index/tombstone, nonce/RC,
+  decoded query, staging and selected RPC/output owners until final release.
+  Shared records are not counted once per fork. Configured zero retains the
+  unlimited default; counters are not physical heap or RSS ceilings.
+- Reserve before publication, preserve accepted transactions on allocation
+  failure and allow later retry. Prepare block/LIB and persistent index changes
+  before mutation. Canonical/recovery work remains counted but quota-exempt;
+  local overload does not become a consensus rule or a peer penalty.
+- Remove redundant decoded-transaction, nonce-key, JSON input and in-process
+  block-event copies. Reclaim JSON and Protobuf partial constructions safely
+  after allocation failure; preserve base58 failure classification and bytes.
+- Retain HTTP and gRPC output credits through their actual final owners.
+  Bound HTTP refusal workspace and aggregate gRPC refusal controls separately.
+  Detailed gRPC overload may fall back to a code-only response; exhausted
+  control setup cancels before native work using the pinned SDK call-binding fix.
+- Build pinned, hash-checked Protobuf, generated Koinos proto, nlohmann JSON
+  cleanup, gRPC call-binding and matching JSON SDK replacements in owned build
+  directories. Existing dependency installations are not silently rewritten.
+- The identified R15 predecessor completes M1 with 104 normal checks, both CLI
+  checks, 63 focused ASan/UBSan and 61 default-TSan cases, paired measurements,
+  a 12,800-test-transaction controlled chain and a full-history observer's
+  mixed reads, restart and interruption/recovery. Its results remain distinct
+  from this combined release's exact-build qualification. See the
+  [R15 report](docs/validation/low-resource-lr2-m1-r15.md).
+
+### Fogata networking and diagnostics
+
+- Serialize owned GossipSub publication and teardown on the SDK I/O runner,
+  bound queued work and retire stopped generations. The pinned listener patch
+  gives queued callbacks a weak owner across stop/restart. Include the three
+  publication, ingress and restart regressions from alpha.2.
+- Keep the original producer abort unresolved as a historical cause: no core
+  was retained. The separately reproduced defects and their correction are
+  documented in the [Fogata validation](docs/validation/fogata-gossip-publication.md).
+- Bound SC5 synthetic diagnostic retention with explicit retirement of only the
+  current run's externally verified completed pairs. Preserve all five measured
+  pairs, failed cases and original evidence; native restore behavior is unchanged.
+- Document actual memory policies, ownership exclusions, preserved failed
+  attempts and possible legacy applicability. No legacy binary was tested.
+
+The release also includes alpha.1's full-history single-copy restore,
+lossless storage, producer head/mempool retry, RPC/transport lifecycle and
+cache/VM ownership changes listed below. Optional memory limits preserve their
+existing defaults. Publishing this release does not update running nodes,
+activate production or change Koinos One's native submodule/package.
 
 ## [1.3.0-alpha.2] - 2026-10-23
 
@@ -27,123 +76,6 @@ same-state reopen pass for the identified diagnostic candidate. This does not
 qualify mainnet producer operation or close issue 9. See the
 [release notes](docs/releases/1.3.0-alpha.2.md) and
 [validation summary](docs/validation/fogata-gossip-publication.md).
-
-- Complete the scoped M1 memory-optimization gate for the exact R15 native
-  development snapshot. Shared lifetime-owned admission covers native mempool,
-  retained fork/index/nonce/RC/tombstone state, concurrent transaction work and
-  selected HTTP/gRPC output, with bounded refusal allowances. Remove measured
-  decoded-transaction, nonce-key, JSON input and in-process block-event copies;
-  repair allocation-failure cleanup while preserving accepted work and retry.
-  OVH passes 104 normal checks, both CLI checks, 63 focused ASan/UBSan and
-  61 default-TSan cases, five equivalent pairs per measured workload, a
-  12,800-test-transaction create/reopen and exact full-history observer
-  mixed-read/restart/interruption-recovery. Physical memory/disk/reserve gates
-  pass; component savings remain distinct from whole-node savings. See the
-  [R15 qualification](docs/validation/low-resource-lr2-m1-r15.md) for exact
-  source/dependency/binary identities and exclusions. This is unreleased source;
-  operational producers, app packages and the other issue-9 gates are unchanged.
-
-- Repair development attributes HTTP local-capacity replies to their M1 owner
-  and streams borrowed IDs rather than cloning them. A separate bounded
-  workspace gate admits retained refusal responses; exhaustion closes the
-  connection without executing refused work. The later identified R13 node
-  passes its normal, focused sanitizer and isolated observer/controlled-chain
-  checks. The R13 checkpoint does not complete M1; the later R15 decision above
-  includes the final aggregate-owner and physical qualification.
-
-- Add a separate refusal-memory allowance for gRPC controls and
-  status text, retaining credits until final deletion. Its 1-MiB policy limit
-  permits code-only local overload responses after detailed-response capacity
-  is exhausted. A build-owned, hash-pinned gRPC call-binding correction permits
-  safe factory-time cancellation before native work when control setup cannot
-  be admitted. The installed SDK remains unchanged. Final R15 native/focused
-  sanitizer, fallback-fault, instrumented-SDK concurrency and identified
-  whole-node qualification pass. Earlier failed SDK links and diagnostics
-  remain preserved. See the [follow-up record](docs/implementation/issue-9-m1-grpc-control-ownership.md#aggregate-refusal-follow-up--2026-10-22).
-
-- Bound SC5 synthetic diagnostic workspace with explicit
-  `--retire-completed-pairs`: record hashes/measurements and retire only the
-  current run's verified destination pair. Keep source, diagnostic evidence and
-  failed cases. CTest retains all original checks and five measured pairs.
-  This does not change native backup/restore or retire any existing database.
-  The compatible helper revision passes its isolated OVH unit checks; R15's
-  registered SC5 native experiment also passes with all five measured pairs.
-  This is synthetic diagnostic qualification, not arbitrary full-size restore
-  or compaction qualification.
-
-- Add an opt-in aggregate native mempool/transaction-work reservation domain,
-  lifetime-owned map/index/tombstone, policy-control-state and native decoded
-  query-vector accounting, plus retryable local overload metrics. Prepare
-  block/LIB publication, persistent root indexes and transfer metadata before
-  mutation so allocation failures retain accepted work and permit retry.
-  Preserve the primary capacity/allocation exception if optional diagnostic
-  formatting also fails. Canonical processing and cleanup remain
-  exempt from standalone admission quotas. This development
-  checkpoint does not establish a physical-memory ceiling or complete M1;
-  see the [ownership and qualification report](docs/validation/low-resource-lr2-aggregate-memory.md).
-  Native C++ consumers must rebuild with matching mempool headers/libraries
-  for the constructor and allocator-bearing query return types.
-- The first M1 attempt fails qualification: decoded-query allocation faults
-  expose an inherited protobuf leak (1,008 bytes in the bounded regression),
-  and retained RPC output outlives its accounting credit. Preserve that result.
-  A separate repair stage clears the leaking Linux ASan/UBSan regression and
-  extends ordinary native allocation ownership through reads and returned
-  protobuf/serialized/execution outputs. It also repairs generated oneof
-  allocation publication. That historical repair stage remains unqualified;
-  see its [preserved report](docs/validation/low-resource-lr2-m1-repair.md) and
-  the later final R15 result above.
-  Ordinary reads may refuse locally at a full policy. The earlier allocation
-  prefix fails RocksDB allocator interoperability; current development retains
-  malloc-base pointers and owns enabled M1 allocations through a side table.
-  Static-table and allocator overhead remain part of physical RSS. R15's final
-  measurements are recorded separately; no universal heap/RSS ceiling or live
-  producer upgrade is established.
-- Correct development allocator-request attribution: retain the conservative
-  wrapper/alignment allowance as supplementary reservation instead of labeling
-  it an actual raw allocation request. Total accounted admission boundaries
-  remain unchanged. The new focused Linux regression fails on C9 and passes
-  on the development correction. A separate reproduced chain-receipt HTTP
-  ownership gap drives the later cleanup/output repairs qualified in R15;
-  preserve the failed [C11/C12 record](docs/implementation/issue-9-m1-receipt-output-repair.md).
-- Avoid dynamic cleanup allocation for owned JSON-RPC trees so an injected
-  allocation failure after transaction acceptance can close the response and
-  preserve accepted work instead of aborting the I/O worker's process. Preserve
-  complete success/error output and later retry. R4 passes 16 normal, 17 scoped
-  ASan/UBSan and 16 scoped default-TSan OVH invocations. A further build-owned
-  dependency backport also protects partially constructed JSON copies, which
-  outer cleanup guards cannot own. Its direct dependency/recipe controls pass;
-  consistent SDK/native integration is subsequently qualified in exact R15.
-  Retire redundant encoded parameter copies before native transaction execution.
-  R15's final native/sanitizer, measured-memory and identified observer/recovery
-  results complete M1. See the
-  [cleanup continuation](docs/validation/low-resource-lr2-m1-json-cleanup.md).
-- Preserve local resource failures during base58 normalization instead of
-  decoding the unchanged string as a different encoding. Borrow synchronous
-  input parameters and byte-field strings to avoid redundant copies. R7 passes
-  13 normal, 16 scoped ASan/UBSan and 15 scoped default-TSan RPC invocations;
-  five paired controlled large-receipt samples reduce median process peak RSS
-  by 548,864 bytes with similar CPU/wall time. The earlier retirement-only
-  revision increases peak RSS and remains a preserved negative result. These
-  component results do not qualify whole-node memory or complete M1.
-- Extend development gRPC control attribution and admission to startup owners,
-  output state, registry storage and interceptors. Clean partial setup before
-  returning explicit local overload without native work. Minimum refusal and
-  fixed startup controls remain counted with protected quota exemption. This
-  source passes scoped normal, ASan/UBSan and default-TSan lifetime, partial
-  setup, refusal/retry and concurrent cancellation/stop checks. Clean and
-  deliberate gRPC callback faults validate the detector configuration; final
-  C13 native/whole-node qualification remains open. See the
-  [control ownership step](docs/implementation/issue-9-m1-grpc-control-ownership.md).
-- Repair development gRPC application-error ownership: admit encoded status
-  workspace, retain C++ string credits to final release, and keep the counted
-  minimum refusal available at a full ordinary quota. Borrow exception text
-  until admission and contain a one-time status-copy allocation failure;
-  expose a repeated physical failure. Four frozen-C13 regressions reproduce
-  the original gaps. The corrected component passes 7 normal, 13 scoped
-  ASan/UBSan and 9 scoped default-TSan OVH checks with working controls;
-  final-source whole-node qualification remains pending. C13's
-  partial normal suite also stops at its strict disk guard; that result remains
-  unqualified. See the [current checkpoint](docs/validation/low-resource-lr2-m1-json-cleanup.md#c13-remains-unqualified-resource-guard-and-status-path-defects).
 
 ## [1.3.0-alpha.1] - 2026-10-19
 
