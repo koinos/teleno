@@ -84,11 +84,29 @@ of a release-wide speed or RSS improvement.
 
 The exact-source [Container dry-run](https://github.com/koinos/teleno/actions/runs/39978257157)
 passes fresh source compilation, version/help and producer-consent refusal.
-The [native-tag publication workflow](https://github.com/koinos/teleno/actions/runs/40001203766)
-is in progress at this native publication checkpoint. Registry/ELF provenance
-will be added separately after successful publication. The image is built
-separately from source; the native observer evidence applies to the downloadable
-ELF above. Core native assets/checksums remain immutable when image evidence is added.
+The [native-tag publication workflow](https://github.com/koinos/teleno/actions/runs/40001203766) now passes
+those package checks and publishes the image from source `2c11229267cff2f9ee39ed8e56ab70af391d85ce`.
+
+| Image identity | Value |
+| --- | --- |
+| Registry | `ghcr.io/koinos/teleno` |
+| Immutable manifest digest | `sha256:40d109f526d4e5922e09137fe6244890e3956e7acd6f9cfb92dc2211b1297b5d` |
+| Linux amd64 image ELF SHA-256 | `7b0f0f8fb97e2f470651894f0332ce1b593e826c026ded3feab71aa671e7d409` |
+| Image ELF bytes | 45177240 |
+| Native downloadable ELF byte identity | `false` |
+| Verified version | `teleno_node 1.3.0+2c11229267cf` |
+
+Tags `1.3.0`, `teleno-node-v1.3.0` and `latest` resolve to that manifest.
+The `beta` and `1.3.0-alpha.2` manifests remain unchanged. Registry manifests,
+configuration/layer hashes and the extracted ELF were independently read and
+verified without running a container or native binary on the Mac/builder.
+This source-built image has its own executable identity; CLI/package validation
+is distinct from the downloadable native ELF's full-history observer evidence.
+
+The release adds `container-provenance.json` and `container-provenance.sha256`.
+The core native assets and original `SHA256SUMS` remain unchanged. The image
+provenance JSON SHA-256 is `e6de815318e3a866014727d9a220c2e909640b48c7ec5ff35fb0293f09c53765`. Both supplemental
+assets were downloaded again and verified after publication.
 
 ## Published native assets
 

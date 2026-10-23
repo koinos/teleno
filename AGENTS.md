@@ -743,3 +743,9 @@ Native artifacts and exact OVH checks are published; see
 The working release branch resumes at `1.3.1-dev.0`; the original mixed LR2
 tree, earlier evidence/counters and operational producer remain outside this
 publication change. Koinos One receives documentation only, without a pin/package update.
+
+Native release handoff, 2026-10-23: `teleno-node-v1.3.0` freezes qualified
+source `2c11229267cff2f9ee39ed8e56ab70af391d85ce`, assembled on
+`codex/release-1.3.0`; that branch now continues at `1.3.1-dev.0`. Read the
+[publication record](https://github.com/koinos/teleno/blob/codex/release-1.3.0/docs/validation/native-1.3.0-publication.md).
+The original mixed LR2 checkout is preserved and is not this released snapshot.
