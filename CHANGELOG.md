@@ -4,6 +4,13 @@ All notable changes to the Teleno node runtime are documented in this file.
 Release tags use the form `teleno-node-v<version>`; the version source of
 truth is the `VERSION` file at the repository root.
 
+## [1.3.0-dev.2] - Unreleased
+
+Development continues after native 1.3.0-alpha.2. See the
+[verified alpha.2 publication](docs/validation/alpha-1.3.0-alpha.2-publication.md)
+for exact source, binary, container and normal-test identities. Issue 9 and
+whole-node producer qualification remain open.
+
 ## [1.3.0-alpha.2] - 2026-10-23
 
 This experimental native prerelease corrects two reproduced P2P lifetime
