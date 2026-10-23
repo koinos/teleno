@@ -41,6 +41,9 @@ Issue 9 remains open beyond the scoped M1 result.
 
 ### Fogata networking and diagnostics
 
+- Correct the gRPC source archive default for clean builds and migrate its
+  formerly missing cached URL. Keep the same SHA-256, SDK source and custom
+  archive overrides; no dependency version changes.
 - Serialize owned GossipSub publication and teardown on the SDK I/O runner,
   bound queued work and retire stopped generations. The pinned listener patch
   gives queued callbacks a weak owner across stop/restart. Include the three

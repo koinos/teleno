@@ -11,8 +11,14 @@ find_package(Threads REQUIRED)
 # Rebuild that one source file, then replace exactly its archive member in an
 # owned copy. Keep the installed SDK and all other archive members unchanged.
 set(TELENO_GRPC_ARCHIVE
-  "https://github.com/hunter-packages/grpc/archive/v1.31.0-p0.tar.gz"
+  "https://github.com/cpp-pm/grpc/archive/v1.31.0-p0.tar.gz"
   CACHE STRING "Pinned gRPC call-binding source archive (SHA256 enforced)")
+# Migrate only the formerly shipped missing default. Preserve operator-supplied
+# local archives and other locations; the archive hash is unchanged.
+if(TELENO_GRPC_ARCHIVE STREQUAL "https://github.com/hunter-packages/grpc/archive/v1.31.0-p0.tar.gz")
+  set(TELENO_GRPC_ARCHIVE "https://github.com/cpp-pm/grpc/archive/v1.31.0-p0.tar.gz"
+    CACHE STRING "Pinned gRPC call-binding source archive (SHA256 enforced)" FORCE)
+endif()
 set(TELENO_GRPC_BASE_ARCHIVE "" CACHE FILEPATH "Optional identified instrumented gRPC C++ archive")
 set(TELENO_GRPC_BASE_SHA256 "" CACHE STRING "Required SHA256 for an explicit gRPC base archive")
 set(_patch "${CMAKE_CURRENT_LIST_DIR}/ApplyGrpcCallBinding.py")
