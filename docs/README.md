@@ -9,6 +9,10 @@ checks pass.
 
 ## Pages
 
+- [Fogata P2P Lifetime Correction](validation/fogata-gossip-publication.md) -
+  reproduced publication and listener defects, isolated checks and limits.
+- [Native 1.3.0-alpha.2 Release Notes](releases/1.3.0-alpha.2.md) -
+  exact correction scope and experimental release boundaries.
 - [Native alpha publication qualification](validation/alpha-1.3.0-publication.md) -
   exact clean source, Linux executable, container, normal tests and remaining gates.
 - [Native 1.3.0-alpha.1 release notes](releases/1.3.0-alpha.1.md) -

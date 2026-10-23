@@ -972,6 +972,19 @@ if(KOINOS_BUILD_TESTS)
 
     target_link_libraries(koinos_libp2p_gossip_live_test PRIVATE
       koinos_p2p_lib)
+
+    # Cover publication from external threads during ingress, heartbeat and
+    # stop/restart without requiring a chain database or producer key.
+    add_executable(koinos_fogata_gossip_regression
+      ../tests/p2p/native_gossip_regression.cpp)
+    target_link_libraries(koinos_fogata_gossip_regression PRIVATE koinos_p2p_lib)
+    target_compile_options(koinos_fogata_gossip_regression PRIVATE -UNDEBUG)
+    foreach(_fogata_mode no-publish publish-heartbeat stop-race)
+      add_test(NAME koinos_fogata_gossip_${_fogata_mode}_test
+        COMMAND koinos_fogata_gossip_regression ${_fogata_mode})
+      set_tests_properties(koinos_fogata_gossip_${_fogata_mode}_test PROPERTIES
+        TIMEOUT 90 RESOURCE_LOCK fogata_gossip_listener)
+    endforeach()
   endif()
 
   # The repository's native tests use assert() for their executable checks.
