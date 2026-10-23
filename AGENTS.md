@@ -9,7 +9,7 @@
 - Expand only when asked or when necessary for safety or correctness. Do not shorten verbatim text or required document content.
 
 
-Last updated: 2026-10-16
+Last updated: 2026-10-23
 
 This file contains operational guidance for agents working in the standalone
 Teleno repository. Detailed architecture, operator procedures, validation
@@ -735,3 +735,11 @@ quota-exempt work remains explicit. Issue 9, LR2 and other requirements remain
 open. No Hetzner contact, deployment, mainnet transaction/signing, funds,
 commit, push, release or app submodule/binary update occurs. See
 `docs/validation/low-resource-lr2-m1-r15.md` for exact identities and proof.
+
+Native 1.3.0 publication checkpoint: the separate operator-authorized release
+integrates M1 and Fogata corrections at `2c11229267cff2f9ee39ed8e56ab70af391d85ce`.
+Native artifacts and exact OVH checks are published; see
+`docs/validation/native-1.3.0-publication.md` for identities and container status.
+The working release branch resumes at `1.3.1-dev.0`; the original mixed LR2
+tree, earlier evidence/counters and operational producer remain outside this
+publication change. Koinos One receives documentation only, without a pin/package update.

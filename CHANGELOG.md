@@ -4,6 +4,10 @@ All notable changes to the Teleno node runtime are documented in this file.
 Release tags use the form `teleno-node-v<version>`; the version source of
 truth is the `VERSION` file at the repository root.
 
+## [1.3.1-dev.0] - Unreleased
+
+No unreleased runtime changes.
+
 ## [1.3.0] - 2026-10-23
 
 This native release integrates the qualified M1 application-memory work and

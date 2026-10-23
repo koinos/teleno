@@ -9,6 +9,9 @@ checks pass.
 
 ## Pages
 
+- [Native 1.3.0 publication](validation/native-1.3.0-publication.md) - exact
+  native artifacts, tests, mainnet observer/reopen, measurements and scope.
+
 - [Native 1.3.0 release notes](releases/1.3.0.md) - M1 memory admission and
   Fogata P2P lifetime corrections, exact-build checks and remaining issue-9 gates.
 - [Fogata P2P Lifetime Correction](validation/fogata-gossip-publication.md) -

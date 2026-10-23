@@ -4,6 +4,9 @@ The native node can be bundled into packaged Koinos One releases or released as
 an independently installable runtime. Release work must preserve both the app
 build identity and the native binary identity.
 
+See the [1.3.0 publication record](validation/native-1.3.0-publication.md) for
+exact release identities, completed native checks and separate container status.
+
 ## Independent Version Source
 
 The **1.3.0** native source integrates M1 application-memory admission and

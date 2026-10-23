@@ -1,5 +1,17 @@
 # LR2 completion matrix and execution log
 
+## Native 1.3.0 publication — 2026-10-23
+
+The separately authorized clean release integrates M1 and the committed Fogata
+corrections at `2c11229267cff2f9ee39ed8e56ab70af391d85ce`. Its exact Linux
+ELF `9fcb043727b23ab05d9660701a61f369f9413a82ff646f94f2dbf830fb4de53f`
+passes 107 normal checks, four tool tests, both CLI checks, focused Fogata
+detectors/controls, one hour of mainnet mixed reads and clean same-database
+reopening. Both test observers finish stopped. Native artifacts are published;
+container publication is tracked separately in the
+[release record](native-1.3.0-publication.md). Earlier R15 and failed-run records
+below retain their identities and limits; issue 9 remains open beyond M1.
+
 ## Current M1 R15 Linux qualification — 2026-10-23
 
 **M1 complete for exact R15.** Source archive
