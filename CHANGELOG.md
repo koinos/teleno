@@ -4,11 +4,29 @@ All notable changes to the Teleno node runtime are documented in this file.
 Release tags use the form `teleno-node-v<version>`; the version source of
 truth is the `VERSION` file at the repository root.
 
-## [1.3.0-dev.1] - Unreleased
+## [1.3.0-dev.2] - Unreleased
 
-Development continues after native 1.3.0-alpha.1. See the
-[verified alpha publication](docs/validation/alpha-1.3.0-publication.md) for exact
-source, binary, container and validation identities. Issue 9 remains open.
+Development continues after native 1.3.0-alpha.2. See the
+[verified alpha.2 publication](docs/validation/alpha-1.3.0-alpha.2-publication.md)
+for exact source, binary, container and normal-test identities. Issue 9 and
+whole-node producer qualification remain open.
+
+## [1.3.0-alpha.2] - 2026-10-23
+
+This experimental native prerelease corrects two reproduced P2P lifetime
+defects: cross-thread GossipSub publication and a queued listener callback
+outliving its manager during stop/restart. Owned block and transaction gossip
+is queued on the SDK runner with finite pending-work limits; the pinned SDK
+listener callback acquires a weak owner before dispatch. Add three native
+regressions for publication, ingress and stop/restart.
+
+The original producer's 2026-10-21 heap-corruption abort has no retained core,
+so its exact corrupting instruction remains unknown. Isolated normal,
+ASan/UBSan and TSan checks and a one-hour private-network observer with clean
+same-state reopen pass for the identified diagnostic candidate. This does not
+qualify mainnet producer operation or close issue 9. See the
+[release notes](docs/releases/1.3.0-alpha.2.md) and
+[validation summary](docs/validation/fogata-gossip-publication.md).
 
 - Complete the scoped M1 memory-optimization gate for the exact R15 native
   development snapshot. Shared lifetime-owned admission covers native mempool,

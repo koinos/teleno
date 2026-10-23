@@ -72,6 +72,8 @@ public:
         size_t peer_snapshot_capacity_bytes = 4 * 1024 * 1024;
         detail::SdkAddressLimits sdk_address_limits;
         uint32_t sdk_metadata_collection_interval_ms = 60'000;
+	    size_t max_pending_gossip_bytes = 64 * 1024 * 1024;
+	    size_t max_pending_gossip_messages = 1024;
 	  };
 
   explicit Libp2pTransport( const Config& config );
@@ -138,6 +140,9 @@ private:
   void on_gossip_message( const std::string& topic, const std::string& data,
                            const libp2p::peer::PeerId& from );
 
+  /** Publish an owned payload on the single cpp-libp2p runner. */
+  void queue_gossip( const char* topic, std::string data );
+
   /** Convert between PeerID types. */
   static PeerID to_peer_id( const libp2p::peer::PeerId& pid );
 
@@ -153,6 +158,8 @@ private:
   std::unique_ptr< Libp2pRuntime > _runtime;
 	  std::shared_ptr< libp2p::Host > _host;
 	  std::shared_ptr< libp2p::protocol::gossip::Gossip > _gossip;
+	  struct GossipPublishContext;
+	  std::shared_ptr< GossipPublishContext > _gossip_publish_context;
 	  std::shared_ptr< libp2p::protocol::kademlia::Kademlia > _kademlia;
 
   // GossipSub subscriptions (RAII handles — cancel on destruction)

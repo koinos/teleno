@@ -353,6 +353,71 @@ struct Libp2pTransport::RpcClientContext
   std::shared_ptr< std::atomic< bool > > active;
 };
 
+struct Libp2pTransport::GossipPublishContext
+{
+  std::weak_ptr< boost::asio::io_context > io;
+  std::weak_ptr< libp2p::protocol::gossip::Gossip > gossip;
+  std::shared_ptr< std::atomic< bool > > active;
+  const size_t byte_limit;
+  const size_t message_limit;
+  std::mutex submit_mutex;
+  std::atomic< size_t > pending_bytes{ 0 };
+  std::atomic< size_t > pending_messages{ 0 };
+
+  GossipPublishContext( std::shared_ptr< boost::asio::io_context > runner,
+                        std::shared_ptr< libp2p::protocol::gossip::Gossip > publisher,
+                        std::shared_ptr< std::atomic< bool > > generation,
+                        size_t bytes_capacity, size_t messages_capacity )
+    : io( std::move( runner ) ), gossip( std::move( publisher ) ),
+      active( std::move( generation ) ), byte_limit( bytes_capacity ),
+      message_limit( messages_capacity )
+  {}
+
+  bool reserve( size_t bytes ) noexcept
+  {
+    if( bytes > byte_limit ) return false;
+    auto messages = pending_messages.load( std::memory_order_relaxed );
+    while( messages < message_limit )
+      if( pending_messages.compare_exchange_weak( messages, messages + 1,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_relaxed ) )
+      {
+        auto current = pending_bytes.load( std::memory_order_relaxed );
+        while( current <= byte_limit - bytes )
+          if( pending_bytes.compare_exchange_weak( current, current + bytes,
+                                                   std::memory_order_acq_rel,
+                                                   std::memory_order_relaxed ) )
+            return true;
+        pending_messages.fetch_sub( 1, std::memory_order_acq_rel );
+        return false;
+      }
+    return false;
+  }
+
+  struct Credit
+  {
+    std::shared_ptr< GossipPublishContext > owner;
+    size_t bytes;
+
+    Credit( std::shared_ptr< GossipPublishContext > context, size_t amount ) noexcept
+      : owner( std::move( context ) ), bytes( amount )
+    {}
+    Credit( const Credit& ) = delete;
+    Credit& operator=( const Credit& ) = delete;
+    Credit( Credit&& other ) noexcept
+      : owner( std::move( other.owner ) ), bytes( other.bytes )
+    { other.bytes = 0; }
+    ~Credit()
+    {
+      if( owner )
+      {
+        owner->pending_bytes.fetch_sub( bytes, std::memory_order_acq_rel );
+        owner->pending_messages.fetch_sub( 1, std::memory_order_acq_rel );
+      }
+    }
+  };
+};
+
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
@@ -365,6 +430,10 @@ Libp2pTransport::Libp2pTransport( const Config& config ) : _config( config ),
 {
   if(!config.sdk_metadata_collection_interval_ms)
     throw std::invalid_argument("SDK metadata collection interval must be positive");
+  if(!config.max_pending_gossip_bytes)
+    throw std::invalid_argument("Gossip publication capacity must be positive");
+  if(!config.max_pending_gossip_messages)
+    throw std::invalid_argument("Gossip publication message limit must be positive");
   _io = std::make_shared< boost::asio::io_context >();
 }
 
@@ -628,6 +697,12 @@ void Libp2pTransport::start()
   );
 
 	  _gossip->start();
+	  // Publish only through the SDK runner. The generation gate retires queued
+	  // work before GossipSub is stopped or a later start reuses the io_context.
+	  std::atomic_store( &_gossip_publish_context,
+	    std::make_shared< GossipPublishContext >( _io, _gossip, _rpc_read_active,
+	                                              _config.max_pending_gossip_bytes,
+	                                              _config.max_pending_gossip_messages ) );
 
 	  // Start host
 	  _host->start();
@@ -766,6 +841,13 @@ void Libp2pTransport::stop()
   if( _io->get_executor().running_in_this_thread() )
     throw std::logic_error( "Libp2pTransport::stop requires the external lifecycle owner" );
   if( !_running.exchange( false ) ) return;
+  auto publication = std::atomic_exchange( &_gossip_publish_context,
+                                           std::shared_ptr< GossipPublishContext >() );
+  if( publication )
+  {
+    std::lock_guard lock( publication->submit_mutex );
+    publication->active->store( false, std::memory_order_release );
+  }
   auto client = std::atomic_exchange( &_rpc_client_context, std::shared_ptr< RpcClientContext >() );
   if( client ) { client->dials->stop_accepting();client->calls->stop_accepting(); }
   _rpc_read_active->store( false, std::memory_order_release );
@@ -1057,49 +1139,80 @@ PeerSnapshot Libp2pTransport::known_peers() const
 // GossipSub publish
 // ---------------------------------------------------------------------------
 
+void Libp2pTransport::queue_gossip( const char* topic, std::string data )
+{
+  auto context = std::atomic_load( &_gossip_publish_context );
+  if( !context || !context->active->load( std::memory_order_acquire ) )
+    return;
+  auto io = context->io.lock();
+  if( !io ) return;
+
+  if( !context->reserve( data.size() ) )
+    return; // Local overload; the peer-sync path remains available.
+
+  GossipPublishContext::Credit credit( context, data.size() );
+  std::lock_guard lock( context->submit_mutex );
+  if( !context->active->load( std::memory_order_acquire ) ) return;
+  boost::asio::post( *io,
+    [credit = std::move( credit ), payload = std::move( data ), topic]() mutable {
+      auto context = credit.owner;
+      if( !context->active->load( std::memory_order_acquire ) ) return;
+      auto gossip = context->gossip.lock();
+      if( !gossip ) return;
+      try
+      {
+        gossip->publish( topic,
+          libp2p::Bytes( payload.begin(), payload.end() ) );
+      }
+      catch( const std::bad_alloc& ) {} // Optional gossip cannot consume a failed allocation.
+      catch( const std::exception& e )
+      {
+        LOG( warning ) << "[p2p/transport] Failed to publish gossip: " << e.what();
+      }
+      catch( ... )
+      {
+        LOG( warning ) << "[p2p/transport] Failed to publish gossip: unknown exception";
+      }
+    } );
+}
+
 void Libp2pTransport::publish_block( const protocol::block& block )
 {
-  if( !_gossip || !_running )
-    return;
-
-  std::string data;
-  if( block.SerializeToString( &data ) )
+  try
   {
-    try
-    {
-      _gossip->publish( BLOCK_TOPIC, libp2p::Bytes( data.begin(), data.end() ) );
-    }
-    catch( const std::exception& e )
-    {
-      LOG( warning ) << "[p2p/transport] Failed to publish block gossip: " << e.what();
-    }
-    catch( ... )
-    {
-      LOG( warning ) << "[p2p/transport] Failed to publish block gossip: unknown exception";
-    }
+    if( !std::atomic_load( &_gossip_publish_context ) ) return;
+    std::string data;
+    if( block.SerializeToString( &data ) )
+      queue_gossip( BLOCK_TOPIC, std::move( data ) );
+  }
+  catch( const std::bad_alloc& ) {}
+  catch( const std::exception& e )
+  {
+    LOG( warning ) << "[p2p/transport] Failed to queue block gossip: " << e.what();
+  }
+  catch( ... )
+  {
+    LOG( warning ) << "[p2p/transport] Failed to queue block gossip: unknown exception";
   }
 }
 
 void Libp2pTransport::publish_transaction( const protocol::transaction& tx )
 {
-  if( !_gossip || !_running )
-    return;
-
-  std::string data;
-  if( tx.SerializeToString( &data ) )
+  try
   {
-    try
-    {
-      _gossip->publish( TRANSACTION_TOPIC, libp2p::Bytes( data.begin(), data.end() ) );
-    }
-    catch( const std::exception& e )
-    {
-      LOG( warning ) << "[p2p/transport] Failed to publish transaction gossip: " << e.what();
-    }
-    catch( ... )
-    {
-      LOG( warning ) << "[p2p/transport] Failed to publish transaction gossip: unknown exception";
-    }
+    if( !std::atomic_load( &_gossip_publish_context ) ) return;
+    std::string data;
+    if( tx.SerializeToString( &data ) )
+      queue_gossip( TRANSACTION_TOPIC, std::move( data ) );
+  }
+  catch( const std::bad_alloc& ) {}
+  catch( const std::exception& e )
+  {
+    LOG( warning ) << "[p2p/transport] Failed to queue transaction gossip: " << e.what();
+  }
+  catch( ... )
+  {
+    LOG( warning ) << "[p2p/transport] Failed to queue transaction gossip: unknown exception";
   }
 }
 

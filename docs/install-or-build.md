@@ -17,12 +17,10 @@ Build the native node and its C++ dependency stack:
 ./scripts/build-cpp-libp2p-koinos.sh
 ```
 
-The script applies `cmake/cpp-libp2p-listener-lifetime.patch` after the pinned
-cpp-libp2p compatibility patch. It gives asynchronous inbound-listener callbacks
-a weak owner, so a callback queued across transport stop/restart can safely
-observe that its listener manager has been destroyed. See the
-[Fogata heap-corruption investigation](validation/fogata-producer-heap-corruption-2026-10-21.md)
-for the reproduced lifecycle fault and current qualification status.
+The build applies `cmake/cpp-libp2p-listener-lifetime.patch` after the pinned
+cpp-libp2p compatibility patch. The listener callback acquires a weak owner
+before dispatch so a queued callback cannot use a destroyed manager during
+stop/restart. See the [P2P lifetime validation](validation/fogata-gossip-publication.md).
 
 When `build/` already exists, a focused rebuild is faster:
 

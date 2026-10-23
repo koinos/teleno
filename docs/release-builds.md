@@ -6,11 +6,12 @@ build identity and the native binary identity.
 
 ## Independent Version Source
 
-The **1.3.0-alpha.1** native prerelease publishes the experimental LR2 development
-snapshot with [detailed updates and qualification limits](releases/1.3.0-alpha.1.md).
-Its explicit operator authorization permits an alpha while the broader issue-9
-qualification remains open. Preserve those limitations in release assets/notes;
-do not describe the alpha as a stable or fully qualified low-resource release.
+The **1.3.0-alpha.2** native prerelease carries the experimental
+[1.3.0-alpha.1 baseline](releases/1.3.0-alpha.1.md) and the
+[Fogata P2P lifetime corrections](releases/1.3.0-alpha.2.md). The broader
+issue-9 qualification remains open. Preserve those limitations in release
+assets/notes; do not describe the alpha as a stable or fully qualified
+low-resource or mainnet producer release.
 
 The native runtime version is independent from the Koinos One desktop app
 version. The source of truth is:

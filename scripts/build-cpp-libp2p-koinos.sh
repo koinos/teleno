@@ -31,6 +31,7 @@ LIBSSH_INSTALL_DIR="${LIBSSH_INSTALL_DIR:-$DEPS_ROOT/libssh-static-$LIBSSH_VERSI
 CPP_LIBP2P_TAG="${CPP_LIBP2P_TAG:-v0.1.37}"
 CPP_LIBP2P_REPO="${CPP_LIBP2P_REPO:-https://github.com/libp2p/cpp-libp2p.git}"
 CPP_LIBP2P_PATCH="${CPP_LIBP2P_PATCH:-$NODE_DIR/cmake/cpp-libp2p-koinos.patch}"
+CPP_LIBP2P_LISTENER_PATCH="${CPP_LIBP2P_LISTENER_PATCH:-$NODE_DIR/cmake/cpp-libp2p-listener-lifetime.patch}"
 
 export HUNTER_ROOT
 export CMAKE_POLICY_VERSION_MINIMUM="${CMAKE_POLICY_VERSION_MINIMUM:-3.5}"
@@ -193,6 +194,7 @@ prepare_final_libssh_if_needed() {
 
 require_file "$NODE_DIR/CMakeLists.hunter.txt"
 require_file "$CPP_LIBP2P_PATCH"
+require_file "$CPP_LIBP2P_LISTENER_PATCH"
 require_file "$ROOT_DIR/scripts/build-rocksdb-zstd.sh"
 require_file "$ROOT_DIR/scripts/build-libssh-static.sh"
 
@@ -296,6 +298,14 @@ elif git -C "$CPP_LIBP2P_SOURCE_DIR" apply --reverse --check "$CPP_LIBP2P_PATCH"
   echo "cpp-libp2p compatibility patch is already applied"
 else
   echo "cpp-libp2p compatibility patch does not apply cleanly" >&2
+  exit 1
+fi
+if git -C "$CPP_LIBP2P_SOURCE_DIR" apply --check "$CPP_LIBP2P_LISTENER_PATCH"; then
+  git -C "$CPP_LIBP2P_SOURCE_DIR" apply "$CPP_LIBP2P_LISTENER_PATCH"
+elif git -C "$CPP_LIBP2P_SOURCE_DIR" apply --reverse --check "$CPP_LIBP2P_LISTENER_PATCH"; then
+  echo "cpp-libp2p listener lifetime patch is already applied"
+else
+  echo "cpp-libp2p listener lifetime patch does not apply cleanly" >&2
   exit 1
 fi
 
